@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-/root/hyperliquid-mm-bot-complete/scripts/guard_integrity.sh || { echo "guard failed"; exit 1; }
+/root/hyperliquid-mm-bot-complete/scripts/guard_integrity.sh || { echo "❌ Guard failed"; exit 1; }
 set -euo pipefail
 
 # integrity guard
