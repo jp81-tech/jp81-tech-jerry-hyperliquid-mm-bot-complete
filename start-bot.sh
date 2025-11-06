@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# integrity guard
+./scripts/guard_integrity.sh || exit 1
+
 cd "$(dirname "$0")"
 set -a
 . ./.env
