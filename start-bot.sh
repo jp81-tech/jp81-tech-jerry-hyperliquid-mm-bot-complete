@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
+/root/hyperliquid-mm-bot-complete/scripts/guard_integrity.sh || { echo "guard failed"; exit 1; }
 set -euo pipefail
 
 # integrity guard
-./scripts/guard_integrity.sh || exit 1
 
 cd "$(dirname "$0")"
 set -a

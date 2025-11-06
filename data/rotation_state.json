@@ -1,9 +1,9 @@
 {
-  "lastUpdate": 1762426918156,
+  "lastUpdate": 1762456190732,
   "currentPairs": [
+    "XPL",
     "ZEC",
-    "ASTER",
-    "TRUMP"
+    "PUMP"
   ],
   "history": [
     {
@@ -595,6 +595,42 @@
         "TRUMP"
       ],
       "reason": "Pairs dropped: ZK"
+    },
+    {
+      "ts": 1762428872883,
+      "pairs": [
+        "ZEC",
+        "ASTER",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: TRUMP"
+    },
+    {
+      "ts": 1762443313326,
+      "pairs": [
+        "XPL",
+        "ZEC",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: ASTER, ZK"
+    },
+    {
+      "ts": 1762453351210,
+      "pairs": [
+        "XPL",
+        "PUMP",
+        "HYPE"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762456190732,
+      "pairs": [
+        "XPL",
+        "ZEC",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: HYPE"
     }
   ]
 }

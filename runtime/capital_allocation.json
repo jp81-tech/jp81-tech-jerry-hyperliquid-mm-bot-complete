@@ -1,0 +1,38 @@
+{
+  "timestamp": "2025-11-06T16:41:49.511Z",
+  "totalCapital": 1700,
+  "pairsCount": 6,
+  "perPairAllocation": 283,
+  "pairs": [
+    {
+      "symbol": "HMSTR",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    },
+    {
+      "symbol": "kPEPE",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    },
+    {
+      "symbol": "NOT",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    },
+    {
+      "symbol": "BOME",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    },
+    {
+      "symbol": "MEME",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    },
+    {
+      "symbol": "BLAST",
+      "allocation": 283,
+      "percentage": 16.666666666666668
+    }
+  ]
+}

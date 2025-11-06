@@ -3,7 +3,7 @@
     "pair": "BTC",
     "realizedVol5m": 0.015,
     "spreadBps": -0.1,
-    "topDepthUsd": 816152,
+    "topDepthUsd": 293999,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -12,7 +12,7 @@
     "pair": "ETH",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 1775795,
+    "topDepthUsd": 17294,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -20,8 +20,8 @@
   {
     "pair": "ATOM",
     "realizedVol5m": 0.015,
-    "spreadBps": -6,
-    "topDepthUsd": 7454,
+    "spreadBps": -2.3,
+    "topDepthUsd": 2092,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -29,8 +29,8 @@
   {
     "pair": "DYDX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 1051,
+    "spreadBps": -0.4,
+    "topDepthUsd": 737,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -39,7 +39,7 @@
     "pair": "SOL",
     "realizedVol5m": 0.015,
     "spreadBps": -0.6,
-    "topDepthUsd": 99501,
+    "topDepthUsd": 101508,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -47,8 +47,8 @@
   {
     "pair": "AVAX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 16387,
+    "spreadBps": -1.3,
+    "topDepthUsd": 11125,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -56,8 +56,8 @@
   {
     "pair": "BNB",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 21824,
+    "spreadBps": -0.1,
+    "topDepthUsd": 6750,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -65,8 +65,8 @@
   {
     "pair": "APE",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.2,
-    "topDepthUsd": 685,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2468,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -74,8 +74,8 @@
   {
     "pair": "OP",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 632,
+    "spreadBps": -2,
+    "topDepthUsd": 825,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -83,8 +83,8 @@
   {
     "pair": "LTC",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 1332,
+    "spreadBps": -0.1,
+    "topDepthUsd": 1335,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -92,8 +92,8 @@
   {
     "pair": "ARB",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 5452,
+    "spreadBps": -2,
+    "topDepthUsd": 1582,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -102,7 +102,7 @@
     "pair": "DOGE",
     "realizedVol5m": 0.015,
     "spreadBps": -0.6,
-    "topDepthUsd": 107998,
+    "topDepthUsd": 12620,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -110,8 +110,8 @@
   {
     "pair": "INJ",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2688,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1666,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -120,7 +120,7 @@
     "pair": "SUI",
     "realizedVol5m": 0.015,
     "spreadBps": -1,
-    "topDepthUsd": 2463,
+    "topDepthUsd": 6738,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -128,8 +128,8 @@
   {
     "pair": "kPEPE",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.7,
-    "topDepthUsd": 64430,
+    "spreadBps": -1.9,
+    "topDepthUsd": 13798,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -138,7 +138,7 @@
     "pair": "CRV",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 674,
+    "topDepthUsd": 370,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -146,8 +146,8 @@
   {
     "pair": "LDO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.2,
-    "topDepthUsd": 4060,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1384,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -155,8 +155,8 @@
   {
     "pair": "LINK",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 2180,
+    "spreadBps": -1.4,
+    "topDepthUsd": 10118,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -164,8 +164,8 @@
   {
     "pair": "STX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 1742,
+    "spreadBps": -2,
+    "topDepthUsd": 1608,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -174,7 +174,7 @@
     "pair": "CFX",
     "realizedVol5m": 0.015,
     "spreadBps": -0.1,
-    "topDepthUsd": 2009,
+    "topDepthUsd": 1960,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -182,8 +182,8 @@
   {
     "pair": "GMX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 2003,
+    "spreadBps": -1.6,
+    "topDepthUsd": 3706,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -192,7 +192,7 @@
     "pair": "SNX",
     "realizedVol5m": 0.015,
     "spreadBps": -0.1,
-    "topDepthUsd": 402,
+    "topDepthUsd": 342,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -200,8 +200,8 @@
   {
     "pair": "XRP",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 644,
+    "spreadBps": -0.9,
+    "topDepthUsd": 2801,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -210,7 +210,7 @@
     "pair": "BCH",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 2673,
+    "topDepthUsd": 1540,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -218,8 +218,8 @@
   {
     "pair": "APT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 4114,
+    "spreadBps": -1.9,
+    "topDepthUsd": 1364,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -228,7 +228,7 @@
     "pair": "AAVE",
     "realizedVol5m": 0.015,
     "spreadBps": -0.5,
-    "topDepthUsd": 6657,
+    "topDepthUsd": 1426,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -237,7 +237,7 @@
     "pair": "COMP",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 1786,
+    "topDepthUsd": 586,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -245,8 +245,8 @@
   {
     "pair": "WLD",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.1,
-    "topDepthUsd": 2708,
+    "spreadBps": -3,
+    "topDepthUsd": 4320,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -254,8 +254,8 @@
   {
     "pair": "FXS",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.6,
-    "topDepthUsd": 1462,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1694,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -263,8 +263,8 @@
   {
     "pair": "YGG",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 2512,
+    "spreadBps": -1,
+    "topDepthUsd": 367,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -272,8 +272,8 @@
   {
     "pair": "TRX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 4120,
+    "spreadBps": -0.4,
+    "topDepthUsd": 4149,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -282,7 +282,7 @@
     "pair": "kSHIB",
     "realizedVol5m": 0.015,
     "spreadBps": -1.1,
-    "topDepthUsd": 12876,
+    "topDepthUsd": 3968,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -290,8 +290,8 @@
   {
     "pair": "UNI",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 1054,
+    "spreadBps": -0.6,
+    "topDepthUsd": 300,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -299,8 +299,8 @@
   {
     "pair": "SEI",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.4,
-    "topDepthUsd": 826,
+    "spreadBps": -1.3,
+    "topDepthUsd": 2553,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -308,8 +308,8 @@
   {
     "pair": "RUNE",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 1669,
+    "spreadBps": -1.8,
+    "topDepthUsd": 203,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -317,8 +317,8 @@
   {
     "pair": "ZRO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.4,
-    "topDepthUsd": 3926,
+    "spreadBps": -2.1,
+    "topDepthUsd": 1019,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -326,8 +326,8 @@
   {
     "pair": "DOT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 2420,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1072,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -335,8 +335,8 @@
   {
     "pair": "BANANA",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.9,
-    "topDepthUsd": 2534,
+    "spreadBps": -1.8,
+    "topDepthUsd": 584,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -344,8 +344,8 @@
   {
     "pair": "TRB",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 2709,
+    "spreadBps": -1.8,
+    "topDepthUsd": 1766,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -354,7 +354,7 @@
     "pair": "FTT",
     "realizedVol5m": 0.015,
     "spreadBps": -0.1,
-    "topDepthUsd": 134,
+    "topDepthUsd": 600,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -362,8 +362,8 @@
   {
     "pair": "ARK",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 902,
+    "spreadBps": -3.2,
+    "topDepthUsd": 2544,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -372,7 +372,7 @@
     "pair": "BIGTIME",
     "realizedVol5m": 0.015,
     "spreadBps": -0.4,
-    "topDepthUsd": 1537,
+    "topDepthUsd": 2024,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -380,8 +380,8 @@
   {
     "pair": "KAS",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2054,
+    "spreadBps": -1.1,
+    "topDepthUsd": 560,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -389,8 +389,8 @@
   {
     "pair": "BLUR",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2002,
+    "spreadBps": -1,
+    "topDepthUsd": 2159,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -398,8 +398,8 @@
   {
     "pair": "TIA",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 3249,
+    "spreadBps": -1.3,
+    "topDepthUsd": 2183,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -407,8 +407,8 @@
   {
     "pair": "BSV",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 142,
+    "spreadBps": -5.1,
+    "topDepthUsd": 65,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -417,7 +417,7 @@
     "pair": "ADA",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 627,
+    "topDepthUsd": 2400,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -426,7 +426,7 @@
     "pair": "TON",
     "realizedVol5m": 0.015,
     "spreadBps": -0.5,
-    "topDepthUsd": 2816,
+    "topDepthUsd": 2908,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -434,8 +434,8 @@
   {
     "pair": "MINA",
     "realizedVol5m": 0.015,
-    "spreadBps": -8.1,
-    "topDepthUsd": 2688,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2787,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -443,8 +443,8 @@
   {
     "pair": "POLYX",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.2,
-    "topDepthUsd": 4660,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1604,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -452,8 +452,8 @@
   {
     "pair": "GAS",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 158,
+    "spreadBps": -0.4,
+    "topDepthUsd": 188,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -461,8 +461,8 @@
   {
     "pair": "PENDLE",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 1355,
+    "spreadBps": -1.2,
+    "topDepthUsd": 1643,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -470,8 +470,8 @@
   {
     "pair": "FET",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.7,
-    "topDepthUsd": 20564,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1281,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -479,8 +479,8 @@
   {
     "pair": "NEAR",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 12355,
+    "spreadBps": -1.5,
+    "topDepthUsd": 1993,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -488,8 +488,8 @@
   {
     "pair": "MEME",
     "realizedVol5m": 0.015,
-    "spreadBps": -7,
-    "topDepthUsd": 6454,
+    "spreadBps": -7.3,
+    "topDepthUsd": 9603,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -497,8 +497,8 @@
   {
     "pair": "ORDI",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 2340,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1849,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -506,8 +506,8 @@
   {
     "pair": "NEO",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2049,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1736,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -515,8 +515,8 @@
   {
     "pair": "ZEN",
     "realizedVol5m": 0.015,
-    "spreadBps": -7,
-    "topDepthUsd": 1585,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1296,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -524,8 +524,8 @@
   {
     "pair": "FIL",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 2522,
+    "spreadBps": -1.4,
+    "topDepthUsd": 3924,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -533,8 +533,8 @@
   {
     "pair": "PYTH",
     "realizedVol5m": 0.015,
-    "spreadBps": -1,
-    "topDepthUsd": 1384,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1740,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -542,8 +542,8 @@
   {
     "pair": "SUSHI",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.8,
-    "topDepthUsd": 3498,
+    "spreadBps": -0.5,
+    "topDepthUsd": 935,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -551,8 +551,8 @@
   {
     "pair": "IMX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 4079,
+    "spreadBps": -2,
+    "topDepthUsd": 2056,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -560,8 +560,8 @@
   {
     "pair": "kBONK",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.4,
-    "topDepthUsd": 12648,
+    "spreadBps": -0.9,
+    "topDepthUsd": 4292,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -569,8 +569,8 @@
   {
     "pair": "GMT",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.8,
-    "topDepthUsd": 7429,
+    "spreadBps": -2.3,
+    "topDepthUsd": 230,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -578,8 +578,8 @@
   {
     "pair": "SUPER",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 1829,
+    "spreadBps": -1.7,
+    "topDepthUsd": 3455,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -588,7 +588,7 @@
     "pair": "USTC",
     "realizedVol5m": 0.015,
     "spreadBps": -1.5,
-    "topDepthUsd": 1673,
+    "topDepthUsd": 3117,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -597,7 +597,7 @@
     "pair": "JUP",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 2176,
+    "topDepthUsd": 1946,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -605,8 +605,8 @@
   {
     "pair": "kLUNC",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 2682,
+    "spreadBps": -3.7,
+    "topDepthUsd": 2212,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -614,8 +614,8 @@
   {
     "pair": "RSR",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.3,
-    "topDepthUsd": 10672,
+    "spreadBps": -2.4,
+    "topDepthUsd": 2060,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -623,8 +623,8 @@
   {
     "pair": "GALA",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.1,
-    "topDepthUsd": 2120,
+    "spreadBps": -1.2,
+    "topDepthUsd": 2165,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -632,8 +632,8 @@
   {
     "pair": "JTO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.1,
-    "topDepthUsd": 1587,
+    "spreadBps": -2.6,
+    "topDepthUsd": 1185,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -641,8 +641,8 @@
   {
     "pair": "ACE",
     "realizedVol5m": 0.015,
-    "spreadBps": -4,
-    "topDepthUsd": 11047,
+    "spreadBps": -4.1,
+    "topDepthUsd": 699,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -650,8 +650,8 @@
   {
     "pair": "MAV",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 1745,
+    "spreadBps": -0.4,
+    "topDepthUsd": 539,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -659,8 +659,8 @@
   {
     "pair": "WIF",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 1629,
+    "spreadBps": -1.2,
+    "topDepthUsd": 1573,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -668,8 +668,8 @@
   {
     "pair": "CAKE",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 2147,
+    "spreadBps": -1.4,
+    "topDepthUsd": 993,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -677,8 +677,8 @@
   {
     "pair": "PEOPLE",
     "realizedVol5m": 0.015,
-    "spreadBps": -1,
-    "topDepthUsd": 330,
+    "spreadBps": -8.3,
+    "topDepthUsd": 2069,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -687,7 +687,7 @@
     "pair": "ENS",
     "realizedVol5m": 0.015,
     "spreadBps": -0.8,
-    "topDepthUsd": 2788,
+    "topDepthUsd": 1515,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -696,7 +696,7 @@
     "pair": "ETC",
     "realizedVol5m": 0.015,
     "spreadBps": -0.7,
-    "topDepthUsd": 2094,
+    "topDepthUsd": 1916,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -704,8 +704,8 @@
   {
     "pair": "XAI",
     "realizedVol5m": 0.015,
-    "spreadBps": -4.7,
-    "topDepthUsd": 3242,
+    "spreadBps": -5,
+    "topDepthUsd": 4505,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -713,8 +713,8 @@
   {
     "pair": "MANTA",
     "realizedVol5m": 0.015,
-    "spreadBps": -7.3,
-    "topDepthUsd": 6144,
+    "spreadBps": -2.2,
+    "topDepthUsd": 4729,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -722,8 +722,8 @@
   {
     "pair": "UMA",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2411,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1290,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -731,8 +731,8 @@
   {
     "pair": "ONDO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.5,
-    "topDepthUsd": 9349,
+    "spreadBps": -1.6,
+    "topDepthUsd": 1230,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -740,8 +740,8 @@
   {
     "pair": "ALT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 1912,
+    "spreadBps": -1.3,
+    "topDepthUsd": 624,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -750,7 +750,7 @@
     "pair": "ZETA",
     "realizedVol5m": 0.015,
     "spreadBps": -1,
-    "topDepthUsd": 1377,
+    "topDepthUsd": 950,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -758,8 +758,8 @@
   {
     "pair": "DYM",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.2,
-    "topDepthUsd": 2223,
+    "spreadBps": -1.3,
+    "topDepthUsd": 1800,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -767,8 +767,8 @@
   {
     "pair": "MAVIA",
     "realizedVol5m": 0.015,
-    "spreadBps": -1,
-    "topDepthUsd": 281,
+    "spreadBps": -4.6,
+    "topDepthUsd": 1043,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -776,8 +776,8 @@
   {
     "pair": "W",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.7,
-    "topDepthUsd": 2376,
+    "spreadBps": -1.8,
+    "topDepthUsd": 2505,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -785,8 +785,8 @@
   {
     "pair": "STRK",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 2104,
+    "spreadBps": -4.9,
+    "topDepthUsd": 155,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -794,8 +794,8 @@
   {
     "pair": "TAO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.3,
-    "topDepthUsd": 2025,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2411,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -804,7 +804,7 @@
     "pair": "AR",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 867,
+    "topDepthUsd": 1405,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -812,8 +812,8 @@
   {
     "pair": "kFLOKI",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 781,
+    "spreadBps": -1.4,
+    "topDepthUsd": 3132,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -821,8 +821,8 @@
   {
     "pair": "BOME",
     "realizedVol5m": 0.015,
-    "spreadBps": -12,
-    "topDepthUsd": 16073,
+    "spreadBps": -12.8,
+    "topDepthUsd": 2248,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -830,8 +830,8 @@
   {
     "pair": "ETHFI",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 2554,
+    "spreadBps": -1,
+    "topDepthUsd": 1231,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -840,7 +840,7 @@
     "pair": "ENA",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 1845,
+    "topDepthUsd": 1208,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -848,8 +848,8 @@
   {
     "pair": "MNT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 9288,
+    "spreadBps": -2.5,
+    "topDepthUsd": 1502,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -857,8 +857,8 @@
   {
     "pair": "TNSR",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.1,
-    "topDepthUsd": 11520,
+    "spreadBps": -2.3,
+    "topDepthUsd": 337,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -866,8 +866,8 @@
   {
     "pair": "SAGA",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.2,
-    "topDepthUsd": 5888,
+    "spreadBps": -4.9,
+    "topDepthUsd": 2975,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -875,8 +875,8 @@
   {
     "pair": "MERL",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 2033,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1042,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -885,7 +885,7 @@
     "pair": "HBAR",
     "realizedVol5m": 0.015,
     "spreadBps": -0.6,
-    "topDepthUsd": 1938,
+    "topDepthUsd": 1423,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -893,8 +893,8 @@
   {
     "pair": "POPCAT",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.6,
-    "topDepthUsd": 1368,
+    "spreadBps": -0.8,
+    "topDepthUsd": 426,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -902,8 +902,8 @@
   {
     "pair": "EIGEN",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.6,
-    "topDepthUsd": 8190,
+    "spreadBps": -1.4,
+    "topDepthUsd": 2081,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -911,8 +911,8 @@
   {
     "pair": "REZ",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.3,
-    "topDepthUsd": 2358,
+    "spreadBps": -7,
+    "topDepthUsd": 5215,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -920,8 +920,8 @@
   {
     "pair": "NOT",
     "realizedVol5m": 0.015,
-    "spreadBps": -15,
-    "topDepthUsd": 21354,
+    "spreadBps": -16.1,
+    "topDepthUsd": 6385,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -929,8 +929,8 @@
   {
     "pair": "TURBO",
     "realizedVol5m": 0.015,
-    "spreadBps": -5.2,
-    "topDepthUsd": 11650,
+    "spreadBps": -5.6,
+    "topDepthUsd": 2990,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -938,8 +938,8 @@
   {
     "pair": "BRETT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 1998,
+    "spreadBps": -0.5,
+    "topDepthUsd": 2419,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -948,7 +948,7 @@
     "pair": "IO",
     "realizedVol5m": 0.015,
     "spreadBps": -0.4,
-    "topDepthUsd": 2592,
+    "topDepthUsd": 1999,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -956,8 +956,8 @@
   {
     "pair": "ZK",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 2141,
+    "spreadBps": -2.4,
+    "topDepthUsd": 280,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -965,8 +965,8 @@
   {
     "pair": "BLAST",
     "realizedVol5m": 0.015,
-    "spreadBps": -8.8,
-    "topDepthUsd": 8172,
+    "spreadBps": -8.9,
+    "topDepthUsd": 9642,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -974,8 +974,8 @@
   {
     "pair": "MEW",
     "realizedVol5m": 0.015,
-    "spreadBps": -6.7,
-    "topDepthUsd": 15073,
+    "spreadBps": -7.1,
+    "topDepthUsd": 4602,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -984,7 +984,7 @@
     "pair": "RENDER",
     "realizedVol5m": 0.015,
     "spreadBps": -0.5,
-    "topDepthUsd": 1854,
+    "topDepthUsd": 1934,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -992,8 +992,8 @@
   {
     "pair": "POL",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 2545,
+    "spreadBps": -4.3,
+    "topDepthUsd": 2449,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1001,8 +1001,8 @@
   {
     "pair": "CELO",
     "realizedVol5m": 0.015,
-    "spreadBps": -4.9,
-    "topDepthUsd": 5554,
+    "spreadBps": -3.2,
+    "topDepthUsd": 3342,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1010,8 +1010,8 @@
   {
     "pair": "HMSTR",
     "realizedVol5m": 0.015,
-    "spreadBps": -28.8,
-    "topDepthUsd": 10362,
+    "spreadBps": -32.8,
+    "topDepthUsd": 32459,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1019,8 +1019,8 @@
   {
     "pair": "SCR",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 1828,
+    "spreadBps": -4.7,
+    "topDepthUsd": 5426,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1028,8 +1028,8 @@
   {
     "pair": "kNEIRO",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 1673,
+    "spreadBps": -0.7,
+    "topDepthUsd": 880,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1037,8 +1037,8 @@
   {
     "pair": "GOAT",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.4,
-    "topDepthUsd": 5049,
+    "spreadBps": -0.2,
+    "topDepthUsd": 1170,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1046,8 +1046,8 @@
   {
     "pair": "MOODENG",
     "realizedVol5m": 0.015,
-    "spreadBps": -1,
-    "topDepthUsd": 390,
+    "spreadBps": -0.1,
+    "topDepthUsd": 1999,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1055,8 +1055,8 @@
   {
     "pair": "GRASS",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 616,
+    "spreadBps": -3,
+    "topDepthUsd": 595,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1064,8 +1064,8 @@
   {
     "pair": "PURR",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 385,
+    "spreadBps": -2,
+    "topDepthUsd": 596,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1073,8 +1073,8 @@
   {
     "pair": "PNUT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 4768,
+    "spreadBps": -1.9,
+    "topDepthUsd": 2421,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1082,8 +1082,8 @@
   {
     "pair": "XLM",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 1150,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1694,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1091,8 +1091,8 @@
   {
     "pair": "CHILLGUY",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 810,
+    "spreadBps": -7.2,
+    "topDepthUsd": 202,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1100,8 +1100,8 @@
   {
     "pair": "SAND",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.3,
-    "topDepthUsd": 2276,
+    "spreadBps": -1.1,
+    "topDepthUsd": 2798,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1110,7 +1110,7 @@
     "pair": "IOTA",
     "realizedVol5m": 0.015,
     "spreadBps": -0.8,
-    "topDepthUsd": 1352,
+    "topDepthUsd": 1257,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1118,8 +1118,8 @@
   {
     "pair": "ALGO",
     "realizedVol5m": 0.015,
-    "spreadBps": -5,
-    "topDepthUsd": 3590,
+    "spreadBps": -1.9,
+    "topDepthUsd": 2775,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1127,8 +1127,8 @@
   {
     "pair": "HYPE",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 1785,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2626,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1136,8 +1136,8 @@
   {
     "pair": "ME",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2035,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1865,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1145,8 +1145,8 @@
   {
     "pair": "MOVE",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.6,
-    "topDepthUsd": 1739,
+    "spreadBps": -2.5,
+    "topDepthUsd": 6454,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1154,8 +1154,8 @@
   {
     "pair": "VIRTUAL",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.2,
-    "topDepthUsd": 1327,
+    "spreadBps": -5.1,
+    "topDepthUsd": 9547,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1164,7 +1164,7 @@
     "pair": "PENGU",
     "realizedVol5m": 0.015,
     "spreadBps": -0.7,
-    "topDepthUsd": 2364,
+    "topDepthUsd": 1255,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1172,8 +1172,8 @@
   {
     "pair": "USUAL",
     "realizedVol5m": 0.015,
-    "spreadBps": -5.9,
-    "topDepthUsd": 1727,
+    "spreadBps": -3.2,
+    "topDepthUsd": 332,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1181,17 +1181,8 @@
   {
     "pair": "FARTCOIN",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.3,
-    "topDepthUsd": 1920,
-    "takerFeeBps": 6,
-    "smartFlow": 0.05,
-    "trades1h": 100
-  },
-  {
-    "pair": "AI16Z",
-    "realizedVol5m": 0.015,
-    "spreadBps": -18.7,
-    "topDepthUsd": 394,
+    "spreadBps": -2.4,
+    "topDepthUsd": 343,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1199,8 +1190,8 @@
   {
     "pair": "AIXBT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 538,
+    "spreadBps": -0.5,
+    "topDepthUsd": 988,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1208,8 +1199,8 @@
   {
     "pair": "ZEREBRO",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 823,
+    "spreadBps": -0.9,
+    "topDepthUsd": 747,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1217,8 +1208,8 @@
   {
     "pair": "BIO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.2,
-    "topDepthUsd": 2741,
+    "spreadBps": -0.1,
+    "topDepthUsd": 1322,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1227,7 +1218,7 @@
     "pair": "GRIFFAIN",
     "realizedVol5m": 0.015,
     "spreadBps": -0.6,
-    "topDepthUsd": 440,
+    "topDepthUsd": 1884,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1235,8 +1226,8 @@
   {
     "pair": "SPX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 1004,
+    "spreadBps": -0.8,
+    "topDepthUsd": 235,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1244,8 +1235,8 @@
   {
     "pair": "S",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 2981,
+    "spreadBps": -2.5,
+    "topDepthUsd": 851,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1253,8 +1244,8 @@
   {
     "pair": "MORPHO",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.8,
-    "topDepthUsd": 4749,
+    "spreadBps": -1.2,
+    "topDepthUsd": 1142,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1262,8 +1253,8 @@
   {
     "pair": "TRUMP",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.2,
-    "topDepthUsd": 84868,
+    "spreadBps": -2.7,
+    "topDepthUsd": 1807,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1271,8 +1262,8 @@
   {
     "pair": "MELANIA",
     "realizedVol5m": 0.015,
-    "spreadBps": -1,
-    "topDepthUsd": 1510,
+    "spreadBps": -2,
+    "topDepthUsd": 674,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1280,8 +1271,8 @@
   {
     "pair": "ANIME",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.4,
-    "topDepthUsd": 1530,
+    "spreadBps": -1.5,
+    "topDepthUsd": 1618,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1290,7 +1281,7 @@
     "pair": "VINE",
     "realizedVol5m": 0.015,
     "spreadBps": -0.5,
-    "topDepthUsd": 279,
+    "topDepthUsd": 1750,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1298,8 +1289,8 @@
   {
     "pair": "VVV",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.7,
-    "topDepthUsd": 1487,
+    "spreadBps": -0.8,
+    "topDepthUsd": 490,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1307,8 +1298,8 @@
   {
     "pair": "BERA",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 2089,
+    "spreadBps": -0.7,
+    "topDepthUsd": 1084,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1316,8 +1307,8 @@
   {
     "pair": "TST",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.9,
-    "topDepthUsd": 1457,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1605,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1325,8 +1316,8 @@
   {
     "pair": "LAYER",
     "realizedVol5m": 0.015,
-    "spreadBps": -4.8,
-    "topDepthUsd": 1622,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1451,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1335,7 +1326,7 @@
     "pair": "IP",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 2567,
+    "topDepthUsd": 1025,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1344,7 +1335,7 @@
     "pair": "OM",
     "realizedVol5m": 0.015,
     "spreadBps": -1.1,
-    "topDepthUsd": 4194,
+    "topDepthUsd": 4775,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1353,7 +1344,7 @@
     "pair": "KAITO",
     "realizedVol5m": 0.015,
     "spreadBps": -0.1,
-    "topDepthUsd": 1602,
+    "topDepthUsd": 1792,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1362,7 +1353,7 @@
     "pair": "NIL",
     "realizedVol5m": 0.015,
     "spreadBps": -0.6,
-    "topDepthUsd": 2987,
+    "topDepthUsd": 1838,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1370,8 +1361,8 @@
   {
     "pair": "PAXG",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.5,
-    "topDepthUsd": 8237,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1492,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1379,8 +1370,8 @@
   {
     "pair": "PROMPT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 606,
+    "spreadBps": -10.2,
+    "topDepthUsd": 363,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1388,8 +1379,8 @@
   {
     "pair": "BABY",
     "realizedVol5m": 0.015,
-    "spreadBps": -4.2,
-    "topDepthUsd": 3531,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1608,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1397,8 +1388,8 @@
   {
     "pair": "WCT",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 1985,
+    "spreadBps": -4.8,
+    "topDepthUsd": 2012,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1406,8 +1397,8 @@
   {
     "pair": "HYPER",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.6,
-    "topDepthUsd": 2051,
+    "spreadBps": -1.3,
+    "topDepthUsd": 2224,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1415,8 +1406,8 @@
   {
     "pair": "ZORA",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.7,
-    "topDepthUsd": 1109,
+    "spreadBps": -0.3,
+    "topDepthUsd": 666,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1424,8 +1415,8 @@
   {
     "pair": "INIT",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.6,
-    "topDepthUsd": 2827,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1910,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1433,8 +1424,8 @@
   {
     "pair": "DOOD",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.2,
-    "topDepthUsd": 4990,
+    "spreadBps": -3.3,
+    "topDepthUsd": 4700,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1443,7 +1434,7 @@
     "pair": "NXPC",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 2093,
+    "topDepthUsd": 2220,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1451,8 +1442,8 @@
   {
     "pair": "SOPH",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.4,
-    "topDepthUsd": 1356,
+    "spreadBps": -0.5,
+    "topDepthUsd": 2740,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1460,8 +1451,8 @@
   {
     "pair": "RESOLV",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.6,
-    "topDepthUsd": 2225,
+    "spreadBps": -4.1,
+    "topDepthUsd": 230,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1469,8 +1460,8 @@
   {
     "pair": "SYRUP",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 4290,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1412,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1478,8 +1469,8 @@
   {
     "pair": "PUMP",
     "realizedVol5m": 0.015,
-    "spreadBps": -2.4,
-    "topDepthUsd": 19356,
+    "spreadBps": -2.7,
+    "topDepthUsd": 7742,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1488,7 +1479,7 @@
     "pair": "PROVE",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 2020,
+    "topDepthUsd": 2111,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1496,8 +1487,8 @@
   {
     "pair": "YZY",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.3,
-    "topDepthUsd": 528,
+    "spreadBps": -2.9,
+    "topDepthUsd": 859,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1505,8 +1496,8 @@
   {
     "pair": "XPL",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.3,
-    "topDepthUsd": 331,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1866,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1514,8 +1505,8 @@
   {
     "pair": "WLFI",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 1450,
+    "spreadBps": -1.8,
+    "topDepthUsd": 1442,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1523,8 +1514,8 @@
   {
     "pair": "LINEA",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.8,
-    "topDepthUsd": 1983,
+    "spreadBps": -1.7,
+    "topDepthUsd": 1391,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1532,8 +1523,8 @@
   {
     "pair": "SKY",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 2057,
+    "spreadBps": -0.4,
+    "topDepthUsd": 796,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1541,8 +1532,8 @@
   {
     "pair": "ASTER",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 7184,
+    "spreadBps": -1,
+    "topDepthUsd": 3868,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1551,7 +1542,7 @@
     "pair": "AVNT",
     "realizedVol5m": 0.015,
     "spreadBps": -0.2,
-    "topDepthUsd": 366,
+    "topDepthUsd": 1047,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1559,8 +1550,8 @@
   {
     "pair": "STBL",
     "realizedVol5m": 0.015,
-    "spreadBps": -3.8,
-    "topDepthUsd": 352,
+    "spreadBps": -0.6,
+    "topDepthUsd": 472,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1568,8 +1559,8 @@
   {
     "pair": "0G",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.9,
-    "topDepthUsd": 948,
+    "spreadBps": -2.6,
+    "topDepthUsd": 1038,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1577,8 +1568,8 @@
   {
     "pair": "HEMI",
     "realizedVol5m": 0.015,
-    "spreadBps": -2,
-    "topDepthUsd": 853,
+    "spreadBps": -0.3,
+    "topDepthUsd": 629,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1586,8 +1577,8 @@
   {
     "pair": "APEX",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.1,
-    "topDepthUsd": 984,
+    "spreadBps": -4.4,
+    "topDepthUsd": 1271,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1595,8 +1586,8 @@
   {
     "pair": "2Z",
     "realizedVol5m": 0.015,
-    "spreadBps": -1.8,
-    "topDepthUsd": 4928,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2519,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1604,8 +1595,8 @@
   {
     "pair": "ZEC",
     "realizedVol5m": 0.015,
-    "spreadBps": -5,
-    "topDepthUsd": 19428,
+    "spreadBps": -2.1,
+    "topDepthUsd": 445,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1613,8 +1604,8 @@
   {
     "pair": "MON",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 299,
+    "spreadBps": -5.8,
+    "topDepthUsd": 251,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1623,7 +1614,7 @@
     "pair": "MET",
     "realizedVol5m": 0.015,
     "spreadBps": -0.3,
-    "topDepthUsd": 1350,
+    "topDepthUsd": 1516,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1631,8 +1622,8 @@
   {
     "pair": "MEGA",
     "realizedVol5m": 0.015,
-    "spreadBps": -0.2,
-    "topDepthUsd": 169,
+    "spreadBps": -8.1,
+    "topDepthUsd": 79,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100
@@ -1640,8 +1631,8 @@
   {
     "pair": "CC",
     "realizedVol5m": 0.015,
-    "spreadBps": -11.2,
-    "topDepthUsd": 68,
+    "spreadBps": -0.6,
+    "topDepthUsd": 460,
     "takerFeeBps": 6,
     "smartFlow": 0.05,
     "trades1h": 100

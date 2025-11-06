@@ -1,6 +1,9 @@
 #!/usr/bin/env -S npx tsx
 import * as hl from '@nktkas/hyperliquid';
 import { ethers } from 'ethers';
+import { config } from 'dotenv';
+
+config();
 
 async function cancelOpenOrders(coin: string) {
   const privateKey = process.env.PRIVATE_KEY;
