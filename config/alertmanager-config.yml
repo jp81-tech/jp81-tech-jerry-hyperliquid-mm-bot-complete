@@ -1,0 +1,128 @@
+# Alertmanager Configuration for Hyperliquid MM Bot
+# Routes alerts to Slack (warnings) and PagerDuty (critical)
+#
+# Installation:
+#   1. Copy to /etc/alertmanager/alertmanager.yml
+#   2. Update Slack webhook URL and PagerDuty routing key
+#   3. Restart Alertmanager: systemctl restart alertmanager
+
+global:
+  resolve_timeout: 5m
+  slack_api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+
+# Routing tree
+route:
+  receiver: 'default'
+  group_by: ['alertname', 'pair', 'side']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical alerts → PagerDuty (immediate wake-up)
+    - matchers:
+        - severity="critical"
+      receiver: 'pagerduty'
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # Warning alerts → Slack (daytime monitoring)
+    - matchers:
+        - severity="warning"
+      receiver: 'slack-warnings'
+      group_wait: 30s
+      repeat_interval: 4h
+
+    # Info alerts → Slack (low priority, daily summary)
+    - matchers:
+        - severity="info"
+      receiver: 'slack-info'
+      group_wait: 5m
+      repeat_interval: 24h
+
+# Receivers
+receivers:
+  # Default catch-all (should not be used if routes are correct)
+  - name: 'default'
+    slack_configs:
+      - channel: '#mm-bot-alerts'
+        title: '[DEFAULT] {{ .CommonAnnotations.summary }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Component:* {{ .Labels.component }}
+          {{ if .Labels.pair }}*Pair:* {{ .Labels.pair }}{{ end }}
+          {{ if .Labels.side }}*Side:* {{ .Labels.side }}{{ end }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook }}*Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+
+  # PagerDuty for critical alerts (bot down, invalid size errors)
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - routing_key: 'YOUR_PAGERDUTY_INTEGRATION_KEY'
+        description: '{{ .CommonAnnotations.summary }}'
+        severity: '{{ if eq .CommonLabels.severity "critical" }}critical{{ else }}error{{ end }}'
+        details:
+          firing: '{{ .Alerts.Firing | len }}'
+          resolved: '{{ .Alerts.Resolved | len }}'
+          alertname: '{{ .CommonLabels.alertname }}'
+          pair: '{{ .CommonLabels.pair }}'
+          side: '{{ .CommonLabels.side }}'
+          runbook: '{{ .CommonAnnotations.runbook }}'
+
+  # Slack for warnings (high error rates, performance degradation)
+  - name: 'slack-warnings'
+    slack_configs:
+      - channel: '#mm-bot-warnings'
+        color: 'warning'
+        title: '⚠️ {{ .CommonAnnotations.summary }}'
+        text: |
+          {{ range .Alerts }}
+          *{{ .Labels.alertname }}* on {{ .Labels.pair }}/{{ .Labels.side }}
+          {{ .Annotations.description }}
+          {{ if .Annotations.runbook }}📖 *Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+        short_fields: true
+        fields:
+          - title: 'Severity'
+            value: '{{ .CommonLabels.severity }}'
+            short: true
+          - title: 'Component'
+            value: '{{ .CommonLabels.component }}'
+            short: true
+
+  # Slack for info (spec changes, suppressions)
+  - name: 'slack-info'
+    slack_configs:
+      - channel: '#mm-bot-info'
+        color: 'good'
+        title: 'ℹ️ {{ .CommonAnnotations.summary }}'
+        text: |
+          {{ range .Alerts }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+# Inhibition rules (suppress lower-priority alerts when higher priority fires)
+inhibit_rules:
+  # If bot has no logs (process crashed), suppress all other alerts
+  - source_matchers:
+      - alertname="MMBotNoLogs"
+    target_matchers:
+      - component="mm-bot"
+    equal: ['job']
+
+  # If no submits for a pair, suppress error rate alerts for that pair
+  - source_matchers:
+      - alertname="MMBotNoSubmits"
+    target_matchers:
+      - alertname="MMBotHighErrorRate"
+    equal: ['pair', 'side']
+
+  # If SOL is completely down, suppress individual SOL tick errors
+  - source_matchers:
+      - alertname="MMBotSolDown"
+    target_matchers:
+      - alertname="MMBotSolTickErrors"
+    equal: ['pair']

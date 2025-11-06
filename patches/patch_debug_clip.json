@@ -1,0 +1,10 @@
+{
+  "ops": [
+    {
+      "file": "src/mm_hl.ts",
+      "pattern": "const\\s+quantResult\\s*=\\s*quantizeOrder\\([\\s\\S]*?\\);",
+      "flags": "m",
+      "replacement": "const quantResult = quantizeOrder(\n            pair,\n            side,\n            makerIntent,\n            roundedPrice.toString(),\n            sizeInCoins.toString(),\n            finalSpec\n          );\n{\n  const szDecimals = Number(finalSpec?.szDecimals ?? 6);\n  const minSz = Number(finalSpec?.minSize ?? 0);\n  const clipUsd = Number(process.env.CLIP_USD ?? '35');\n  const qPxRaw = parseFloat(quantResult.pxQ || roundedPrice);\n  const qPx = (qPxRaw && qPxRaw > 0) ? qPxRaw : roundedPrice;\n  if (clipUsd > 0 && qPx > 0) {\n    let adj = clipUsd / qPx;\n    const pow10 = Math.pow(10, szDecimals);\n    adj = Math.floor(adj * pow10) / pow10;\n    if (adj < minSz) adj = minSz;\n    sizeInCoins = adj;\n  }\n  try {\n    console.log('[CLIPDBG]', JSON.stringify({\n      pair, side, clipUsd, roundedPrice, qPx, szDecimals, minSz, sizeInCoins\n    }));\n  } catch(_) {}\n}\n"
+    }
+  ]
+}

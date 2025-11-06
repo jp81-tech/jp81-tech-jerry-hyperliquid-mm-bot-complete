@@ -1,0 +1,14 @@
+=== Daily Health Check - Wed Nov  5 07:35:01 AM UTC 2025 ===
+
+1. E_TICK Error Count:
+   Total (historical): 142
+   Since last restart: Unable to determine
+
+2. Spec Override Status:
+override_check pair=SOL tick=0.01/0.01 lot=0.1/0.1 status=OK
+override_check_result ok
+
+3. Bot Process:
+   PID: 316046 | Memory: 170.242 MB | CPU: 2.1%
+
+4. Recent Quantization (last 10 attempts):

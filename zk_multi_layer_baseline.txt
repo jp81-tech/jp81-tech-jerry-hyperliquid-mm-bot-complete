@@ -1,0 +1,29 @@
+# ZK MULTI-LAYER GRID PERFORMANCE TRACKING
+# Started: 2025-11-02 18:22:54 UTC
+
+## BASELINE (Multi-Layer Grid Activation)
+Timestamp: 2025-11-02 18:22:54
+Total PnL: $348.12
+Daily PnL: $85.87
+
+Strategy: Institutional 5-Layer Grid
+- Active Layers: L1 (±20bps), L2 (±30bps), L3 (±45bps)
+- Parking Layers: L4 (±65bps), L5 (±90bps)
+- Total Orders: 12 per cycle
+- Capital per Pair: $3,400
+- Test Symbol: ZK only
+
+## TRACKING METRICS
+Track ZK-specific performance:
+1. Fill rate improvement
+2. Spread capture efficiency
+3. Inventory skew management
+4. PnL attribution (ZK vs other pairs)
+
+## COMPARISON TARGETS
+- Previous single-layer: ~40% fill rate, 300bps spread
+- Multi-layer target: ~75% fill rate, 20-90bps spread range
+- Expected improvement: +60% capital efficiency
+
+---
+Next check: 

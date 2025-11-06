@@ -1,0 +1,1649 @@
+[
+  {
+    "pair": "BTC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 816152,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ETH",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1775795,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ATOM",
+    "realizedVol5m": 0.015,
+    "spreadBps": -6,
+    "topDepthUsd": 7454,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "DYDX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1051,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SOL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 99501,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AVAX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 16387,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BNB",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 21824,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "APE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.2,
+    "topDepthUsd": 685,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "OP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 632,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "LTC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1332,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ARB",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 5452,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "DOGE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 107998,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "INJ",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2688,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SUI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 2463,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kPEPE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.7,
+    "topDepthUsd": 64430,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CRV",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 674,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "LDO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.2,
+    "topDepthUsd": 4060,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "LINK",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 2180,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "STX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1742,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CFX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 2009,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GMX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 2003,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SNX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 402,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "XRP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 644,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BCH",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2673,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "APT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 4114,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AAVE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 6657,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "COMP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1786,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "WLD",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.1,
+    "topDepthUsd": 2708,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "FXS",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.6,
+    "topDepthUsd": 1462,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "YGG",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 2512,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TRX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 4120,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kSHIB",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.1,
+    "topDepthUsd": 12876,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "UNI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 1054,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SEI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.4,
+    "topDepthUsd": 826,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "RUNE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 1669,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZRO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.4,
+    "topDepthUsd": 3926,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "DOT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 2420,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BANANA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.9,
+    "topDepthUsd": 2534,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TRB",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 2709,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "FTT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 134,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ARK",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 902,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BIGTIME",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1537,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "KAS",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2054,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BLUR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2002,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TIA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 3249,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BSV",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 142,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ADA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 627,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TON",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 2816,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MINA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -8.1,
+    "topDepthUsd": 2688,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "POLYX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.2,
+    "topDepthUsd": 4660,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GAS",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 158,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PENDLE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 1355,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "FET",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.7,
+    "topDepthUsd": 20564,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "NEAR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 12355,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MEME",
+    "realizedVol5m": 0.015,
+    "spreadBps": -7,
+    "topDepthUsd": 6454,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ORDI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 2340,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "NEO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2049,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZEN",
+    "realizedVol5m": 0.015,
+    "spreadBps": -7,
+    "topDepthUsd": 1585,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "FIL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 2522,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PYTH",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 1384,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SUSHI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.8,
+    "topDepthUsd": 3498,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "IMX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 4079,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kBONK",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.4,
+    "topDepthUsd": 12648,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GMT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.8,
+    "topDepthUsd": 7429,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SUPER",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1829,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "USTC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.5,
+    "topDepthUsd": 1673,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "JUP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2176,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kLUNC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2682,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "RSR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.3,
+    "topDepthUsd": 10672,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GALA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.1,
+    "topDepthUsd": 2120,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "JTO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.1,
+    "topDepthUsd": 1587,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ACE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -4,
+    "topDepthUsd": 11047,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MAV",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1745,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "WIF",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1629,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CAKE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 2147,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PEOPLE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 330,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ENS",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 2788,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ETC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 2094,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "XAI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -4.7,
+    "topDepthUsd": 3242,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MANTA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -7.3,
+    "topDepthUsd": 6144,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "UMA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2411,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ONDO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.5,
+    "topDepthUsd": 9349,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ALT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1912,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZETA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 1377,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "DYM",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.2,
+    "topDepthUsd": 2223,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MAVIA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 281,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "W",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.7,
+    "topDepthUsd": 2376,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "STRK",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 2104,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TAO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.3,
+    "topDepthUsd": 2025,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 867,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kFLOKI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 781,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BOME",
+    "realizedVol5m": 0.015,
+    "spreadBps": -12,
+    "topDepthUsd": 16073,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ETHFI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 2554,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ENA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1845,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MNT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 9288,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TNSR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.1,
+    "topDepthUsd": 11520,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SAGA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.2,
+    "topDepthUsd": 5888,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MERL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2033,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "HBAR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1938,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "POPCAT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.6,
+    "topDepthUsd": 1368,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "EIGEN",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.6,
+    "topDepthUsd": 8190,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "REZ",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.3,
+    "topDepthUsd": 2358,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "NOT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -15,
+    "topDepthUsd": 21354,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TURBO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -5.2,
+    "topDepthUsd": 11650,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BRETT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1998,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "IO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 2592,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZK",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 2141,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BLAST",
+    "realizedVol5m": 0.015,
+    "spreadBps": -8.8,
+    "topDepthUsd": 8172,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MEW",
+    "realizedVol5m": 0.015,
+    "spreadBps": -6.7,
+    "topDepthUsd": 15073,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "RENDER",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 1854,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "POL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2545,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CELO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -4.9,
+    "topDepthUsd": 5554,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "HMSTR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -28.8,
+    "topDepthUsd": 10362,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SCR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1828,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "kNEIRO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 1673,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GOAT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.4,
+    "topDepthUsd": 5049,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MOODENG",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 390,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GRASS",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 616,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PURR",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 385,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PNUT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 4768,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "XLM",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1150,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CHILLGUY",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 810,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SAND",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.3,
+    "topDepthUsd": 2276,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "IOTA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1352,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ALGO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -5,
+    "topDepthUsd": 3590,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "HYPE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 1785,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ME",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2035,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MOVE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.6,
+    "topDepthUsd": 1739,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "VIRTUAL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.2,
+    "topDepthUsd": 1327,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PENGU",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 2364,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "USUAL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -5.9,
+    "topDepthUsd": 1727,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "FARTCOIN",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.3,
+    "topDepthUsd": 1920,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AI16Z",
+    "realizedVol5m": 0.015,
+    "spreadBps": -18.7,
+    "topDepthUsd": 394,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AIXBT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 538,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZEREBRO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 823,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BIO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.2,
+    "topDepthUsd": 2741,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "GRIFFAIN",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 440,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SPX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1004,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "S",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 2981,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MORPHO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.8,
+    "topDepthUsd": 4749,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TRUMP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.2,
+    "topDepthUsd": 84868,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MELANIA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1,
+    "topDepthUsd": 1510,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ANIME",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.4,
+    "topDepthUsd": 1530,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "VINE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 279,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "VVV",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.7,
+    "topDepthUsd": 1487,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BERA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2089,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "TST",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.9,
+    "topDepthUsd": 1457,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "LAYER",
+    "realizedVol5m": 0.015,
+    "spreadBps": -4.8,
+    "topDepthUsd": 1622,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "IP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2567,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "OM",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.1,
+    "topDepthUsd": 4194,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "KAITO",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 1602,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "NIL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2987,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PAXG",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.5,
+    "topDepthUsd": 8237,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PROMPT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 606,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "BABY",
+    "realizedVol5m": 0.015,
+    "spreadBps": -4.2,
+    "topDepthUsd": 3531,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "WCT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 1985,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "HYPER",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.6,
+    "topDepthUsd": 2051,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZORA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.7,
+    "topDepthUsd": 1109,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "INIT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.6,
+    "topDepthUsd": 2827,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "DOOD",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.2,
+    "topDepthUsd": 4990,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "NXPC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 2093,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SOPH",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.4,
+    "topDepthUsd": 1356,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "RESOLV",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.6,
+    "topDepthUsd": 2225,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SYRUP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 4290,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PUMP",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2.4,
+    "topDepthUsd": 19356,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "PROVE",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2020,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "YZY",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 528,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "XPL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.3,
+    "topDepthUsd": 331,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "WLFI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1450,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "LINEA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.8,
+    "topDepthUsd": 1983,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "SKY",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 2057,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ASTER",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 7184,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "AVNT",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 366,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "STBL",
+    "realizedVol5m": 0.015,
+    "spreadBps": -3.8,
+    "topDepthUsd": 352,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "0G",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.9,
+    "topDepthUsd": 948,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "HEMI",
+    "realizedVol5m": 0.015,
+    "spreadBps": -2,
+    "topDepthUsd": 853,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "APEX",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.1,
+    "topDepthUsd": 984,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "2Z",
+    "realizedVol5m": 0.015,
+    "spreadBps": -1.8,
+    "topDepthUsd": 4928,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "ZEC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -5,
+    "topDepthUsd": 19428,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MON",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 299,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MET",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.3,
+    "topDepthUsd": 1350,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "MEGA",
+    "realizedVol5m": 0.015,
+    "spreadBps": -0.2,
+    "topDepthUsd": 169,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  },
+  {
+    "pair": "CC",
+    "realizedVol5m": 0.015,
+    "spreadBps": -11.2,
+    "topDepthUsd": 68,
+    "takerFeeBps": 6,
+    "smartFlow": 0.05,
+    "trades1h": 100
+  }
+]

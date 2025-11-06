@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo "🚀 Starting Hyperliquid MM Bot..."
+
+# Stop any running instances first
+./stop-bot.sh 2>/dev/null
+
+# Wait a moment
+sleep 2
+
+# Start with completely clean environment, loading ONLY from .env file
+cd /Users/jerry/Desktop/hyperliquid-mm-bot-complete
+env -i HOME="$HOME" PATH="$PATH" /bin/bash -c 'npx tsx src/mm_hl.ts 2>&1 | tee bot.log'

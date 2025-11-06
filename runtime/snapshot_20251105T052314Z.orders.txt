@@ -1,0 +1,6 @@
+🔍 Checking open orders for wallet: 0xF4620F6fb51FA2fdF3464e0b5b8186D14bC902fe
+
+📋 Found 2 open orders:
+
+  FARTCOIN | B 234.5 @ 0.2557 | Age: 1min | OID: 223445172648
+  ZK | B 1004.0 @ 0.059745 | Age: 1min | OID: 223445105149

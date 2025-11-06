@@ -1,0 +1,38 @@
+# Environment files (CRITICAL - contains private keys!)
+.env
+*.env
+src/.env
+runtime/*.env
+
+# Logs
+*.log
+logs/
+runtime/*.log
+
+# Node modules
+node_modules/
+dist/
+
+# Backups (may contain sensitive data)
+backups/
+*.tgz
+*.tar.gz
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+coverage/
+.nyc_output/
+
+# Secrets
+secrets/
+*.key
+*.pem

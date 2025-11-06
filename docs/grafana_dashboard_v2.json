@@ -1,0 +1,405 @@
+{
+  "dashboard": {
+    "title": "Hyperliquid MM Bot - Quantization Observability v2",
+    "tags": ["mm-bot", "quantization", "sre", "latency"],
+    "timezone": "utc",
+    "editable": true,
+    "graphTooltip": 1,
+    "templating": {
+      "list": [
+        {
+          "name": "job",
+          "type": "constant",
+          "current": {"value": "mm-bot"},
+          "hide": 0
+        },
+        {
+          "name": "host",
+          "type": "textbox",
+          "current": {"value": ".*"},
+          "hide": 0
+        },
+        {
+          "name": "pair",
+          "type": "textbox",
+          "current": {"value": ".*"},
+          "hide": 0
+        },
+        {
+          "name": "side",
+          "type": "textbox",
+          "current": {"value": ".*"},
+          "hide": 0
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Attempt→Submit Latency (P50/P95/P99) by Pair",
+        "type": "timeseries",
+        "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "quantile_over_time(0.5, \n  (max by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  ) - min by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  )) [5m]\n) by (pair, side)",
+            "legendFormat": "{{pair}}_{{side}} P50",
+            "refId": "A"
+          },
+          {
+            "expr": "quantile_over_time(0.95, \n  (max by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  ) - min by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  )) [5m]\n) by (pair, side)",
+            "legendFormat": "{{pair}}_{{side}} P95",
+            "refId": "B"
+          },
+          {
+            "expr": "quantile_over_time(0.99, \n  (max by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  ) - min by (seq) (\n    {job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n  )) [5m]\n) by (pair, side)",
+            "legendFormat": "{{pair}}_{{side}} P99",
+            "refId": "C"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 250, "color": "yellow"},
+                {"value": 500, "color": "orange"},
+                {"value": 1000, "color": "red"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "mean"]},
+          "tooltip": {"mode": "multi"}
+        }
+      },
+      {
+        "id": 2,
+        "title": "Tick Error Rate by Pair/Side (rolling 5m)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+        "targets": [
+          {
+            "expr": "sum by (pair, side) (\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"err_code=E_TICK\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [5m])\n) / sum by (pair, side) (\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [5m])\n)",
+            "legendFormat": "{{pair}}_{{side}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 0.05, "color": "yellow"},
+                {"value": 0.08, "color": "red"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "legend": {"displayMode": "table", "placement": "right"},
+          "tooltip": {"mode": "multi"}
+        }
+      },
+      {
+        "id": 3,
+        "title": "Error Code Distribution (last 1h)",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+        "targets": [
+          {
+            "expr": "sum by (err_code) (\n  count_over_time({job=\"$job\",host=~\"$host\"} |= \"err_code=\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | err_code != \"\" [1h])\n)",
+            "legendFormat": "{{err_code}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 10, "color": "yellow"},
+                {"value": 50, "color": "red"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "orientation": "horizontal",
+          "displayMode": "gradient"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Success Rate (ok=1 vs ok=0)",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 17},
+        "targets": [
+          {
+            "expr": "sum(\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"ok=1\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [5m])\n) / sum(\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [5m])\n)",
+            "legendFormat": "Success Rate",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "red"},
+                {"value": 0.9, "color": "yellow"},
+                {"value": 0.95, "color": "green"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "area",
+          "textMode": "value_and_name"
+        }
+      },
+      {
+        "id": 5,
+        "title": "SOL Suppression Events (last 1h)",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 6, "y": 17},
+        "targets": [
+          {
+            "expr": "count_over_time({job=\"$job\",host=~\"$host\"} |= \"sol_suppressed_60s\" |= \"entering\" [1h])",
+            "legendFormat": "Suppression Activations",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 3, "color": "yellow"},
+                {"value": 10, "color": "red"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "colorMode": "background",
+          "graphMode": "none"
+        }
+      },
+      {
+        "id": 6,
+        "title": "Spec Refresh Events (last 24h)",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 12, "y": 17},
+        "targets": [
+          {
+            "expr": "count_over_time({job=\"$job\",host=~\"$host\"} |= \"SOL specs changed\" [24h])",
+            "legendFormat": "Spec Changes",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"},
+                {"value": 5, "color": "yellow"},
+                {"value": 20, "color": "red"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Order Intent (TIF Distribution)",
+        "type": "piechart",
+        "gridPos": {"h": 6, "w": 6, "x": 18, "y": 17},
+        "targets": [
+          {
+            "expr": "sum by (tif) (\n  count_over_time({job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [1h])\n)",
+            "legendFormat": "{{tif}}",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "legend": {"displayMode": "table", "placement": "right"},
+          "pieType": "donut"
+        }
+      },
+      {
+        "id": 8,
+        "title": "Correlation Health: Attempt vs Submit (by seq)",
+        "type": "timeseries",
+        "gridPos": {"h": 7, "w": 12, "x": 0, "y": 23},
+        "targets": [
+          {
+            "expr": "sum(\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [1m])\n)",
+            "legendFormat": "Attempts/min",
+            "refId": "A"
+          },
+          {
+            "expr": "sum(\n  rate({job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt [1m])\n)",
+            "legendFormat": "Submits/min",
+            "refId": "B"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "reqps",
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "green"}
+              ]
+            }
+          }
+        },
+        "options": {
+          "tooltip": {"mode": "multi"}
+        }
+      },
+      {
+        "id": 9,
+        "title": "Recent Quantization Events (live tail)",
+        "type": "logs",
+        "gridPos": {"h": 7, "w": 12, "x": 12, "y": 23},
+        "targets": [
+          {
+            "expr": "{job=\"$job\",host=~\"$host\"} |= \"quant_evt=\" |= \"pair=~$pair\" |= \"side=~$side\"",
+            "refId": "A"
+          }
+        ],
+        "options": {
+          "showTime": true,
+          "wrapLogMessage": false,
+          "dedupStrategy": "none",
+          "enableLogDetails": true
+        }
+      },
+      {
+        "id": 10,
+        "title": "Latency Heatmap (by seq) - All Pairs",
+        "type": "heatmap",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
+        "targets": [
+          {
+            "expr": "max by (seq, pair, side) (\n  {job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n) - min by (seq, pair, side) (\n  {job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" |= \"pair=~$pair\" |= \"side=~$side\" | logfmt | unwrap tms\n)",
+            "legendFormat": "{{pair}}_{{side}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          }
+        },
+        "options": {
+          "calculate": true,
+          "cellGap": 2,
+          "color": {
+            "mode": "scheme",
+            "scheme": "Spectral"
+          },
+          "yAxis": {
+            "unit": "ms"
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "Sequence Counter (monotonicity check)",
+        "type": "timeseries",
+        "gridPos": {"h": 6, "w": 12, "x": 0, "y": 38},
+        "targets": [
+          {
+            "expr": "{job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" | logfmt | unwrap seq",
+            "legendFormat": "seq",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        },
+        "options": {
+          "tooltip": {"mode": "single"}
+        }
+      },
+      {
+        "id": 12,
+        "title": "Build Version Tracking",
+        "type": "table",
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 38},
+        "targets": [
+          {
+            "expr": "{job=\"$job\",host=~\"$host\"} |= \"🔧 Build=\" | regexp \"Build=(?P<build>.*)\"",
+            "refId": "A"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {},
+              "indexByName": {"build": 0, "Time": 1},
+              "renameByName": {"build": "Build Hash", "Time": "First Seen"}
+            }
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Latency by cloid (Order-Level Tracing)",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 44},
+        "targets": [
+          {
+            "expr": "max by (cloid, pair, side) (\n  {job=\"$job\",host=~\"$host\"} |= \"quant_evt=submit\" | logfmt | unwrap tms\n) - min by (cloid, pair, side) (\n  {job=\"$job\",host=~\"$host\"} |= \"quant_evt=attempt\" | logfmt | unwrap tms\n)",
+            "refId": "A",
+            "format": "table"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "renameByName": {"cloid": "Client Order ID", "pair": "Pair", "side": "Side", "Value": "Latency (ms)"}
+            }
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ms"
+          }
+        },
+        "options": {
+          "showHeader": true,
+          "sortBy": [{"displayName": "Latency (ms)", "desc": true}]
+        }
+      }
+    ],
+    "refresh": "10s",
+    "time": {"from": "now-1h", "to": "now"},
+    "timepicker": {
+      "refresh_intervals": ["5s", "10s", "30s", "1m", "5m"]
+    }
+  }
+}

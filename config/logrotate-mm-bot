@@ -1,0 +1,44 @@
+# Logrotate Configuration for Hyperliquid MM Bot
+# Rotates logs daily, keeps 14 days, compresses old logs
+#
+# Installation:
+#   1. Copy to /etc/logrotate.d/mm-bot
+#   2. Test: logrotate -d /etc/logrotate.d/mm-bot
+#   3. Force rotate: logrotate -f /etc/logrotate.d/mm-bot
+#   4. Verify: ls -lh /root/hyperliquid-mm-bot-complete/bot.log*
+
+/root/hyperliquid-mm-bot-complete/bot.log {
+    # Rotate daily
+    daily
+
+    # Keep 14 days of logs
+    rotate 14
+
+    # Compress rotated logs (saves disk space)
+    compress
+    delaycompress
+
+    # Don't error if log file is missing
+    missingok
+
+    # Don't rotate empty logs
+    notifempty
+
+    # Create new log with correct permissions
+    create 0644 root root
+
+    # Post-rotation: Promtail will automatically follow the new file
+    # No need to restart Promtail (it tracks inodes)
+    postrotate
+        # Optional: Send HUP to bot process to reopen log file
+        # (Not needed if bot uses append mode, which Node.js does by default)
+        # pkill -HUP -f "tsx.*mm_hl.ts" || true
+    endscript
+
+    # Use date extension for rotated files (e.g., bot.log-20251103)
+    dateext
+    dateformat -%Y%m%d
+
+    # Start numbering at 1 (not 0)
+    start 1
+}

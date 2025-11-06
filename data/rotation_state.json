@@ -1,0 +1,600 @@
+{
+  "lastUpdate": 1762426918156,
+  "currentPairs": [
+    "ZEC",
+    "ASTER",
+    "TRUMP"
+  ],
+  "history": [
+    {
+      "ts": 1762028510717,
+      "pairs": [
+        "VIRTUAL",
+        "ZEN"
+      ],
+      "reason": "Initial setup"
+    },
+    {
+      "ts": 1762043209318,
+      "pairs": [
+        "VIRTUAL",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: ZEN"
+    },
+    {
+      "ts": 1762057663143,
+      "pairs": [
+        "ZK",
+        "ZEN"
+      ],
+      "reason": "Pairs dropped: VIRTUAL"
+    },
+    {
+      "ts": 1762072076230,
+      "pairs": [
+        "ZK",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: ZEN"
+    },
+    {
+      "ts": 1762083508095,
+      "pairs": [
+        "ZK",
+        "HYPE",
+        "VIRTUAL"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762085723712,
+      "pairs": [
+        "ZK",
+        "VIRTUAL",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: HYPE"
+    },
+    {
+      "ts": 1762087900424,
+      "pairs": [
+        "ZK",
+        "VIRTUAL",
+        "HYPE"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762088977717,
+      "pairs": [
+        "ZK",
+        "VIRTUAL",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: HYPE"
+    },
+    {
+      "ts": 1762096470705,
+      "pairs": [
+        "ZK",
+        "ASTER",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: VIRTUAL"
+    },
+    {
+      "ts": 1762116572540,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "XPL"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762153646510,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762157206471,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762158401394,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762158586395,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762161979657,
+      "pairs": [
+        "ZK",
+        "ZEC",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762162438558,
+      "pairs": [
+        "ZK",
+        "ZEC",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762164156459,
+      "pairs": [
+        "ZK",
+        "ZEC",
+        "VIRTUAL"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762166603533,
+      "pairs": [
+        "ZK",
+        "VIRTUAL",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762184611369,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ZK, VIRTUAL"
+    },
+    {
+      "ts": 1762186433092,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762186950834,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: PUMP, ZEC"
+    },
+    {
+      "ts": 1762187080685,
+      "pairs": [
+        "ASTER",
+        "ZK",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762187475905,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ZK"
+    },
+    {
+      "ts": 1762187536976,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "VIRTUAL"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762187733829,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: VIRTUAL"
+    },
+    {
+      "ts": 1762190508162,
+      "pairs": [
+        "ASTER",
+        "XPL",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762190577053,
+      "pairs": [
+        "ASTER",
+        "XPL",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762190708975,
+      "pairs": [
+        "ASTER",
+        "PUMP",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762191535106,
+      "pairs": [
+        "ASTER",
+        "XPL",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762192017237,
+      "pairs": [
+        "ASTER",
+        "SOL",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762199288429,
+      "pairs": [
+        "ASTER",
+        "XPL",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762199653151,
+      "pairs": [
+        "ASTER",
+        "SOL",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762207710647,
+      "pairs": [
+        "ASTER",
+        "SOL",
+        "FARTCOIN"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762237216442,
+      "pairs": [
+        "ASTER",
+        "ZEC",
+        "FARTCOIN"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762253050903,
+      "pairs": [
+        "ZEC",
+        "FARTCOIN",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762267602059,
+      "pairs": [
+        "FARTCOIN",
+        "ZEN",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762268747551,
+      "pairs": [
+        "FARTCOIN",
+        "ZEN",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762268999587,
+      "pairs": [
+        "FARTCOIN",
+        "ZEN",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762270616389,
+      "pairs": [
+        "ZEN",
+        "TAO",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: FARTCOIN, ASTER"
+    },
+    {
+      "ts": 1762272445604,
+      "pairs": [
+        "ZEN",
+        "TAO",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762275958961,
+      "pairs": [
+        "XPL",
+        "TAO",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: ZEN, ASTER"
+    },
+    {
+      "ts": 1762284656461,
+      "pairs": [
+        "XPL",
+        "TAO",
+        "ETH"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762292166666,
+      "pairs": [
+        "XPL",
+        "ETH",
+        "PUMP"
+      ],
+      "reason": "Pairs dropped: TAO"
+    },
+    {
+      "ts": 1762292834488,
+      "pairs": [
+        "XPL",
+        "ETH",
+        "TAO"
+      ],
+      "reason": "Pairs dropped: PUMP"
+    },
+    {
+      "ts": 1762293959877,
+      "pairs": [
+        "XPL",
+        "ETH",
+        "SOL"
+      ],
+      "reason": "Pairs dropped: TAO"
+    },
+    {
+      "ts": 1762297254610,
+      "pairs": [
+        "ASTER",
+        "XPL",
+        "ETH"
+      ],
+      "reason": "Pairs dropped: SOL"
+    },
+    {
+      "ts": 1762311734245,
+      "pairs": [
+        "ETH",
+        "ASTER",
+        "TAO"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762324105830,
+      "pairs": [
+        "ASTER",
+        "ZEC",
+        "HYPE"
+      ],
+      "reason": "Pairs dropped: ETH, TAO"
+    },
+    {
+      "ts": 1762328474610,
+      "pairs": [
+        "ASTER",
+        "ZEC",
+        "XPL"
+      ],
+      "reason": "Pairs dropped: HYPE"
+    },
+    {
+      "ts": 1762329482394,
+      "pairs": [
+        "ASTER",
+        "HYPE",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: ZEC, XPL"
+    },
+    {
+      "ts": 1762332441585,
+      "pairs": [
+        "ASTER",
+        "ZEC",
+        "TAO"
+      ],
+      "reason": "Pairs dropped: HYPE, ZK"
+    },
+    {
+      "ts": 1762335360339,
+      "pairs": [
+        "ASTER",
+        "ZEC",
+        "HYPE"
+      ],
+      "reason": "Pairs dropped: TAO"
+    },
+    {
+      "ts": 1762340703770,
+      "pairs": [
+        "ZEC",
+        "ETH",
+        "TAO"
+      ],
+      "reason": "Pairs dropped: ASTER, HYPE"
+    },
+    {
+      "ts": 1762341207548,
+      "pairs": [
+        "HYPE",
+        "TAO",
+        "ETH"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762350948979,
+      "pairs": [
+        "XPL",
+        "ZK",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: HYPE, TAO, ETH"
+    },
+    {
+      "ts": 1762357406910,
+      "pairs": [
+        "ZK",
+        "XPL",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762358496034,
+      "pairs": [
+        "XPL",
+        "ZK",
+        "ZEC"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762358895610,
+      "pairs": [
+        "XPL",
+        "ZK",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZEC"
+    },
+    {
+      "ts": 1762360517914,
+      "pairs": [
+        "XPL",
+        "ZEC",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762362694135,
+      "pairs": [
+        "XPL",
+        "ZEC",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZK"
+    },
+    {
+      "ts": 1762362797183,
+      "pairs": [
+        "XPL",
+        "ZEC",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762411789112,
+      "pairs": [
+        "ZEC",
+        "ZK",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: XPL"
+    },
+    {
+      "ts": 1762412880470,
+      "pairs": [
+        "ZEC",
+        "ZK",
+        "TRUMP"
+      ],
+      "reason": "Pairs dropped: ASTER"
+    },
+    {
+      "ts": 1762423767907,
+      "pairs": [
+        "ZEC",
+        "TRUMP",
+        "ASTER"
+      ],
+      "reason": "Pairs dropped: ZK"
+    },
+    {
+      "ts": 1762426726273,
+      "pairs": [
+        "ZEC",
+        "ASTER",
+        "ZK"
+      ],
+      "reason": "Pairs dropped: TRUMP"
+    },
+    {
+      "ts": 1762426918156,
+      "pairs": [
+        "ZEC",
+        "ASTER",
+        "TRUMP"
+      ],
+      "reason": "Pairs dropped: ZK"
+    }
+  ]
+}

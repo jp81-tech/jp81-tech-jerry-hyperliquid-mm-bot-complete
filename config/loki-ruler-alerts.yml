@@ -1,0 +1,253 @@
+# Loki Ruler Alerts for Hyperliquid MM Bot
+# Tuned for SOL/ASTER/PUMP with production-grade thresholds
+#
+# Installation:
+#   1. Copy to /etc/loki/rules/mm-bot-alerts.yml
+#   2. Configure Loki ruler in loki-config.yml:
+#        ruler:
+#          storage:
+#            type: local
+#            local:
+#              directory: /etc/loki/rules
+#          rule_path: /tmp/loki-rules
+#          alertmanager_url: http://localhost:9093
+#          ring:
+#            kvstore:
+#              store: inmemory
+#          enable_api: true
+#   3. Restart Loki: systemctl restart loki
+
+groups:
+  # ══════════════════════════════════════════════════════════════
+  # GROUP 1: Core Health - Critical operational metrics
+  # ══════════════════════════════════════════════════════════════
+  - name: mm-bot-health
+    interval: 30s
+    rules:
+      # Alert: No submits observed (bot stuck or disconnected)
+      - alert: MMBotNoSubmits
+        expr: |
+          sum by (pair, side) (
+            rate({job="mm-bot"} |= "quant_evt=submit" | logfmt [10m])
+          ) == 0
+        for: 10m
+        labels:
+          severity: critical
+          component: mm-bot
+        annotations:
+          summary: "MM Bot stopped submitting orders"
+          description: "No quant_evt=submit for {{ $labels.pair }}/{{ $labels.side }} in 10 minutes. Bot may be stuck or disconnected."
+          runbook: "Check bot process, network connectivity, and recent error logs"
+
+      # Alert: Process crashed (no logs at all)
+      - alert: MMBotNoLogs
+        expr: |
+          sum(rate({job="mm-bot"} [5m])) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: mm-bot
+        annotations:
+          summary: "MM Bot not logging"
+          description: "No log lines from mm-bot in 5 minutes. Process likely crashed."
+          runbook: "SSH to server, check 'pgrep -f tsx.*mm_hl.ts', restart with ./start-bot.sh"
+
+      # Alert: Correlation ratio degraded (log loss or bot issue)
+      - alert: MMBotCorrelationDegraded
+        expr: |
+          sum(rate({job="mm-bot"} |= "quant_evt=submit" | logfmt [5m]))
+          /
+          (sum(rate({job="mm-bot"} |= "quant_evt=attempt" | logfmt [5m])) + 0.00001)
+          < 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "Attempt→Submit correlation degraded"
+          description: "Submit/Attempt ratio is {{ $value | humanizePercentage }}. Expected >80%. May indicate log loss or systematic order rejection."
+          runbook: "Check for below-min-notional issues, API errors, or log rotation problems"
+
+  # ══════════════════════════════════════════════════════════════
+  # GROUP 2: Error Rates - Quantization and submission failures
+  # ══════════════════════════════════════════════════════════════
+  - name: mm-bot-errors
+    interval: 30s
+    rules:
+      # Alert: High error rate (all error codes combined)
+      - alert: MMBotHighErrorRate
+        expr: |
+          sum by (pair, side) (
+            rate({job="mm-bot"} |= "quant_evt=submit" | logfmt | ok="0" [5m])
+          )
+          /
+          (sum by (pair, side) (
+            rate({job="mm-bot"} |= "quant_evt=submit" | logfmt [5m])
+          ) + 0.00001)
+          > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "MM Bot high error rate"
+          description: "{{ $labels.pair }}/{{ $labels.side }} error rate is {{ $value | humanizePercentage }} (threshold: 20%)"
+          runbook: "Check err_code distribution. If E_TICK on SOL, consider toggling SOL_TICK_FALLBACK. If E_ALO, widen spreads."
+
+      # Alert: Tick size errors on SOL (should be <10% with fallback)
+      - alert: MMBotSolTickErrors
+        expr: |
+          sum(rate({job="mm-bot",pair="SOL"} |= "err_code=E_TICK" | logfmt [5m]))
+          /
+          (sum(rate({job="mm-bot",pair="SOL"} |= "quant_evt=submit" | logfmt [5m])) + 0.00001)
+          > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: mm-bot
+          pair: SOL
+        annotations:
+          summary: "SOL tick errors elevated"
+          description: "SOL E_TICK error rate is {{ $value | humanizePercentage }} (threshold: 10%). Fallback may not be working."
+          runbook: "Check SOL_TICK_FALLBACK=on, verify spec refresh logs, consider manual spec investigation"
+
+      # Alert: Invalid size errors (should be 0% - indicates quantization bug)
+      - alert: MMBotInvalidSize
+        expr: |
+          sum(rate({job="mm-bot"} |= "err_code=E_SIZE" | logfmt [10m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: mm-bot
+        annotations:
+          summary: "MM Bot invalid size errors detected"
+          description: "E_SIZE errors detected ({{ $value }} per second). This indicates a quantization bug."
+          runbook: "CRITICAL: Review recent code changes to quantization path. Consider emergency rollback."
+
+      # Alert: SOL auto-suppression triggered
+      - alert: MMBotSolSuppressed
+        expr: |
+          rate({job="mm-bot"} |= "err_code=E_TICK_SUPP" | logfmt [2m]) > 0
+        for: 1m
+        labels:
+          severity: info
+          component: mm-bot
+          pair: SOL
+        annotations:
+          summary: "SOL auto-suppressed"
+          description: "SOL tick-size auto-suppression triggered (3+ errors in 30 submits). Trading paused for 60s."
+          runbook: "Normal operation. Monitor if suppression persists >5 minutes."
+
+      # Alert: ALO rejection spike (market moving fast or spreads too tight)
+      - alert: MMBotAloRejectSpike
+        expr: |
+          sum by (pair, side) (
+            rate({job="mm-bot"} |= "err_code=E_ALO" | logfmt [5m])
+          ) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "ALO rejections elevated"
+          description: "{{ $labels.pair }}/{{ $labels.side }} ALO rejects >0.5/min. Market may be moving fast or spreads too tight."
+          runbook: "Normal during volatility. If sustained >10min, consider widening MAKER_SPREAD_BPS or increasing autoShadeTicks."
+
+  # ══════════════════════════════════════════════════════════════
+  # GROUP 3: Performance - Latency and throughput
+  # ══════════════════════════════════════════════════════════════
+  - name: mm-bot-performance
+    interval: 1m
+    rules:
+      # Alert: Submit rate dropped below expected (based on MM_INTERVAL_SEC=90)
+      # Expected: ~20 orders/min (3 pairs * 2 sides * 60s/90s = 4 orders/min base rate)
+      - alert: MMBotLowThroughput
+        expr: |
+          sum(rate({job="mm-bot"} |= "quant_evt=submit" | logfmt [5m])) * 60 < 5
+        for: 10m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "MM Bot throughput degraded"
+          description: "Submit rate is {{ $value }} orders/min (expected >5). Bot may be throttled or stuck."
+          runbook: "Check MM_INTERVAL_SEC, network latency, and CPU usage"
+
+      # Note: Latency alerts require joining attempt↔submit logs by seq
+      # This is complex in PromQL. For latency monitoring, use Grafana dashboard.
+      # Alert on sustained high latency by monitoring Grafana panel values.
+
+  # ══════════════════════════════════════════════════════════════
+  # GROUP 4: Spec Changes - Exchange parameter drift
+  # ══════════════════════════════════════════════════════════════
+  - name: mm-bot-specs
+    interval: 5m
+    rules:
+      # Alert: SOL spec changes detected (may cause temporary tick errors)
+      - alert: MMBotSolSpecChanged
+        expr: |
+          count_over_time({job="mm-bot"} |~ "SOL specs changed" [10m]) > 0
+        for: 1m
+        labels:
+          severity: info
+          component: mm-bot
+          pair: SOL
+        annotations:
+          summary: "SOL spec parameters changed"
+          description: "Hyperliquid changed SOL tick/lot size in last 10min. Bot auto-refreshed."
+          runbook: "Normal operation. Monitor E_TICK rate for next 5 minutes."
+
+      # Alert: Frequent spec changes (>2 in 10min indicates API instability)
+      - alert: MMBotFrequentSpecChanges
+        expr: |
+          count_over_time({job="mm-bot"} |~ "specs changed" [10m]) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "Frequent spec changes detected"
+          description: "{{ $value }} spec changes in 10 minutes. HL API may be unstable."
+          runbook: "Monitor HL status page. Consider increasing SPECS_REFRESH_SEC if changes are spurious."
+
+  # ══════════════════════════════════════════════════════════════
+  # GROUP 5: Pair-Specific - SOL/ASTER/PUMP watchdogs
+  # ══════════════════════════════════════════════════════════════
+  - name: mm-bot-pairs
+    interval: 1m
+    rules:
+      # Alert: SOL completely down (no successful submits)
+      - alert: MMBotSolDown
+        expr: |
+          sum(rate({job="mm-bot",pair="SOL"} |= "quant_evt=submit" | logfmt | ok="1" [10m])) == 0
+          and
+          sum(rate({job="mm-bot",pair="SOL"} |= "quant_evt=attempt" | logfmt [10m])) > 0
+        for: 10m
+        labels:
+          severity: critical
+          component: mm-bot
+          pair: SOL
+        annotations:
+          summary: "SOL trading halted"
+          description: "No successful SOL orders in 10 minutes despite attempts. Check error logs."
+          runbook: "Review SOL error codes. If all E_TICK, consider SOL_TICK_FALLBACK=off temporarily."
+
+      # Alert: ASTER/PUMP success rate dropped (should be near 100%)
+      - alert: MMBotPairDegraded
+        expr: |
+          sum by (pair) (
+            rate({job="mm-bot",pair=~"ASTER|PUMP"} |= "quant_evt=submit" | logfmt | ok="1" [10m])
+          )
+          /
+          (sum by (pair) (
+            rate({job="mm-bot",pair=~"ASTER|PUMP"} |= "quant_evt=submit" | logfmt [10m])
+          ) + 0.00001)
+          < 0.95
+        for: 10m
+        labels:
+          severity: warning
+          component: mm-bot
+        annotations:
+          summary: "{{ $labels.pair }} success rate degraded"
+          description: "{{ $labels.pair }} success rate is {{ $value | humanizePercentage }} (expected >95%)"
+          runbook: "Check {{ $labels.pair }} error distribution. Verify exchange is not having issues."

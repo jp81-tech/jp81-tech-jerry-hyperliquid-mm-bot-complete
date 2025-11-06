@@ -1,0 +1,1274 @@
+import 'dotenv/config'
+import fs from 'fs'
+import path from 'path'
+import { HyperliquidAPI, VolatilityScore } from './api/hyperliquid.js'
+import { VolatilityRotation } from './utils/volatility_rotation.js'
+import { Supervisor, SupervisorHooks } from './supervisor/index.js'
+import { ConsoleNotifier } from './utils/notifier.js'
+import { positionSizeUSD } from './utils/position_sizing.js'
+import { killSwitchActive } from './utils/kill_switch.js'
+import * as hl from '@nktkas/hyperliquid'
+import { ethers } from 'ethers'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATE MANAGER - Persists bot state to disk
+// ─────────────────────────────────────────────────────────────────────────────
+
+type BotState = {
+  positions: { [pair: string]: { size: number; entryPrice: number; side: 'long' | 'short' } }
+  trades: { ts: number; pair: string; side: string; price: number; size: number; pnl?: number }[]
+  dailyPnl: number
+  totalPnl: number
+  lastResetDate: string
+  execStats: { success: number; fail: number; latencies: number[] }
+  lastProcessedFillTime?: number  // Track last synced fill to avoid double-counting
+  processedFillOids?: string[]  // Track processed order IDs
+}
+
+class StateManager {
+  private stateFile: string
+  private state: BotState
+
+  constructor(stateFile?: string) {
+    this.stateFile = stateFile || path.join(process.cwd(), 'data/bot_state.json')
+    this.state = this.loadState()
+  }
+
+  private loadState(): BotState {
+    try {
+      if (fs.existsSync(this.stateFile)) {
+        const loaded = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'))
+        // Ensure new fields exist
+        loaded.lastProcessedFillTime = loaded.lastProcessedFillTime || 0
+        loaded.processedFillOids = loaded.processedFillOids || []
+        return loaded
+      }
+    } catch (e) {}
+    return {
+      positions: {},
+      trades: [],
+      dailyPnl: 0,
+      totalPnl: 0,
+      lastResetDate: new Date().toISOString().split('T')[0],
+      execStats: { success: 0, fail: 0, latencies: [] },
+      lastProcessedFillTime: 0,
+      processedFillOids: []
+    }
+  }
+
+  saveState() {
+    // Async non-blocking save for performance
+    setImmediate(() => {
+      try {
+        fs.mkdirSync(path.dirname(this.stateFile), { recursive: true })
+        fs.writeFileSync(this.stateFile, JSON.stringify(this.state, null, 2))
+      } catch (e) {
+        console.error('Failed to save state:', e)
+      }
+    })
+  }
+
+  getState() {
+    return this.state
+  }
+
+  updatePosition(pair: string, size: number, entryPrice: number, side: 'long' | 'short') {
+    if (size === 0) {
+      delete this.state.positions[pair]
+    } else {
+      this.state.positions[pair] = { size, entryPrice, side }
+    }
+    this.saveState()
+  }
+
+  recordTrade(pair: string, side: string, price: number, size: number, pnl?: number) {
+    this.state.trades.push({
+      ts: Date.now(),
+      pair,
+      side,
+      price,
+      size,
+      pnl
+    })
+
+    // Keep last 1000 trades
+    if (this.state.trades.length > 1000) {
+      this.state.trades = this.state.trades.slice(-1000)
+    }
+
+    if (pnl !== undefined) {
+      this.state.dailyPnl += pnl
+      this.state.totalPnl += pnl
+    }
+
+    this.saveState()
+  }
+
+  recordExecution(success: boolean, latencyMs?: number) {
+    if (success) {
+      this.state.execStats.success++
+    } else {
+      this.state.execStats.fail++
+    }
+
+    if (latencyMs !== undefined) {
+      this.state.execStats.latencies.push(latencyMs)
+      // Keep last 100 latencies
+      if (this.state.execStats.latencies.length > 100) {
+        this.state.execStats.latencies = this.state.execStats.latencies.slice(-100)
+      }
+    }
+
+    this.saveState()
+  }
+
+  resetDailyPnl() {
+    const today = new Date().toISOString().split('T')[0]
+    if (this.state.lastResetDate !== today) {
+      this.state.dailyPnl = 0
+      this.state.lastResetDate = today
+      this.saveState()
+    }
+  }
+
+  /**
+   * Sync PnL from Hyperliquid fills - uses exchange's reported closedPnl
+   * This is the SOURCE OF TRUTH for PnL tracking
+   */
+  async syncPnLFromHyperliquid(infoClient: hl.InfoClient, walletAddress: string): Promise<{newFills: number, pnlDelta: number}> {
+    try {
+      // Fetch all fills from Hyperliquid
+      const fills = await infoClient.userFills({ user: walletAddress })
+
+      if (!fills || fills.length === 0) {
+        return { newFills: 0, pnlDelta: 0 }
+      }
+
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+
+      // Initialize processedFillOids if not exists
+      if (!this.state.processedFillOids) {
+        this.state.processedFillOids = []
+      }
+
+      let newFills = 0
+      let pnlDelta = 0
+
+      // Process fills newest to oldest
+      for (const fill of fills) {
+        // Skip if already processed
+        if (this.state.processedFillOids!.includes(fill.oid)) {
+          continue
+        }
+
+        const fillTime = new Date(fill.time)
+        const closedPnl = parseFloat(fill.closedPnl || '0')
+        const fee = parseFloat(fill.fee)
+
+        // Net PnL includes fees (fees are negative, so we add them)
+        const netPnl = closedPnl + fee  // fee is already negative
+
+        // Add to total PnL
+        this.state.totalPnl += netPnl
+
+        // Add to daily PnL if from today
+        if (fillTime >= today) {
+          this.state.dailyPnl += netPnl
+        }
+
+        pnlDelta += netPnl
+        newFills++
+
+        // Mark as processed
+        this.state.processedFillOids!.push(fill.oid)
+
+        // Record in trades list
+        this.state.trades.push({
+          ts: fillTime.getTime(),
+          pair: fill.coin,
+          side: fill.side,
+          price: parseFloat(fill.px),
+          size: parseFloat(fill.sz),
+          pnl: netPnl
+        })
+      }
+
+      // Keep only last 10000 processed OIDs to prevent unlimited growth
+      if (this.state.processedFillOids!.length > 10000) {
+        this.state.processedFillOids = this.state.processedFillOids!.slice(-10000)
+      }
+
+      // Keep last 1000 trades
+      if (this.state.trades.length > 1000) {
+        this.state.trades = this.state.trades.slice(-1000)
+      }
+
+      this.saveState()
+      return { newFills, pnlDelta }
+
+    } catch (error) {
+      console.error('Error syncing PnL from Hyperliquid:', error)
+      return { newFills: 0, pnlDelta: 0 }
+    }
+  }
+
+  getExecStats() {
+    const { success, fail, latencies} = this.state.execStats
+    const avgLatency = latencies.length > 0
+      ? latencies.reduce((a, b) => a + b, 0) / latencies.length
+      : 0
+    return {
+      lastN: success + fail,
+      success,
+      fail,
+      avgLatencyMs: avgLatency
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAPER TRADING - Simulates order execution
+// ─────────────────────────────────────────────────────────────────────────────
+
+class PaperTrading implements TradingInterface {
+  private makerFeeBps = 1.5  // 0.015% maker fee
+  private takerFeeBps = 4.5  // 0.045% taker fee
+
+  async placeOrder(
+    pair: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    orderType: 'limit' | 'market' = 'limit'
+  ): Promise<{ success: boolean; fillPrice?: number; fee?: number }> {
+    // Simulate realistic fill probability
+    const fillProb = orderType === 'market' ? 0.95 : 0.7
+
+    if (Math.random() > fillProb) {
+      return { success: false }
+    }
+
+    // Simulate slippage for market orders
+    let fillPrice = price
+    if (orderType === 'market') {
+      const slippageBps = Math.random() * 10 // 0-10 bps slippage
+      fillPrice = side === 'buy'
+        ? price * (1 + slippageBps / 10000)
+        : price * (1 - slippageBps / 10000)
+    }
+
+    // Calculate fees
+    const feeBps = orderType === 'limit' ? this.makerFeeBps : this.takerFeeBps
+    const fee = sizeUsd * feeBps / 10000
+
+    return { success: true, fillPrice, fee }
+  }
+
+  async cancelOrder(orderId: string): Promise<boolean> {
+    return Math.random() > 0.05 // 95% cancel success rate
+  }
+
+  async getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null> {
+    // Will be managed by StateManager
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LIVE TRADING - Real Hyperliquid SDK integration
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface TradingInterface {
+  placeOrder(
+    pair: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    orderType: 'limit' | 'market'
+  ): Promise<{ success: boolean; fillPrice?: number; fee?: number }>
+  cancelOrder(orderId: string): Promise<boolean>
+  getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null>
+}
+
+class LiveTrading implements TradingInterface {
+  private exchClient: hl.ExchangeClient
+  private infoClient: hl.InfoClient
+  private api: HyperliquidAPI
+  private assetMap: Map<string, number> = new Map()
+  private assetDecimals: Map<string, number> = new Map()
+  private walletAddress: string
+  private makerFeeBps = 1.5  // 0.015% maker fee
+  private takerFeeBps = 4.5  // 0.045% taker fee
+  private enablePostOnly: boolean = false  // Post-only (ALO) orders
+
+  constructor(privateKey: string, api: HyperliquidAPI) {
+    if (!privateKey) {
+      throw new Error('Private key required for live trading')
+    }
+
+    this.api = api
+
+    // Initialize clients
+    this.exchClient = new hl.ExchangeClient({
+      wallet: privateKey,
+      transport: new hl.HttpTransport()
+    })
+
+    this.infoClient = new hl.InfoClient({
+      transport: new hl.HttpTransport()
+    })
+
+    // Derive wallet address from private key
+    this.walletAddress = this.deriveAddress(privateKey)
+
+    // Read post-only setting from environment
+    this.enablePostOnly = process.env.ENABLE_POST_ONLY === 'true'
+  }
+
+  private deriveAddress(privateKey: string): string {
+    // For simplicity, we'll use ethers to derive the address
+    // In production, you might want to use the SDK's built-in method
+    try {
+      const wallet = new ethers.Wallet(privateKey)
+      return wallet.address
+    } catch (e) {
+      throw new Error(`Failed to derive address from private key: ${e}`)
+    }
+  }
+
+  /**
+   * Calculate appropriate price decimals based on price magnitude
+   * This ensures prices are rounded to valid tick sizes
+   */
+  private getPriceDecimals(price: number): number {
+    if (price >= 10000) return 1;      // BTC-like: $100k -> 1 decimal
+    if (price >= 1000) return 2;       // BTC-like: $10k -> 2 decimals
+    if (price >= 100) return 2;        // ETH-like: $100+ -> 2 decimals
+    if (price >= 10) return 3;         // Mid-range: $10+ -> 3 decimals
+    if (price >= 1) return 4;          // Low: $1+ -> 4 decimals
+    if (price >= 0.1) return 5;        // Very low: $0.1+ -> 5 decimals
+    return 6;                          // Ultra low: <$0.1 -> 6 decimals
+  }
+
+  /**
+   * Set leverage for a specific asset
+   * @param pair - The trading pair (e.g., "BTC", "ETH")
+   * @param leverage - Leverage value (1 for no leverage, 2 for 2x, etc.)
+   */
+  async setLeverage(pair: string, leverage: number = 1): Promise<void> {
+    try {
+      const assetIndex = this.assetMap.get(pair)
+      if (assetIndex === undefined) {
+        console.log(`Asset ${pair} not found in mapping, skipping leverage set`)
+        return
+      }
+
+      await this.exchClient.updateLeverage({
+        asset: assetIndex,
+        isCross: true,  // Use cross margin (shares margin across positions)
+        leverage: leverage
+      })
+
+      console.log(`✅ Set ${pair} leverage to ${leverage}x`)
+    } catch (error) {
+      console.error(`Failed to set leverage for ${pair}: ${error}`)
+      throw error
+    }
+  }
+
+  async initialize(): Promise<void> {
+    // Fetch asset mapping
+    const [meta] = await this.api.getMetaAndAssetCtxs()
+
+    meta.universe.forEach((market, index) => {
+      this.assetMap.set(market.name, index)
+      this.assetDecimals.set(market.name, market.szDecimals)
+    })
+
+    console.log(`LiveTrading initialized: ${this.assetMap.size} assets mapped`)
+  }
+
+  async placeOrder(
+    pair: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    orderType: 'limit' | 'market' = 'limit',
+    reduceOnly: boolean = false
+  ): Promise<{ success: boolean; fillPrice?: number; fee?: number }> {
+    try {
+      // Get asset index and decimals
+      const assetIndex = this.assetMap.get(pair)
+      if (assetIndex === undefined) {
+        throw new Error(`Asset ${pair} not found in mapping`)
+      }
+
+      // Get size decimals - use ?? instead of || to handle 0 correctly
+      const sizeDecimals = this.assetDecimals.get(pair) ?? 8
+      const priceDecimals = this.getPriceDecimals(price)
+
+      // Convert USD size to coins (size = USD / price)
+      let sizeInCoins = sizeUsd / price
+
+      // Round to proper decimals
+      // For assets with 0 decimals (like PUMP), use Math.floor to ensure integer
+      if (sizeDecimals === 0) {
+        sizeInCoins = Math.floor(sizeInCoins)
+      } else {
+        sizeInCoins = Number(sizeInCoins.toFixed(sizeDecimals))
+      }
+
+      // Round price to proper tick size
+      const roundedPrice = Number(price.toFixed(priceDecimals))
+
+      // DEBUG: Logging disabled for performance (uncomment if needed)
+      // console.log(`[DEBUG] ${pair} Order:`)
+      // console.log(`  sizeUsd: $${sizeUsd.toFixed(2)}`)
+      // console.log(`  price: $${price}`)
+      // console.log(`  sizeDecimals: ${sizeDecimals}`)
+      // console.log(`  raw sizeInCoins: ${(sizeUsd / price).toFixed(8)}`)
+      // console.log(`  rounded sizeInCoins: ${sizeInCoins}`)
+      // console.log(`  assetIndex: ${assetIndex}`)
+
+      // Build order request
+      // Note: Hyperliquid doesn't have traditional "market" orders
+      // For market-like execution, use limit orders with IOC (Immediate or Cancel)
+      const orderRequest: any = {
+        orders: [{
+          a: assetIndex,
+          b: side === 'buy',
+          p: roundedPrice.toString(),
+          s: sizeInCoins.toString(),
+          r: reduceOnly, // reduce-only flag for closing positions
+          t: orderType === 'market'
+            ? { limit: { tif: 'Ioc' } } // IOC for fast execution like market order
+            : { limit: { tif: this.enablePostOnly ? 'Alo' : 'Gtc' } } // Alo = post-only (maker-only), Gtc = can be taker
+        }],
+        grouping: 'na'
+      }
+
+      // Place order
+      const result = await this.exchClient.order(orderRequest)
+
+      // Check if order was successful
+      if (result && result.status === 'ok') {
+        // For limit orders, we won't know the fill price immediately
+        // For market orders, we might get fill info in the response
+        const feeBps = orderType === 'limit' ? this.makerFeeBps : this.takerFeeBps
+        const fee = sizeUsd * feeBps / 10000
+
+        return {
+          success: true,
+          fillPrice: price, // For limit orders, this is the requested price
+          fee
+        }
+      } else {
+        console.error(`Order failed:`, result)
+        return { success: false }
+      }
+
+    } catch (error) {
+      console.error(`Error placing order: ${error}`)
+      return { success: false }
+    }
+  }
+
+  async cancelOrder(orderId: string): Promise<boolean> {
+    try {
+      // Cancel order using SDK
+      const result = await this.exchClient.cancel({
+        cancels: [{ a: 0, o: parseInt(orderId) }] // Simplified
+      })
+      return result && result.status === 'ok'
+    } catch (error) {
+      console.error(`Error canceling order: ${error}`)
+      return false
+    }
+  }
+
+  async getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null> {
+    try {
+      // Get user state from Hyperliquid
+      const userState = await this.infoClient.userState({ user: this.walletAddress })
+
+      if (!userState || !userState.assetPositions) {
+        return null
+      }
+
+      // Find position for this pair
+      const assetIndex = this.assetMap.get(pair)
+      if (assetIndex === undefined) {
+        return null
+      }
+
+      const position = userState.assetPositions.find((p: any) => p.position.coin === pair)
+
+      if (!position) {
+        return null
+      }
+
+      return {
+        size: parseFloat(position.position.szi),
+        entryPrice: parseFloat(position.position.entryPx)
+      }
+
+    } catch (error) {
+      console.error(`Error getting position: ${error}`)
+      return null
+    }
+  }
+
+  /**
+   * Cancel all open orders - called on bot startup for clean slate
+   */
+  async cancelAllOrders(): Promise<void> {
+    try {
+      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+
+      if (!orders || orders.length === 0) {
+        console.log('No open orders to cancel')
+        return
+      }
+
+      console.log(`Canceling ${orders.length} open orders...`)
+
+      for (const order of orders) {
+        const assetIndex = this.assetMap.get(order.coin)
+        if (assetIndex === undefined) continue
+
+        try {
+          await this.exchClient.cancel({
+            cancels: [{
+              a: assetIndex,
+              o: parseInt(order.oid)
+            }]
+          })
+        } catch (e) {
+          console.error(`Failed to cancel order ${order.oid}: ${e}`)
+        }
+      }
+
+      console.log('All orders canceled')
+    } catch (error) {
+      console.error(`Error canceling all orders: ${error}`)
+      throw error
+    }
+  }
+
+  /**
+   * Cancel all open orders for a specific trading pair
+   * This prevents stacking of unfilled orders when price moves
+   */
+  async cancelPairOrders(pair: string): Promise<void> {
+    try {
+      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+
+      if (!orders || orders.length === 0) return
+
+      // Filter orders for this specific pair
+      const pairOrders = orders.filter(order => order.coin === pair)
+      if (pairOrders.length === 0) return
+
+      for (const order of pairOrders) {
+        const assetIndex = this.assetMap.get(order.coin)
+        if (assetIndex === undefined) continue
+
+        try {
+          await this.exchClient.cancel({
+            cancels: [{
+              a: assetIndex,
+              o: parseInt(order.oid)
+            }]
+          })
+        } catch (e) {
+          // Silently ignore cancel errors (order may have already filled)
+        }
+      }
+    } catch (error) {
+      // Silently ignore errors - we'll place new orders anyway
+    }
+  }
+
+  /**
+   * Get open orders for a specific trading pair
+   */
+  async getOpenOrders(pair: string): Promise<any[]> {
+    try {
+      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+      if (!orders || orders.length === 0) return []
+
+      // Filter orders for this specific pair
+      return orders.filter(order => order.coin === pair)
+    } catch (error) {
+      return []
+    }
+  }
+
+  /**
+   * Close all open positions - called on bot startup for clean slate
+   */
+  async closeAllPositions(): Promise<void> {
+    try {
+      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress })
+
+      if (!state.assetPositions || state.assetPositions.length === 0) {
+        console.log('No open positions to close')
+        return
+      }
+
+      console.log(`Closing ${state.assetPositions.length} positions...`)
+
+      for (const assetPos of state.assetPositions) {
+        const pos = assetPos.position
+        const coin = pos.coin
+        const size = parseFloat(pos.szi)
+
+        if (size === 0) continue
+
+        const assetIndex = this.assetMap.get(coin)
+        if (assetIndex === undefined) continue
+
+        const sizeDecimals = this.assetDecimals.get(coin) || 8
+        const closeSize = Math.abs(size)
+
+        try {
+          // Get current market price
+          const l2 = await this.infoClient.l2Book({ coin })
+          const bestAsk = parseFloat(l2.levels[0]?.[0]?.px || '0')
+          const bestBid = parseFloat(l2.levels[1]?.[0]?.px || '0')
+          const midPrice = (bestAsk + bestBid) / 2
+
+          // Close with market order (IOC with 5% slippage)
+          const closePrice = size < 0
+            ? midPrice * 1.05  // Buy to close short
+            : midPrice * 0.95  // Sell to close long
+
+          await this.exchClient.order({
+            orders: [{
+              a: assetIndex,
+              b: size < 0,  // buy if short, sell if long
+              p: closePrice.toFixed(this.getPriceDecimals(closePrice)),
+              s: closeSize.toFixed(sizeDecimals),
+              r: true,  // reduce-only
+              t: { limit: { tif: 'Ioc' } }
+            }],
+            grouping: 'na'
+          })
+
+          console.log(`Closed ${coin}: ${size > 0 ? 'LONG' : 'SHORT'} ${closeSize}`)
+        } catch (e) {
+          console.error(`Failed to close ${coin} position: ${e}`)
+        }
+      }
+
+      console.log('All positions closed')
+    } catch (error) {
+      console.error(`Error closing all positions: ${error}`)
+      throw error
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HYPERLIQUID MM BOT - Main bot class
+// ─────────────────────────────────────────────────────────────────────────────
+
+class HyperliquidMMBot {
+  private api: HyperliquidAPI
+  private rotation: VolatilityRotation
+  private supervisor: Supervisor
+  private stateManager: StateManager
+  private trading: TradingInterface
+  private notifier: ConsoleNotifier
+
+  private intervalSec: number
+  private baseOrderUsd: number
+  private makerSpreadBps: number
+  private rotationIntervalSec: number
+  private maxDailyLossUsd: number
+  private lastRotationTime: number = 0
+
+  // Taker order strategy (unlocks API rate limits)
+  private enableTakerOrders: boolean
+  private takerOrderIntervalMs: number
+  private takerOrderSizeUsd: number
+  private lastTakerOrderTime: number = 0
+
+  private tuning = {
+    orderUsdFactor: 1.0,
+    maxConcurrent: 1,
+    backoffMs: 0,
+    makerSpreadFactor: 1.0
+  }
+
+  private isDryRun: boolean
+
+  constructor() {
+    this.api = new HyperliquidAPI()
+    this.rotation = new VolatilityRotation({
+      minVolatility: Number(process.env.MIN_VOLATILITY_PCT || 2.0),
+      rotationThreshold: 1.5
+    })
+    this.stateManager = new StateManager()
+    this.notifier = new ConsoleNotifier()
+
+    // Configuration from env
+    this.intervalSec = Number(process.env.MM_INTERVAL_SEC || 15)
+    this.baseOrderUsd = Number(process.env.BASE_ORDER_USD || 150)
+    this.makerSpreadBps = Number(process.env.MAKER_SPREAD_BPS || 40)
+    this.rotationIntervalSec = Number(process.env.ROTATION_INTERVAL_SEC || 14400) // 4 hours
+    this.maxDailyLossUsd = Number(process.env.MAX_DAILY_LOSS_USD || 400)
+    this.isDryRun = process.env.DRY_RUN === 'true'
+
+    // Taker order configuration
+    this.enableTakerOrders = process.env.ENABLE_TAKER_ORDERS === 'true'
+    this.takerOrderIntervalMs = Number(process.env.TAKER_ORDER_INTERVAL_MIN || 60) * 60 * 1000
+    this.takerOrderSizeUsd = Number(process.env.TAKER_ORDER_SIZE_USD || 100)
+
+    // Initialize trading interface based on mode
+    if (this.isDryRun) {
+      this.trading = new PaperTrading()
+      this.notifier.info('📄 PAPER TRADING MODE - No real money at risk')
+    } else {
+      const privateKey = process.env.PRIVATE_KEY
+      if (!privateKey) {
+        throw new Error('❌ PRIVATE_KEY required for live trading! Set DRY_RUN=true for paper trading.')
+      }
+      this.trading = new LiveTrading(privateKey, this.api)
+      this.notifier.info('💰 LIVE TRADING MODE - REAL MONEY AT RISK!')
+    }
+
+    // Initialize supervisor
+    const hooks: SupervisorHooks = {
+      getExecStats: async () => this.stateManager.getExecStats(),
+      getBalances: async () => ({ eth: 1.0, usdc: 20000 }), // Mock for now
+      getStaleSec: async () => 0,
+      pingVenue: async () => {
+        try {
+          await this.api.getMetaAndAssetCtxs()
+          return true
+        } catch {
+          return false
+        }
+      },
+      pingRpc: async () => true, // Mock
+      applyTuning: async (t) => {
+        // TUNING DISABLED: Always use 100% order size regardless of success rate
+        this.tuning = {
+          ...t,
+          orderUsdFactor: 1.0  // Force 100% - ignoring auto-tuning adjustments
+        }
+      },
+      setIntervalSec: (sec) => {
+        this.intervalSec = sec
+      },
+      onKillSwitch: async () => {
+        this.notifier.error('🚨 KILL SWITCH ACTIVATED - Stopping bot')
+        process.exit(1)
+      }
+    }
+
+    this.supervisor = new Supervisor({
+      rpcUrls: ['https://api.hyperliquid.xyz'],
+      venueProbes: [
+        { name: 'Hyperliquid', url: 'https://api.hyperliquid.xyz/info', method: 'POST' }
+      ],
+      hooks,
+      baseIntervalSec: this.intervalSec,
+      maxIntervalSec: 45,
+      notifier: this.notifier
+    })
+
+    this.notifier.info(`🤖 Hyperliquid MM Bot initialized`)
+    this.notifier.info(`   Mode: ${this.isDryRun ? 'PAPER TRADING' : 'LIVE'}`)
+    this.notifier.info(`   Base interval: ${this.intervalSec}s`)
+    this.notifier.info(`   Base order size: $${this.baseOrderUsd}`)
+    this.notifier.info(`   Maker spread: ${this.makerSpreadBps} bps`)
+    this.notifier.info(`   Rotation interval: ${this.rotationIntervalSec / 3600}h`)
+    if (this.enableTakerOrders) {
+      this.notifier.info(`   ⚡ Taker orders: ENABLED ($${this.takerOrderSizeUsd} every ${this.takerOrderIntervalMs / 60000}min)`)
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Initialization
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async initialize() {
+    this.notifier.info('🚀 Initializing bot...')
+
+    // Initialize live trading if not in dry run mode
+    if (!this.isDryRun && this.trading instanceof LiveTrading) {
+      await (this.trading as LiveTrading).initialize()
+      this.notifier.info('✅ Live trading initialized')
+
+      // AUTOMATIC CLEANUP ON STARTUP: Cancel all orders and close all positions
+      this.notifier.info('🧹 Cleaning up: canceling all open orders and closing positions...')
+      try {
+        await (this.trading as LiveTrading).cancelAllOrders()
+        this.notifier.info('   ✅ All orders canceled')
+
+        await (this.trading as LiveTrading).closeAllPositions()
+        this.notifier.info('   ✅ All positions closed')
+
+        this.notifier.info('✅ Cleanup complete - starting with clean slate')
+      } catch (error) {
+        this.notifier.error(`❌ Cleanup failed: ${error}`)
+        throw new Error('Failed to cleanup on startup')
+      }
+    } else {
+      this.notifier.info('✅ Paper trading ready')
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Main Loop
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async mainLoop() {
+    while (true) {
+      try {
+        // Check kill switch
+        if (await killSwitchActive()) {
+          this.notifier.error('❌ Kill switch active - bot stopped')
+          break
+        }
+
+        // Reset daily PnL if new day
+        this.stateManager.resetDailyPnl()
+
+        // ⚡ SYNC PnL FROM HYPERLIQUID (SOURCE OF TRUTH)
+        if (this.trading instanceof LiveTrading) {
+          const syncResult = await this.stateManager.syncPnLFromHyperliquid(
+            (this.trading as any).infoClient,
+            (this.trading as any).walletAddress
+          )
+          if (syncResult.newFills > 0) {
+            this.notifier.info(`✅ Synced ${syncResult.newFills} new fills | PnL Δ: $${syncResult.pnlDelta.toFixed(2)}`)
+          }
+        }
+
+        // Check daily loss limit
+        const state = this.stateManager.getState()
+        if (state.dailyPnl < -this.maxDailyLossUsd) {
+          this.notifier.error(`❌ Daily loss limit reached: $${state.dailyPnl.toFixed(2)}`)
+          break
+        }
+
+        // Rotate pairs if needed
+        await this.rotateIfNeeded()
+
+        // Execute market making
+        const pairs = this.rotation.getCurrentPairs()
+        if (pairs.length > 0) {
+          await this.executeMM(pairs)
+        } else {
+          this.notifier.warn('⚠️  No pairs selected yet, waiting for rotation...')
+        }
+
+        // Execute taker order if enabled (unlocks rate limits)
+        if (this.enableTakerOrders && !this.isDryRun) {
+          await this.executeTakerOrder()
+        }
+
+        // Supervisor tick
+        const supervisorResult = await this.supervisor.tick()
+
+        // Log status
+        this.logStatus(supervisorResult)
+
+        // Sleep
+        await this.sleep(this.intervalSec * 1000)
+
+      } catch (error) {
+        this.notifier.error(`Error in main loop: ${error}`)
+        this.stateManager.recordExecution(false)
+        await this.sleep(5000)
+      }
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Volatility Rotation
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async rotateIfNeeded() {
+    const now = Date.now()
+
+    if (now - this.lastRotationTime < this.rotationIntervalSec * 1000) {
+      return // Not time yet
+    }
+
+    this.notifier.info('🔄 Checking volatility rotation...')
+
+    try {
+      const result = await this.rotation.rotate()
+
+      if (result.rotated) {
+        this.notifier.info(`✅ Rotated to: ${result.newPairs.join(', ')}`)
+        this.notifier.info(`   Reason: ${result.reason}`)
+
+        // Log top 3 scores
+        result.scores.forEach((s, i) => {
+          this.notifier.info(`   ${i + 1}. ${s.pair}: score=${s.score.toFixed(2)}, vol=${s.volatility24h.toFixed(2)}%`)
+        })
+
+        // Set leverage for new pairs (LIVE mode only)
+        if (!this.isDryRun && this.trading instanceof LiveTrading) {
+          const targetLeverage = Number(process.env.LEVERAGE || 1)
+          this.notifier.info(`🔧 Setting ${targetLeverage}x leverage for new pairs...`)
+
+          for (const pair of result.newPairs) {
+            try {
+              await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
+            } catch (error) {
+              this.notifier.warn(`   Failed to set leverage for ${pair}: ${error}`)
+            }
+          }
+        }
+
+        // Close positions in pairs we're rotating out of
+        await this.closeOldPositions(result.newPairs)
+      } else {
+        this.notifier.info(`✓ Current pairs still optimal: ${result.newPairs.join(', ')}`)
+      }
+
+      this.lastRotationTime = now
+
+    } catch (error) {
+      this.notifier.error(`Error in rotation: ${error}`)
+    }
+  }
+
+  async closeOldPositions(newPairs: string[]) {
+    const state = this.stateManager.getState()
+    const positionsToClose = Object.keys(state.positions).filter(pair => !newPairs.includes(pair))
+
+    for (const pair of positionsToClose) {
+      const pos = state.positions[pair]
+      this.notifier.info(`   Closing ${pair} position: ${pos.side} ${pos.size}`)
+
+      // Place reduce-only order to close position
+      const closeResult = await this.trading.placeOrder(
+        pair,
+        pos.side === 'long' ? 'sell' : 'buy',
+        pos.entryPrice, // Use entry price for fast execution
+        pos.size,
+        'market', // Will use IOC for fast execution
+        true // reduce-only flag
+      )
+
+      if (closeResult.success && closeResult.fillPrice) {
+        const pnl = pos.side === 'long'
+          ? (closeResult.fillPrice - pos.entryPrice) * pos.size / pos.entryPrice
+          : (pos.entryPrice - closeResult.fillPrice) * pos.size / pos.entryPrice
+
+        this.stateManager.recordTrade(pair, 'close', closeResult.fillPrice, pos.size, pnl)
+        this.stateManager.updatePosition(pair, 0, 0, 'long')
+        this.notifier.info(`   ✓ Closed ${pair}: PnL $${pnl.toFixed(2)}`)
+      }
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Market Making Execution
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async executeMM(pairs: string[]) {
+    // ⚡ OPTIMIZED: Fetch market data ONCE for all pairs (major latency improvement!)
+    const [meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
+
+    // ⚡ OPTIMIZED: Execute all pairs in parallel with shared market data
+    await Promise.all(
+      pairs.map(async (pair) => {
+        try {
+          await this.executePairMM(pair, assetCtxs)
+        } catch (error) {
+          this.notifier.error(`Error executing MM for ${pair}: ${error}`)
+          this.stateManager.recordExecution(false)
+        }
+      })
+    )
+  }
+
+  async executePairMM(pair: string, assetCtxs?: any[]) {
+    const startTime = Date.now()
+
+    // Get current market data (use cached if provided)
+    if (!assetCtxs) {
+      const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
+      assetCtxs = ctxs
+    }
+    const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+
+    if (!pairData) {
+      this.notifier.warn(`⚠️  No data for ${pair}`)
+      return
+    }
+
+    const midPrice = Number(pairData.midPx || 0)
+    if (midPrice === 0) {
+      this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
+      return
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // Get REAL position from Hyperliquid (synced via fills)
+    // ══════════════════════════════════════════════════════════════
+    const state = this.stateManager.getState()
+    const position = state.positions[pair]
+
+    // Calculate order size with tuning
+    const adjustedOrderUsd = this.baseOrderUsd * this.tuning.orderUsdFactor
+
+    // Use Kelly Criterion for position sizing (simplified)
+    const kellySize = positionSizeUSD({
+      winProb: 0.55,
+      winRatio: 1.4,
+      bankrollUsd: 20000
+    })
+    const orderSize = Math.min(adjustedOrderUsd, kellySize)
+
+    // Calculate spread with tuning
+    const adjustedSpread = this.makerSpreadBps * this.tuning.makerSpreadFactor
+    const spreadFactor = adjustedSpread / 10000
+
+    // Calculate bid/ask prices
+    const bidPrice = midPrice * (1 - spreadFactor)
+    const askPrice = midPrice * (1 + spreadFactor)
+
+    // ══════════════════════════════════════════════════════════════
+    // PROPER MARKET MAKING - Place passive orders and let them fill
+    // ══════════════════════════════════════════════════════════════
+
+    // Check existing orders
+    const existingOrders = this.trading instanceof LiveTrading
+      ? await this.trading.getOpenOrders(pair)
+      : []
+
+    // ═══════════════════════════════════════════════════════════
+    // CHASE MODE: Aggressively update orders to follow price
+    // ═══════════════════════════════════════════════════════════
+    const CHASE_THRESHOLD = 0.003  // 0.3% - much more aggressive than 1%
+    let shouldCancelOrders = false
+
+    if (existingOrders.length > 0) {
+      for (const order of existingOrders) {
+        const orderPrice = parseFloat(order.limitPx)
+
+        // Check if order is stale based on mid price movement
+        const priceDiffFromMid = Math.abs(midPrice - orderPrice) / midPrice
+
+        // For BUY orders: check if we're too far below current bid price
+        // For SELL orders: check if we're too far above current ask price
+        let isOrderStale = priceDiffFromMid > CHASE_THRESHOLD
+
+        if (order.side === 'B') {
+          // BUY order - should be near bidPrice
+          const diffFromBid = Math.abs(bidPrice - orderPrice) / bidPrice
+          isOrderStale = isOrderStale || diffFromBid > CHASE_THRESHOLD
+        } else {
+          // SELL order - should be near askPrice
+          const diffFromAsk = Math.abs(askPrice - orderPrice) / askPrice
+          isOrderStale = isOrderStale || diffFromAsk > CHASE_THRESHOLD
+        }
+
+        if (isOrderStale) {
+          shouldCancelOrders = true
+          this.notifier.info(`   🏃 Chase mode: Order stale, will update (price moved ${(priceDiffFromMid * 100).toFixed(2)}%)`)
+          break
+        }
+      }
+    }
+
+    if (shouldCancelOrders || existingOrders.length > 1) {
+      if (this.trading instanceof LiveTrading) {
+        await this.trading.cancelPairOrders(pair)
+      }
+    }
+
+    // ═══════════════════════════════════════════
+    // Place NEW ORDERS (don't update state until filled!)
+    // ═══════════════════════════════════════════
+
+    if (!position || position.size === 0) {
+      // NO POSITION: Place BID order and wait for fill
+      // Only place if we don't already have a bid order
+      const hasBidOrder = existingOrders.some(o => o.side === 'B')
+
+      if (!hasBidOrder) {
+        this.notifier.info(`📊 ${pair} MM: Placing BID $${bidPrice.toFixed(4)} | Spread: ${adjustedSpread}bps`)
+
+        await this.trading.placeOrder(
+          pair,
+          'buy',
+          bidPrice,
+          orderSize,
+          'limit'
+        )
+        // NOTE: Do NOT update position here! Wait for fill sync
+      }
+
+    } else if (position.side === 'long' && position.size > 0) {
+      // HAVE POSITION: Place ASK order to sell
+      // Only place if we don't already have an ask order
+      const hasAskOrder = existingOrders.some(o => o.side === 'A')
+
+      if (!hasAskOrder) {
+        // Sell at entry price + spread to guarantee profit
+        const minSellPrice = position.entryPrice * (1 + spreadFactor)
+        const targetSellPrice = Math.max(askPrice, minSellPrice)
+
+        this.notifier.info(`📊 ${pair} MM: Placing ASK $${targetSellPrice.toFixed(4)} (entry: $${position.entryPrice.toFixed(4)})`)
+
+        await this.trading.placeOrder(
+          pair,
+          'sell',
+          targetSellPrice,
+          position.size,
+          'limit'
+        )
+        // NOTE: Do NOT update position here! Wait for fill sync
+      }
+    }
+
+    // Positions are updated ONLY via syncPnLFromHyperliquid() in main loop
+    this.stateManager.recordExecution(true, Date.now() - startTime)
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Taker Order Strategy - Unlocks API rate limits
+  // ───────────────────────────────────────────────────────────────────────────
+
+  async executeTakerOrder() {
+    const now = Date.now()
+
+    // Check if it's time for a taker order
+    if (now - this.lastTakerOrderTime < this.takerOrderIntervalMs) {
+      return
+    }
+
+    this.notifier.info('⚡ Executing taker order to unlock rate limits...')
+
+    try {
+      // Pick the first active trading pair
+      const pairs = this.rotation.getCurrentPairs()
+      if (pairs.length === 0) {
+        this.notifier.warn('   No active pairs for taker order')
+        return
+      }
+
+      const pair = pairs[0]
+
+      // Get current market price
+      const [meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
+      const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+
+      if (!pairData) {
+        this.notifier.warn(`   No data for ${pair}`)
+        return
+      }
+
+      const midPrice = Number(pairData.midPx || 0)
+      if (midPrice === 0) {
+        this.notifier.warn(`   Invalid mid price for ${pair}`)
+        return
+      }
+
+      // Place a taker order (market order with IOC)
+      // Alternate between buy and sell to stay balanced
+      const isBuy = Math.random() > 0.5
+
+      this.notifier.info(`   ${isBuy ? '💚 BUY' : '💔 SELL'} ${pair} @ market (${this.takerOrderSizeUsd} USD)`)
+
+      const result = await this.trading.placeOrder(
+        pair,
+        isBuy ? 'buy' : 'sell',
+        midPrice,
+        this.takerOrderSizeUsd,
+        'market'  // Uses IOC for immediate fill
+      )
+
+      if (result.success) {
+        this.notifier.info(`   ✅ Taker order executed successfully!`)
+        this.notifier.info(`   📈 Rate limit unlocked: +$${this.takerOrderSizeUsd} volume`)
+        this.lastTakerOrderTime = now
+      } else {
+        this.notifier.warn(`   ⚠️  Taker order failed`)
+      }
+
+    } catch (error) {
+      this.notifier.error(`   Error executing taker order: ${error}`)
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Status Logging
+  // ───────────────────────────────────────────────────────────────────────────
+
+  logStatus(supervisorResult: any) {
+    const state = this.stateManager.getState()
+    const stats = this.stateManager.getExecStats()
+
+    const successRate = stats.lastN > 0
+      ? (stats.success / stats.lastN * 100).toFixed(1)
+      : '0.0'
+
+    this.notifier.info('─'.repeat(80))
+    this.notifier.info(`📊 Status | Daily PnL: $${state.dailyPnl.toFixed(2)} | Total: $${state.totalPnl.toFixed(2)}`)
+    this.notifier.info(`   Exec: ${successRate}% success (${stats.success}/${stats.lastN}) | Avg latency: ${stats.avgLatencyMs.toFixed(0)}ms`)
+    this.notifier.info(`   Tuning: order=${(this.tuning.orderUsdFactor * 100).toFixed(0)}% | spread=${(this.tuning.makerSpreadFactor * 100).toFixed(0)}%`)
+    this.notifier.info(`   Health: ${supervisorResult.healthEval.severity}`)
+
+    // Log positions
+    const posCount = Object.keys(state.positions).length
+    if (posCount > 0) {
+      this.notifier.info(`   Positions (${posCount}):`)
+      for (const [pair, pos] of Object.entries(state.positions)) {
+        this.notifier.info(`     ${pair}: ${pos.side} $${pos.size.toFixed(0)} @ $${pos.entryPrice.toFixed(4)}`)
+      }
+    }
+
+    this.notifier.info('─'.repeat(80))
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Utilities
+  // ───────────────────────────────────────────────────────────────────────────
+
+  sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN ENTRY POINT
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const bot = new HyperliquidMMBot()
+
+  // Initialize live trading if not in dry run mode
+  await bot.initialize()
+
+  // Handle graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n🛑 Received SIGINT, shutting down gracefully...')
+    process.exit(0)
+  })
+
+  process.on('SIGTERM', () => {
+    console.log('\n🛑 Received SIGTERM, shutting down gracefully...')
+    process.exit(0)
+  })
+
+  // Start bot
+  await bot.mainLoop()
+}
+
+// Run
+main().catch(error => {
+  console.error('Fatal error:', error)
+  process.exit(1)
+})

@@ -1,0 +1,6 @@
+[
+  {"pair":"ASTER","realizedVol5m":0.014,"spreadBps":12,"topDepthUsd":18000,"takerFeeBps":8,"smartFlow":0.10,"trades1h":120},
+  {"pair":"FARTCOIN","realizedVol5m":0.011,"spreadBps":9,"topDepthUsd":32000,"takerFeeBps":6,"smartFlow":0.05,"trades1h":95},
+  {"pair":"ZEC","realizedVol5m":0.008,"spreadBps":7,"topDepthUsd":45000,"takerFeeBps":6,"smartFlow":0.02,"trades1h":70},
+  {"pair":"SOL","realizedVol5m":0.016,"spreadBps":8,"topDepthUsd":52000,"takerFeeBps":6,"smartFlow":0.12,"trades1h":210}
+]

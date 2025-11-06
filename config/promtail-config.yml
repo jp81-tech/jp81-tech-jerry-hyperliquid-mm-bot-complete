@@ -1,0 +1,101 @@
+# Promtail Configuration for Hyperliquid MM Bot
+# Drop-in config for structured log scraping with logfmt parsing
+#
+# Installation:
+#   1. Copy to /etc/promtail/promtail-mm-bot.yml
+#   2. Restart Promtail: systemctl restart promtail
+#   3. Verify scraping: check Loki for {job="mm-bot"}
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+# Position tracking (where Promtail left off in the log)
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://localhost:3100/loki/api/v1/push
+    # For remote Loki, use: http://<loki-host>:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: mm-bot
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: mm-bot
+          host: mm-ny1  # Change to your hostname
+          environment: production
+          __path__: /root/hyperliquid-mm-bot-complete/bot.log
+
+    # Pipeline: extract structured fields from quant_evt lines
+    pipeline_stages:
+      # Stage 1: Filter only quant_evt lines (skip human-readable logs)
+      - match:
+          selector: '{job="mm-bot"} |~ "quant_evt="'
+          stages:
+            # Stage 2: Parse logfmt key=value pairs
+            - logfmt:
+                mapping:
+                  # Core event metadata
+                  quant_evt: quant_evt
+                  ts: ts
+                  tms: tms
+                  seq: seq
+
+                  # Order identification
+                  pair: pair
+                  side: side
+                  cloid: cloid
+
+                  # Order intent
+                  tif: tif
+                  ro: ro
+
+                  # Quantization details
+                  pxDec: pxDec
+                  stepDec: stepDec
+                  priceInt: priceInt
+                  sizeInt: sizeInt
+                  ticks: ticks
+                  steps: steps
+
+                  # Attempt metadata
+                  try: try
+
+                  # Submit result
+                  ok: ok
+                  err: err
+                  err_code: err_code
+
+            # Stage 3: Use ts (ISO 8601) as log timestamp
+            - timestamp:
+                source: ts
+                format: RFC3339
+                fallback_formats:
+                  - RFC3339Nano
+
+            # Stage 4: Promote high-value fields to labels (for fast filtering)
+            # WARNING: Keep cardinality low! Only add fields with <100 unique values
+            - labels:
+                quant_evt:   # attempt | submit
+                pair:        # SOL | ASTER | PUMP | etc
+                side:        # buy | sell
+                err_code:    # E_TICK | E_SIZE | E_ALO | E_TICK_SUPP | (empty)
+                ok:          # 0 | 1 | (empty)
+
+            # Stage 5: Keep original message for log viewer
+            - output:
+                source: message
+
+      # Stage 6: Also capture human-readable logs (suppression events, spec changes)
+      - match:
+          selector: '{job="mm-bot"} |~ "sol_suppressed_60s|SOL specs changed|🔧 Build"'
+          stages:
+            - regex:
+                expression: '^(?P<timestamp>[^ ]+) (?P<message>.*)$'
+            - timestamp:
+                source: timestamp
+                format: RFC3339
+            - output:
+                source: message

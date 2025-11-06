@@ -1,0 +1,6 @@
+⚡ MM Alerts (60m)
+Turnover: $10860
+Fills: 199 (199/h)  Buy:100 Sell:99
+Pairs: ZEC, ZK, HYPE, FARTCOIN
+Est fees bps: -0.95  Net bps target: 1.50
+Status: ✅ OK
