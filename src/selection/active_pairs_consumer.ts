@@ -42,7 +42,7 @@ export function loadActivePairs(opts: ActivePairsOptions = {}): {
       return { ok: false, reason: "schema", pairs: [] };
     }
 
-    let pairs = parsed.pairs.filter(Boolean).map((s) => String(s).trim().toUpperCase());
+    let pairs = parsed.pairs.filter(Boolean).map((s) => String(s).trim());
     if (opts.allowlist && opts.allowlist.size) {
       pairs = pairs.filter((p) => opts.allowlist!.has(p));
       if (pairs.length === 0) return { ok: false, reason: "allowlist", pairs: [] };

@@ -1737,7 +1737,7 @@ class HyperliquidMMBot {
           // Clear confluence when using manual pairs
           this.confluenceAnalysis = []
         } else if (process.env.ACTIVE_PAIRS && process.env.ACTIVE_PAIRS.trim()) {
-          activePairs = process.env.ACTIVE_PAIRS.split(",").map(p => p.trim().toUpperCase()).filter(Boolean)
+          activePairs = process.env.ACTIVE_PAIRS.split(",").map(p => p.trim()).filter(Boolean)
           if (!this.lastActivePairsSource || this.lastActivePairsSource !== "env") {
             this.notifier.info(`🔧 Using pairs from ACTIVE_PAIRS env: ${activePairs.join(", ")}`)
             this.lastActivePairsSource = "env"
@@ -2029,7 +2029,7 @@ class HyperliquidMMBot {
         const unrealizedPnl = parseFloat(positionData.position.unrealizedPnl || '0')
 
         // Get current market price
-        const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+        const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
         if (!pairData) continue
 
         const midPrice = parseFloat(pairData.midPx || '0')
@@ -2183,7 +2183,7 @@ class HyperliquidMMBot {
       const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
       assetCtxs = ctxs
     }
-    const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+    const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
 
     if (!pairData) {
       this.notifier.warn(`⚠️  No data for ${pair}`)
@@ -2311,7 +2311,7 @@ class HyperliquidMMBot {
       const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
       assetCtxs = ctxs
     }
-    const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+    const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
 
     if (!pairData) {
       this.notifier.warn(`⚠️  No data for ${pair}`)
@@ -2517,7 +2517,7 @@ class HyperliquidMMBot {
 
       // Get current market price
       const [meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
-      const pairData = assetCtxs.find(ctx => ctx.coin === pair)
+      const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
 
       if (!pairData) {
         this.notifier.warn(`   No data for ${pair}`)
