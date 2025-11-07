@@ -1,0 +1,42 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Hyperliquid MM Bot - Daily Health Check (08:35 Zurich = 07:35 UTC)
+##35 7 * * * cd /root/hyperliquid-mm-bot-complete && bash scripts/daily-health.sh > reports/daily-health-last.txt 2>&1
+##*/2 * * * * cd /root/hyperliquid-mm-bot-complete && scripts/watchdog_deny_positions.sh >> runtime/watchdog.log 2>&1
+##*/3 * * * * cd /root/hyperliquid-mm-bot-complete && scripts/cancel_open_orders_stub.sh >> runtime/watchdog.log 2>&1
+##*/2 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/watchdog_panic.sh >> runtime/watchdog.log 2>&1
+##*/1 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/cancel_deny_orders.sh >> runtime/watchdog.log 2>&1
+##*/1 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/cancel_non_active_orders.ts >> runtime/watchdog.log 2>&1
+
+##*/15 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/alerts.ts >> runtime/alerts.log 2>&1
+
+TZ=Europe/Zurich
+##0 23 * * * /root/hyperliquid-mm-bot-complete/scripts/profile_night.sh >> /root/hyperliquid-mm-bot-complete/runtime/watchdog.log 2>&1
+##0 7 * * * /root/hyperliquid-mm-bot-complete/scripts/profile_day.sh >> /root/hyperliquid-mm-bot-complete/runtime/watchdog.log 2>&1
+##*/3 * * * * /root/hyperliquid-mm-bot-complete/scripts/enforce_layers.sh >> /root/hyperliquid-mm-bot-complete/runtime/watchdog.log 2>&1
+##*/3 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/pair_config_snapshot.ts >> runtime/pair_config.log 2>&1
+##*/3 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/guardrails_watch.ts >> runtime/guardrails.log 2>&1
+##*/2 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/panic_taker.ts >> runtime/guardrails.log 2>&1
+##*/7 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/losing_fill_watch.ts >> runtime/guardrails.log 2>&1
+##*/10 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/env_drift_guard.sh >> runtime/watchdog.log 2>&1
+##0 8 * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/morning_recovery.sh >> runtime/morning_recovery.log 2>&1
+##*/10 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/fetch_market_stats.ts >> runtime/watchdog.log 2>&1
+TZ=Europe/Zurich
+##0 8 6 11 * /root/hyperliquid-mm-bot-complete/scripts/shift_to_volatile_0800.sh >> /root/hyperliquid-mm-bot-complete/runtime/watchdog.log 2>&1
+TZ=Europe/Zurich
+##10 8 6 11 * /root/hyperliquid-mm-bot-complete/scripts/nocny_przeglad_0810.sh >> /root/hyperliquid-mm-bot-complete/runtime/watchdog.log 2>&1
+##*/10 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/alo_reject_watch.sh >> runtime/watchdog.log 2>&1
+##*/30 * * * * cd /root/hyperliquid-mm-bot-complete && TMP=$(mktemp) && npx tsx scripts/rotation_daemon.ts > "$TMP" 2>> runtime/watchdog.log && mv "$TMP" runtime/active_pairs.json && echo "rotation_ok $(date -u +%FT%TZ)" >> runtime/watchdog.log
+##0 8 * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/daily_report.sh
+##*/5 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/dump_detector.sh >> runtime/watchdog.log 2>&1
+##*/15 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/bounce_manager.sh >> runtime/watchdog.log 2>&1
+##*/1 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/mode_ping.sh >> runtime/watchdog.log 2>&1
+##*/5 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/pain_guard.sh >> runtime/pain_guard.log 2>&1
+##*/2 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/roe_ping.sh >> runtime/watchdog.log 2>&1
+##*/3 * * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/soft_guard.sh >> runtime/soft_guard.log 2>&1
+##*/3 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/early_bias_and_spread.ts >> runtime/watchdog.log 2>&1
+##*/2 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/soft_taker_hedge.ts >> runtime/guardrails.log 2>&1
+##* * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/guardrail_autopilot.ts >> runtime/autopilot.log 2>&1
+##0 20 * * * cd /root/hyperliquid-mm-bot-complete && ./scripts/daily_report.sh >> runtime/daily_report.log 2>&1
+##*/5 * * * * cd /root/hyperliquid-mm-bot-complete && npx tsx scripts/auto_revert_layers.ts >> runtime/autopilot.log 2>&1
+*/2 * * * * /usr/local/bin/mm-close-legacy-profit ZEC NEAR XPL FIL >> /root/hyperliquid-mm-bot-complete/runtime/legacy_close.log 2>&1
