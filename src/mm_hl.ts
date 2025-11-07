@@ -11,6 +11,11 @@ import { getNansenProAPI, CopyTradingSignal } from './integrations/nansen_pro.js
 import { OrderReporter } from './utils/order_reporter.js'
 import { loadActivePairs } from './selection/active_pairs_consumer.js'
 import {
+  getFinalPairsWithAllocation,
+  type ConfluenceAnalysis,
+  type RotationScore
+} from './selection/confluence.js'
+import {
   roundToTick,
   roundToLot,
   getInstrumentSpecs,
@@ -1717,10 +1722,10 @@ class HyperliquidMMBot {
         await this.rotateIfNeeded()
 
         // Execute market making
-        // Get active pairs from rotation (top 3 by volatility)
-        // Priority: 1) active_pairs.json  2) ACTIVE_PAIRS env  3) rotation
+        // Get active pairs using confluence-based allocation
+        // Priority: 1) active_pairs.json  2) ACTIVE_PAIRS env  3) confluence analysis
         let activePairs: string[] = []
-        
+
         // Try loading from active_pairs.json first
         const loadResult = loadActivePairs({ staleSec: 900, maxCount: 10 })
         if (loadResult.ok && loadResult.pairs.length > 0) {
@@ -1729,17 +1734,44 @@ class HyperliquidMMBot {
             this.notifier.info(`📋 Using pairs from active_pairs.json: ${activePairs.join(", ")}`)
             this.lastActivePairsSource = "file"
           }
+          // Clear confluence when using manual pairs
+          this.confluenceAnalysis = []
         } else if (process.env.ACTIVE_PAIRS && process.env.ACTIVE_PAIRS.trim()) {
           activePairs = process.env.ACTIVE_PAIRS.split(",").map(p => p.trim().toUpperCase()).filter(Boolean)
           if (!this.lastActivePairsSource || this.lastActivePairsSource !== "env") {
             this.notifier.info(`🔧 Using pairs from ACTIVE_PAIRS env: ${activePairs.join(", ")}`)
             this.lastActivePairsSource = "env"
           }
+          // Clear confluence when using manual pairs
+          this.confluenceAnalysis = []
         } else {
-          activePairs = this.rotation.getCurrentPairs()
-          if (!this.lastActivePairsSource || this.lastActivePairsSource !== "rotation") {
-            this.notifier.info(`🔄 Using pairs from rotation: ${activePairs.join(", ")}`)
-            this.lastActivePairsSource = "rotation"
+          // Use confluence-based pair selection
+          const rotationPairs: RotationScore[] = this.rotation.getCurrentPairs().map((pair, idx) => ({
+            pair,
+            score: 100 - (idx * 10),  // Simple scoring based on rotation rank
+            volatility24h: undefined
+          }))
+
+          const copySignals = Array.from(this.copyTradingSignalMap.values())
+
+          this.confluenceAnalysis = getFinalPairsWithAllocation(
+            rotationPairs,
+            copySignals,
+            {
+              baseOrderUsd: this.baseOrderUsd,
+              totalCapital: Number(process.env.TOTAL_CAPITAL_USD || 12000),
+              minPairAllocation: Number(process.env.MIN_PAIR_ALLOCATION_USD || 150),
+              maxConfluenceBoost: Number(process.env.MAX_CONFLUENCE_BOOST || 2.0),
+              copyBoostWeight: Number(process.env.COPY_BOOST_WEIGHT || 0.4),
+              rotationBoostWeight: Number(process.env.ROTATION_BOOST_WEIGHT || 0.3)
+            }
+          )
+
+          activePairs = this.confluenceAnalysis.map(c => c.pair)
+
+          if (!this.lastActivePairsSource || this.lastActivePairsSource !== "confluence") {
+            this.notifier.info(`🎯 Using confluence-based pairs: ${activePairs.join(", ")}`)
+            this.lastActivePairsSource = "confluence"
           }
         }
 
@@ -2044,6 +2076,7 @@ class HyperliquidMMBot {
    * (Can be used to adjust order sizing or prioritize certain pairs)
    */
   private copyTradingSignalMap: Map<string, CopyTradingSignal> = new Map()
+  private confluenceAnalysis: ConfluenceAnalysis[] = []
 
   private storeCopyTradingSignals(signals: CopyTradingSignal[]) {
     this.copyTradingSignalMap.clear()
@@ -2167,9 +2200,17 @@ class HyperliquidMMBot {
     const state = this.stateManager.getState()
     const position = state.positions[pair]
 
+    // Get confluence allocation for this pair (if available)
+    const confluence = this.confluenceAnalysis.find(c => c.pair === pair)
+    const capitalPerPair = confluence?.finalAllocation || this.baseOrderUsd
+
+    // Log confluence boost if applicable
+    if (confluence && confluence.sources.length > 1) {
+      this.notifier.info(`⭐ ${pair} confluence boost: ${confluence.confluenceBoost.toFixed(2)}x → $${capitalPerPair.toFixed(0)}`)
+    }
+
     // Calculate inventory skew as percentage of capital
     // position.size is in coins, need to convert to USD value
-    const capitalPerPair = this.baseOrderUsd // Use BASE_ORDER_USD from config
     let inventorySkew = 0
     if (position) {
       const positionValueUsd = position.size * midPrice
@@ -2289,8 +2330,12 @@ class HyperliquidMMBot {
     const state = this.stateManager.getState()
     const position = state.positions[pair]
 
+    // Get confluence allocation for this pair (if available)
+    const confluence = this.confluenceAnalysis.find(c => c.pair === pair)
+    const baseAllocation = confluence?.finalAllocation || this.baseOrderUsd
+
     // Calculate order size with tuning
-    const adjustedOrderUsd = this.baseOrderUsd * this.tuning.orderUsdFactor
+    const adjustedOrderUsd = baseAllocation * this.tuning.orderUsdFactor
 
     // Use Kelly Criterion for position sizing (simplified)
     const kellySize = positionSizeUSD({
@@ -2299,6 +2344,11 @@ class HyperliquidMMBot {
       bankrollUsd: 20000
     })
     const orderSize = Math.min(adjustedOrderUsd, kellySize)
+
+    // Log confluence boost if applicable
+    if (confluence && confluence.sources.length > 1) {
+      this.notifier.info(`⭐ ${pair} confluence boost: ${confluence.confluenceBoost.toFixed(2)}x → $${baseAllocation.toFixed(0)}`)
+    }
 
     // Calculate spread with tuning
     const adjustedSpread = this.makerSpreadBps * this.tuning.makerSpreadFactor
