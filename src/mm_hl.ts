@@ -2441,13 +2441,21 @@ class HyperliquidMMBot {
     // DUAL-SIDED MARKET MAKING - Place BOTH bid and ask simultaneously
     // ═══════════════════════════════════════════════════════════════════
 
-    // Calculate current position exposure
-    const currentPositionValue = position ? Math.abs(position.size) : 0
-    const maxPositionSizeUsd = orderSize * 4  // Allow up to 4x base order size (MAX_POSITION_MULTIPLIER)
+    // Calculate current position exposure in USD (not coins!)
+    const currentPositionSizeCoins = position ? Math.abs(position.size) : 0
+    const currentPositionValueUsd = currentPositionSizeCoins * midPrice
+
+    // Get max allocation from config (with fallback to confluence allocation)
+    const maxAllocUsd = Number(process.env.MAX_ALLOC_USD || 1200)
+    const maxPositionSizeUsd = Math.max(maxAllocUsd, baseAllocation * 2.0)  // Use MAX_ALLOC_USD or 2x confluence allocation
 
     // Determine if we can place each side based on position limits
-    const canPlaceBid = !hasBidOrder && (!position || position.side !== 'short' || currentPositionValue < maxPositionSizeUsd)
-    const canPlaceAsk = !hasAskOrder && (!position || position.side !== 'long' || currentPositionValue < maxPositionSizeUsd)
+    // For LONG positions: only place more BIDs if we haven't hit the limit
+    // For SHORT positions: only place more ASKs if we haven't hit the limit
+    const positionAtLimit = currentPositionValueUsd >= maxPositionSizeUsd
+
+    const canPlaceBid = !hasBidOrder && (!position || position.side === 'short' || !positionAtLimit)
+    const canPlaceAsk = !hasAskOrder && (!position || position.side === 'long' || !positionAtLimit)
 
     // PLACE BID ORDER (buy side)
     if (canPlaceBid) {
@@ -2461,7 +2469,7 @@ class HyperliquidMMBot {
         'limit'
       )
     } else if (!hasBidOrder) {
-      this.notifier.info(`   ⏸️  BID skipped: Position limit reached ($${currentPositionValue.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
+      this.notifier.info(`   ⏸️  BID skipped: Position limit reached ($${currentPositionValueUsd.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
     }
 
     // PLACE ASK ORDER (sell side)
@@ -2484,7 +2492,7 @@ class HyperliquidMMBot {
         'limit'
       )
     } else if (!hasAskOrder) {
-      this.notifier.info(`   ⏸️  ASK skipped: Position limit reached ($${currentPositionValue.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
+      this.notifier.info(`   ⏸️  ASK skipped: Position limit reached ($${currentPositionValueUsd.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
     }
 
     // Positions are updated ONLY via syncPnLFromHyperliquid() in main loop
