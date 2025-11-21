@@ -211,6 +211,121 @@ function isZecNightUnwindOnly(): boolean {
   return envBool("ZEC_NIGHT_UNWIND_ONLY", true)
 }
 
+const ZEC_PRICE_HISTORY: Array<{ t: number; mid: number }> = []
+
+function recordZecMidPrice(midPrice: number): void {
+  if (!Number.isFinite(midPrice) || midPrice <= 0) {
+    return
+  }
+  const now = Date.now()
+  ZEC_PRICE_HISTORY.push({ t: now, mid: midPrice })
+  const retentionMs = getZecDownWindowSec() * 1000 * 2
+  const cutoff = now - retentionMs
+  while (ZEC_PRICE_HISTORY.length && ZEC_PRICE_HISTORY[0].t < cutoff) {
+    ZEC_PRICE_HISTORY.shift()
+  }
+}
+
+function getZecMovePct(windowSec: number = getZecDownWindowSec()): number | null {
+  if (ZEC_PRICE_HISTORY.length < 2) {
+    return null
+  }
+  const now = Date.now()
+  const cutoff = now - windowSec * 1000
+
+  let startIndex = ZEC_PRICE_HISTORY.findIndex(sample => sample.t >= cutoff)
+  if (startIndex === -1) {
+    startIndex = ZEC_PRICE_HISTORY.length - 1
+  }
+
+  const first = ZEC_PRICE_HISTORY[startIndex]
+  const last = ZEC_PRICE_HISTORY[ZEC_PRICE_HISTORY.length - 1]
+  if (!first || !last || first.mid <= 0) {
+    return null
+  }
+
+  return ((last.mid - first.mid) / first.mid) * 100
+}
+
+function isZecDowntrendActive(): boolean {
+  const movePct = getZecMovePct(getZecDownWindowSec())
+  if (movePct === null) {
+    return false
+  }
+  return movePct <= -getZecDownMovePct()
+}
+
+function isWeekend(now: Date = new Date()): boolean {
+  const day = now.getUTCDay()
+  return day === 0 || day === 6
+}
+
+function getGlobalDowntrendMovePct(): number {
+  return Number(process.env.DOWNTREND_MOVE_PCT ?? "3")
+}
+
+function getGlobalDowntrendWindowSec(): number {
+  const mins = Number(process.env.DOWNTREND_WINDOW_MIN ?? "30")
+  if (Number.isFinite(mins) && mins > 0) {
+    return mins * 60
+  }
+  return getZecDownWindowSec()
+}
+
+function isGlobalDowntrendActive(): boolean {
+  const movePct = getZecMovePct(getGlobalDowntrendWindowSec())
+  if (movePct === null) {
+    return false
+  }
+  return movePct <= -getGlobalDowntrendMovePct()
+}
+
+const DEFENSIVE_CONFIG: Record<string, { flag: string; sizeMult: number; spreadMult: number }> = {
+  ZEC: { flag: "ZEC_DEFENSIVE_ENABLED", sizeMult: 0.5, spreadMult: 1.3 },
+  UNI: { flag: "UNI_DEFENSIVE_ENABLED", sizeMult: 0.6, spreadMult: 1.25 },
+  VIRTUAL: { flag: "VIRTUAL_DEFENSIVE_ENABLED", sizeMult: 0.6, spreadMult: 1.25 }
+}
+
+function getWeekendSizeMult(): number {
+  const raw = Number(process.env.WEEKEND_BOOST_SIZE_MULT ?? "1.25")
+  return Number.isFinite(raw) && raw > 0 ? raw : 1
+}
+
+function getWeekendSpreadMult(): number {
+  const raw = Number(process.env.WEEKEND_BOOST_SPREAD_MULT ?? "0.85")
+  return Number.isFinite(raw) && raw > 0 ? raw : 1
+}
+
+type AdaptiveMode = 'none' | 'defensive' | 'weekend'
+
+function computeAdaptiveMultipliers(symbol: string, now: Date, globalDowntrend: boolean): {
+  sizeMult: number
+  spreadMult: number
+  mode: AdaptiveMode
+} {
+  let sizeMult = 1
+  let spreadMult = 1
+  const symbolKey = symbol.toUpperCase()
+
+  if (globalDowntrend) {
+    const cfg = DEFENSIVE_CONFIG[symbolKey]
+    if (cfg && envBool(cfg.flag, symbolKey === "ZEC")) {
+      sizeMult *= cfg.sizeMult
+      spreadMult *= cfg.spreadMult
+      return { sizeMult, spreadMult, mode: 'defensive' }
+    }
+    return { sizeMult, spreadMult, mode: 'none' }
+  }
+
+  if (envBool("WEEKEND_BOOST_ENABLED", false) && isWeekend(now)) {
+    sizeMult *= getWeekendSizeMult()
+    spreadMult *= getWeekendSpreadMult()
+    return { sizeMult, spreadMult, mode: 'weekend' }
+  }
+
+  return { sizeMult, spreadMult, mode: 'none' }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED CONSTANTS & HELPERS - Centralized rounding logic
 // ─────────────────────────────────────────────────────────────────────────────
@@ -869,8 +984,6 @@ class LiveTrading implements TradingInterface {
   private volatilityTracker: Map<string, VolatilityTracker> = new Map()
   private throttleTracker: ThrottleTracker = new ThrottleTracker()
   private lastFillPrice: Map<string, number> = new Map()  // Track last fill for price bands
-
-  private zecPriceHistory: Array<{ t: number; mid: number }> = []
 
   // WebSocket & Rate Limit
   private websocket: HyperliquidWebSocket | null = null
@@ -1533,8 +1646,7 @@ class LiveTrading implements TradingInterface {
             side,
             roundedPrice,
             currentPosSz,
-            cetHour,
-            nowMs: now.getTime()
+            cetHour
           })
           if (!allowed) {
             return { success: false }
@@ -4144,17 +4256,24 @@ class HyperliquidMMBot {
       return
     }
     if (pair === 'ZEC') {
-      this.recordMidPriceSample(pair, midPrice)
+      recordZecMidPrice(midPrice)
     }
 
     // Get position and calculate inventory skew
     const state = this.stateManager.getState()
     const position = state.positions[pair]
 
-    // Calculate inventory skew as percentage of capital
-    // position.size is in coins, need to convert to USD value
-    // Use ROTATION_TARGET_PER_PAIR_USD for grid capital allocation
-    const capitalPerPair = Number(process.env.ROTATION_TARGET_PER_PAIR_USD || this.baseOrderUsd * 20) // Default: 20× baseOrderUsd if not set
+    const capitalBase = Number(process.env.ROTATION_TARGET_PER_PAIR_USD || this.baseOrderUsd * 20) // Default: 20× baseOrderUsd if not set
+    const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    const now = new Date()
+    const globalDowntrend = isGlobalDowntrendActive()
+    const adaptive = computeAdaptiveMultipliers(symbol, now, globalDowntrend)
+    if (adaptive.mode !== 'none') {
+      this.notifier.info(
+        `[RISK_ADAPT] ${pair} ${adaptive.mode === 'defensive' ? 'defensive mode' : 'weekend boost'} size×${adaptive.sizeMult.toFixed(2)} spread×${adaptive.spreadMult.toFixed(2)}`
+      )
+    }
+    let capitalPerPair = capitalBase * adaptive.sizeMult
     let inventorySkew = 0
     if (position) {
       const positionValueUsd = Math.abs(position.size) * midPrice
@@ -4199,7 +4318,6 @@ class HyperliquidMMBot {
 
     // 🔥 Get Nansen directional bias for risk management
     const nansenBias = this.getNansenBiasForPair(pair)
-    const symbol = pair.split(/[-_]/)[0].toUpperCase()
     const biasEntry = this.nansenBiasCache.data[symbol]
     const biasStrength = biasEntry?.biasStrength || 'neutral'
 
@@ -4289,6 +4407,11 @@ class HyperliquidMMBot {
     // 1) Inventory skew adjustment
     let bidSpreadBps = baseL1OffsetWithProfile + skewAdjBidBps
     let askSpreadBps = baseL1OffsetWithProfile + skewAdjAskBps
+
+    if (adaptive.spreadMult !== 1) {
+      bidSpreadBps *= adaptive.spreadMult
+      askSpreadBps *= adaptive.spreadMult
+    }
     
     // 2) Nansen bias – asymetria
     bidSpreadBps *= nansenBidFactor
@@ -4559,7 +4682,17 @@ class HyperliquidMMBot {
       return
     }
     if (pair === 'ZEC') {
-      this.recordMidPriceSample(pair, midPrice)
+      recordZecMidPrice(midPrice)
+    }
+
+    const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    const nowDate = new Date()
+    const globalDowntrend = isGlobalDowntrendActive()
+    const adaptive = computeAdaptiveMultipliers(symbol, nowDate, globalDowntrend)
+    if (adaptive.mode !== 'none') {
+      this.notifier.info(
+        `[RISK_ADAPT] ${pair} ${adaptive.mode === 'defensive' ? 'defensive mode' : 'weekend boost'} size×${adaptive.sizeMult.toFixed(2)} spread×${adaptive.spreadMult.toFixed(2)}`
+      )
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -4588,10 +4721,12 @@ class HyperliquidMMBot {
       winRatio: 1.4,
       bankrollUsd: 20000
     })
-    const orderSize = Math.min(adjustedOrderUsd, kellySize)
+    let orderSize = Math.min(adjustedOrderUsd, kellySize)
+    orderSize *= adaptive.sizeMult
 
     // Calculate spread with tuning
-    const adjustedSpread = this.makerSpreadBps * this.tuning.makerSpreadFactor
+    let adjustedSpread = this.makerSpreadBps * this.tuning.makerSpreadFactor
+    adjustedSpread *= adaptive.spreadMult
     
     // 🛡️ Safety: Clamp to min/max bounds (same as multi-layer)
     const MIN_SPREAD_BPS = Number(process.env.MIN_FINAL_SPREAD_BPS ?? 8)
@@ -4784,7 +4919,7 @@ class HyperliquidMMBot {
         return
       }
     if (pair === 'ZEC') {
-      this.recordMidPriceSample(pair, midPrice)
+      recordZecMidPrice(midPrice)
     }
 
       // Place a taker order (market order with IOC)
@@ -4818,54 +4953,13 @@ class HyperliquidMMBot {
   // ZEC DEFENSIVE MODE HELPERS
   // ───────────────────────────────────────────────────────────────────────────
 
-  private recordMidPriceSample(pair: string, midPrice: number): void {
-    if (pair !== 'ZEC') return
-    if (!Number.isFinite(midPrice) || midPrice <= 0) return
-
-    const now = Date.now()
-    this.zecPriceHistory.push({ t: now, mid: midPrice })
-
-    const retentionMs = getZecDownWindowSec() * 1000 * 2
-    const cutoff = now - retentionMs
-    while (this.zecPriceHistory.length && this.zecPriceHistory[0].t < cutoff) {
-      this.zecPriceHistory.shift()
-    }
-  }
-
-  private isZecDowntrendActive(nowMs: number = Date.now()): boolean {
-    if (this.zecPriceHistory.length < 2) {
-      return false
-    }
-
-    const windowMs = getZecDownWindowSec() * 1000
-    const cutoff = nowMs - windowMs
-
-    while (this.zecPriceHistory.length && this.zecPriceHistory[0].t < cutoff) {
-      this.zecPriceHistory.shift()
-    }
-
-    if (this.zecPriceHistory.length < 2) {
-      return false
-    }
-
-    const first = this.zecPriceHistory[0]
-    const last = this.zecPriceHistory[this.zecPriceHistory.length - 1]
-    if (!first || !last || first.mid <= 0) {
-      return false
-    }
-
-    const movePct = ((last.mid - first.mid) / first.mid) * 100
-    return Number.isFinite(movePct) && movePct <= -getZecDownMovePct()
-  }
-
   private applyZecDefensiveGuards(params: {
     side: 'buy' | 'sell'
     roundedPrice: number
     currentPosSz: number
     cetHour: number
-    nowMs: number
   }): boolean {
-    const { side, roundedPrice, currentPosSz, cetHour, nowMs } = params
+    const { side, roundedPrice, currentPosSz, cetHour } = params
 
     if (side !== 'buy') {
       return true
@@ -4898,7 +4992,7 @@ class HyperliquidMMBot {
     }
 
     // Downtrend defensive window
-    if (this.isZecDowntrendActive(nowMs)) {
+    if (isZecDowntrendActive()) {
       if (isZecDefensiveUnwindOnly()) {
         console.warn(
           `[ZEC_DEFENSIVE] Downtrend unwind-only: blocking BUY. curPosUsd=${curPosUsd.toFixed(2)} moveThreshold=${getZecDownMovePct()}%`
