@@ -1,0 +1,26 @@
+[Unit]
+Description=Hyperliquid Spread Safety Audit
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jerry
+Group=jerry
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+EnvironmentFile=-/home/jerry/hyperliquid-mm-bot-complete/.env
+ExecStart=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/scripts/send_safety_audit.sh
+Nice=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/jerry/hyperliquid-mm-bot-complete
+PrivateTmp=true
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target
+
+
+

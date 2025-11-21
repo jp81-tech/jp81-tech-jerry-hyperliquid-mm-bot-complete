@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/hyperliquid-mm-bot-complete
+
+EFFECTIVE_FILE=runtime/effective_active_pairs.json
+if [ ! -s "$EFFECTIVE_FILE" ]; then
+  echo "effective_active_pairs.json missing"
+  exit 0
+fi
+
+EFFECTIVE=$(jq -r ".pairs[]" "$EFFECTIVE_FILE" | tr "\n" " ")
+
+# Get live orders (more reliable than snapshot)
+ORDERS_RAW=$(npx tsx scripts/check-all-orders.ts 2>/dev/null || true)
+open_pairs=$(echo "$ORDERS_RAW" | grep -oE "[A-Z][A-Z0-9]{1,9} \|" | awk "{print \$1}" | sort -u || true)
+
+# Get positions from API
+pos_pairs=$(npx tsx -e "
+import * as hl from \"@nktkas/hyperliquid\";
+import { privateKeyToAccount } from \"viem/accounts\";
+const pk = process.env.PRIVATE_KEY || \"\";
+const account = privateKeyToAccount(pk as \`0x\${string}\`);
+const info = new hl.InfoClient({ transport: new hl.HttpTransport() });
+const state = await info.clearinghouseState({ user: account.address });
+const positions = (state as any).assetPositions || [];
+for(const p of positions){
+  const pos = p.position;
+  if(pos && parseFloat(pos.szi) !== 0){
+    console.log(pos.coin);
+  }
+}
+" 2>/dev/null | sort -u || true)
+
+all_current=$(printf "%s\n%s\n" "$open_pairs" "$pos_pairs" | awk "NF" | sort -u)
+
+echo "Effective:"
+printf "%s\n" $EFFECTIVE
+echo
+echo "Current:"
+printf "%s\n" $all_current
+echo
+
+non_effective=$(comm -23 <(printf "%s\n" $all_current | sort) <(printf "%s\n" $EFFECTIVE | sort) || true)
+
+if [ -n "$non_effective" ]; then
+  echo "To close:"
+  printf "%s\n" $non_effective
+  for c in $non_effective; do
+    echo "Closing $c..."
+    npx tsx scripts/force-close.ts "$c" 2>&1 | grep -E "(Closing|success|error|No position)" || true
+  done
+fi
+
+need_seed=$(comm -12 <(printf "%s\n" $EFFECTIVE | sort) <(printf "%s\n" $all_current | sort) || true)
+if [ -n "$need_seed" ]; then
+  echo "Seeding SELL for effective pairs:"
+  printf "%s\n" $need_seed
+  npx tsx scripts/seed-sell-safe.ts $need_seed 2>&1 | grep -E "(Seeding|success|error|Order placed)" || true
+fi
+
+echo "Done"

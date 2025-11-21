@@ -1,0 +1,142 @@
+import * as hl from "@nktkas/hyperliquid";
+import { readFileSync } from "fs";
+import { join } from "path";
+import "dotenv/config";
+
+type Meta = Awaited<ReturnType<hl.InfoClient["meta"]>>;
+
+function qSize(sz:number, lot:number, szDec:number){
+  const steps = Math.max(1, Math.floor(sz/lot));
+  const s = steps * lot;
+  return parseFloat(s.toFixed(szDec));
+}
+
+function roundUpToTick(px:number, tick:number){
+  if (!isFinite(px) || tick<=0) return px;
+  return Math.ceil(px / tick) * tick;
+}
+
+async function ensureAskForCoin(
+  ex: hl.ExchangeClient,
+  info: hl.InfoClient,
+  meta: Meta,
+  coin: string,
+  targetNotionalUSD: number,
+  bps1: number,
+  bps2: number|undefined,
+  walletAddr: string
+){
+  const uIdx = meta.universe.findIndex(u => u.name === coin);
+  if (uIdx < 0) { 
+    console.log(`[${coin}] skip: not in universe`); 
+    return; 
+  }
+  const u = meta.universe[uIdx];
+  const lot = Math.pow(10, - (u.szDecimals ?? 3));
+  const tick = Math.pow(10, - (u.pxDecimals ?? 2));
+
+  const l2 = await info.l2Book({ coin });
+  if (!l2 || !l2.levels || l2.levels.length < 2) {
+    console.log(`[${coin}] skip: no l2 data`);
+    return;
+  }
+  
+  let bestAsk = l2.levels[0]?.[0] ? parseFloat(l2.levels[0][0].px) : 0;
+  let bestBid = l2.levels[1]?.[0] ? parseFloat(l2.levels[1][0].px) : 0;
+  
+  let mid = (bestAsk>0 && bestBid>0) ? (bestAsk+bestBid)/2 : Math.max(bestAsk,bestBid);
+  
+  // FALLBACK: if L2 mid is 0, try info.allMids()
+  if (!isFinite(mid) || mid<=0) {
+    try {
+      const allMids = await info.allMids();
+      const coinMid = allMids?.[coin];
+      if (coinMid && isFinite(parseFloat(coinMid)) && parseFloat(coinMid) > 0) {
+        mid = parseFloat(coinMid);
+        bestBid = mid;
+        bestAsk = mid;
+        console.log(`[${coin}] L2 mid=0 ⇒ fallback allMids()=${mid.toFixed(6)}`);
+      }
+    } catch (e) {
+      console.log(`[${coin}] fallback allMids() failed:`, e);
+    }
+  }
+  
+  if (!isFinite(mid) || mid<=0){ 
+    console.log(`[${coin}] skip: no mid after fallback`); 
+    return; 
+  }
+
+  // Check existing orders
+  const oo = await info.openOrders({ user: walletAddr }).catch(()=>null);
+  const mine = (oo?.openOrders || []).filter((o:any)=>o.coin===coin);
+  const mineAsks = mine.filter((o:any)=>o.side==="sell" || o.isBuy===false).length;
+
+  // Check inventory
+  const pos = await info.clearinghouseState({ user: walletAddr });
+  const assetPositions = pos?.assetPositions || [];
+  const openPos = assetPositions.find((p:any)=>p.position?.coin===coin);
+  const invAbs = Math.abs(parseFloat(openPos?.position?.szi ?? "0"));
+
+  if (mineAsks>0 && invAbs>0){
+    console.log(`[${coin}] ok: ASK present (${mineAsks}) with inventory=${invAbs.toFixed(4)}`);
+    return;
+  }
+
+  const wantsDual = (Number(process.env.SEED_SELL_DUAL || "1")>0) && (invAbs===0 || invAbs<lot*1.5);
+  const asksBps = wantsDual && bps2!==undefined ? [bps1, bps2] : [bps1];
+
+  for (const bps of asksBps){
+    const pxRaw = mid * (1 + bps/10000);
+    let px = roundUpToTick(pxRaw, tick);
+    if (bestAsk>0 && px<=bestAsk) px = bestAsk + tick;
+
+    const szRaw = targetNotionalUSD / px;
+    const sz = qSize(szRaw, lot, u.szDecimals ?? 3);
+    if (!isFinite(sz) || sz<=0){ 
+      console.log(`[${coin}] fail: size<=0 (px=${px} not=${targetNotionalUSD})`); 
+      continue; 
+    }
+
+    const payload: hl.OrderRequest = {
+      action: "Order",
+      orders: [{
+        a: uIdx,
+        s: String(sz),
+        p: String(px),
+        b: false,
+        t: { limit: { tif: "Gtc" } },
+        r: false
+      }]
+    };
+    const res = await ex.order(payload);
+    const ok = (res as any)?.status==="ok" || (res as any)?.status==="accepted";
+    console.log(`[${coin}] seed ASK@${px} sz=${sz} ≈$${(sz*px).toFixed(2)} bps=${bps} status=${ok?"ok":"err"}`);
+  }
+}
+
+async function main(){
+  const transport = new hl.HttpTransport();
+  const info = new hl.InfoClient({ transport });
+  const meta = await info.meta();
+  const ex = new hl.ExchangeClient({
+    wallet: process.env.HL_PK || process.env.PRIVATE_KEY || "",
+    transport
+  });
+
+  const walletAddr = process.env.WALLET_ADDRESS || process.env.WALLET_ADDR || process.env.HL_WALLET || "";
+  const targetNotionalUSD = parseFloat(process.env.SEED_SELL_NOTIONAL_USD || "100");
+  const bps1 = parseFloat(process.env.SEED_SELL_SPREAD_BPS || "10");
+  const bps2Env = process.env.SEED_SELL_SECOND_BPS;
+  const bps2 = bps2Env ? parseFloat(bps2Env) : undefined;
+
+  const effPath = join(process.cwd(), "runtime/effective_active_pairs.json");
+  const eff = JSON.parse(readFileSync(effPath, "utf8"));
+  const coins: string[] = (eff?.pairs || []).map((x:string)=>String(x));
+
+  for (const c of coins){
+    try { await ensureAskForCoin(ex, info, meta, c, targetNotionalUSD, bps1, bps2, walletAddr); }
+    catch(e){ console.log(`[${c}] error`, e); }
+  }
+}
+main().catch(e=>{ console.error(e); process.exit(1); });

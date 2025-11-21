@@ -1,0 +1,136 @@
+===========================================
+ANTI-FOMO SYSTEM: READY FOR INTEGRATION
+===========================================
+
+All components installed and configured.
+Implementation requires 2 simple steps.
+
+===========================================
+STEP 1: ADD IMPORT TO src/mm_hl.ts
+===========================================
+
+Location: Top of file (around line 20 with other imports)
+
+ADD THIS LINE:
+import { shouldBlockTopBuy, TopGuardContext } from './utils/topGuards.js'
+
+===========================================
+STEP 2: ADD GUARD CHECK BEFORE BUY ORDERS
+===========================================
+
+Location: src/mm_hl.ts line ~3258 (in the grid order loop)
+
+CURRENT CODE:
+------------
+    // Place grid orders
+    for (const gridOrder of gridOrders) {
+      const side = gridOrder.side === 'bid' ? 'buy' : 'sell'
+
+      // Drop anything below min notional as a final safety
+      if (gridOrder.sizeUsd + 1e-9 < MIN_NOTIONAL) {
+        this.notifier.warn(`   drop < minNotional: $${gridOrder.sizeUsd.toFixed(2)} < $${MIN_NOTIONAL}`)
+        continue
+      }
+
+      this.notifier.info(`   L${gridOrder.layer} ${side.toUpperCase()}: $${gridOrder.price.toFixed(4)} × ${gridOrder.units.toFixed(2)} ($${gridOrder.sizeUsd.toFixed(0)})`)
+
+NEW CODE (add guard check):
+---------------------------
+    // Place grid orders
+    for (const gridOrder of gridOrders) {
+      const side = gridOrder.side === 'bid' ? 'buy' : 'sell'
+
+      // Drop anything below min notional as a final safety
+      if (gridOrder.sizeUsd + 1e-9 < MIN_NOTIONAL) {
+        this.notifier.warn(`   drop < minNotional: $${gridOrder.sizeUsd.toFixed(2)} < $${MIN_NOTIONAL}`)
+        continue
+      }
+
+      // ANTI-FOMO GUARD: Block BUY orders on tops
+      if (side === 'buy') {
+        const ctx: TopGuardContext = {
+          midPx: midPrice,
+          ret1m: 0,  // TODO: Wire up real data
+          ret5m: 0,
+          rsi5m: undefined,
+          localHigh24h: 0,
+          volume5mZscore: 0,
+          recentBuyStreak: 0,
+          recentBuyNotionalUsd: 0,
+        };
+
+        const topGuard = shouldBlockTopBuy(pair, ctx);
+        if (topGuard.block) {
+          this.notifier.warn(`ANTI-FOMO: Skip ${pair} BUY L${gridOrder.layer} - ${topGuard.reason}`);
+          continue;
+        }
+      }
+
+      this.notifier.info(`   L${gridOrder.layer} ${side.toUpperCase()}: $${gridOrder.price.toFixed(4)} × ${gridOrder.units.toFixed(2)} ($${gridOrder.sizeUsd.toFixed(0)})`)
+
+===========================================
+STEP 3: RESTART BOT
+===========================================
+
+systemctl restart mm-bot.service
+
+===========================================
+WHAT'S CONFIGURED (.env)
+===========================================
+
+ANTI_TOP_PUMP_ENABLED=true
+ANTI_TOP_PUMP_RET1M=0.02        # 2% in 1min blocks BUY
+ANTI_TOP_PUMP_RET5M=0.035       # 3.5% in 5min blocks BUY
+
+RSI_TOP_GUARD_ENABLED=true
+RSI_OVERBOUGHT=70               # RSI>70 near high blocks BUY
+TOP_HIGH_DISTANCE_BPS=50        # 0.5% from 24h high
+
+FOMO_GUARD_ENABLED=true
+FOMO_VOLUME_ZSCORE=2.0          # Volume spike near high blocks BUY
+FOMO_HIGH_DISTANCE_BPS=75       # 0.75% from 24h high
+
+===========================================
+CURRENT STATE
+===========================================
+
+STATUS: Phase 1 Complete
+- topGuards.ts installed
+- .env configured
+- Integration points identified
+
+NEXT: Add 2 lines to mm_hl.ts and restart
+
+LIMITATION: Guard inputs are 0/undefined (guards won't trigger yet)
+- Needs real market data wired up (Phase 2)
+- ret1m, ret5m, rsi5m, high24h, volume5mZscore
+
+===========================================
+MONITORING
+===========================================
+
+Watch for guard triggers:
+journalctl -u mm-bot.service -f | grep "ANTI-FOMO"
+
+Expected output when triggered:
+ANTI-FOMO: Skip ZEC BUY L1 - pump_guard ret1m=2.34% ret5m=4.12%
+ANTI-FOMO: Skip UNI BUY L2 - rsi_top_guard rsi5m=74.2 distFromHighBps=32.5
+
+===========================================
+FILES CREATED
+===========================================
+
+/root/hyperliquid-mm-bot-complete/src/utils/topGuards.ts
+- shouldBlockTopBuy() function
+- 3-layer guard logic
+- .env configuration reader
+
+/.env
+- Added ANTI_TOP_PUMP_* variables
+- Added RSI_TOP_GUARD_* variables
+- Added FOMO_GUARD_* variables
+
+===========================================
+Last Updated: 2025-11-13
+Status: Ready for integration
+===========================================

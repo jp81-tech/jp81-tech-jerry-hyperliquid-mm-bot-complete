@@ -1,0 +1,29 @@
+[Unit]
+Description=Hyperliquid MM - Refresh Nansen bias & spreads
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+User=jerry
+Group=jerry
+EnvironmentFile=-/home/jerry/hyperliquid-mm-bot-complete/.env
+Environment="NODE_ENV=production"
+ExecStart=/usr/bin/env bash -lc 'npx tsx scripts/gen_spread_overrides.ts'
+Nice=5
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/jerry/hyperliquid-mm-bot-complete
+PrivateTmp=true
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+
+

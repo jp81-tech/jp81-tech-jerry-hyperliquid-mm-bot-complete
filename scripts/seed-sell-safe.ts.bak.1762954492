@@ -1,0 +1,60 @@
+import * as hl from "@nktkas/hyperliquid";
+import { privateKeyToAccount } from "viem/accounts";
+import "dotenv/config";
+
+type Uni = { name: string; pxDecimals?: number; szDecimals?: number };
+
+function roundToTick(x: number, tick: number) {
+  return Math.round(x / tick) * tick;
+}
+function quant(x: number, decimals: number) {
+  return Number(x.toFixed(decimals));
+}
+
+async function main() {
+  const coinsArg = process.argv.slice(2);
+  const coins = coinsArg.length ? coinsArg : (JSON.parse(await (await import("node:fs/promises")).readFile("runtime/active_pairs.json","utf8")).pairs as string[]).slice(0, 6);
+  const pk = (process.env.HL_PRIVATE_KEY || process.env.PRIVATE_KEY) as `0x${string}` | undefined;
+  if (!pk) { console.error("Set HL_PRIVATE_KEY or PRIVATE_KEY"); process.exit(2); }
+
+  const wallet = privateKeyToAccount(pk);
+  const transport = new hl.HttpTransport();
+  const info = new hl.InfoClient({ transport });
+  const ex = new hl.ExchangeClient({ wallet, transport });
+
+  const meta = await info.meta();
+  const mids = await info.allMids(); // map coin->mid
+
+  const targetNotional = Number(process.env.SEED_NOTIONAL_USD || 12); // >=10 to avoid min-notional
+  for (const coin of coins) {
+    try {
+      const uni = (meta.universe as Uni[]).find(u => u.name === coin);
+      if (!uni) throw new Error(`meta not found for ${coin}`);
+      const a = (meta.universe as Uni[]).findIndex(u => u.name === coin);
+      const pxDec = uni.pxDecimals ?? 4;
+      const szDec = uni.szDecimals ?? 3;
+      const tick = Math.pow(10, -pxDec);
+      const mid = Number((mids as any)[coin]);
+      if (!isFinite(mid) || mid <= 0) throw new Error(`mid missing for ${coin}`);
+
+      const rawPx = mid * (1 + Number(process.env.SEED_PCT || 0.003)); // +0.3% above mid
+      const px = quant(roundToTick(rawPx, tick), pxDec);
+
+      const rawSz = targetNotional / px;
+      const sz = quant(rawSz, szDec);
+
+      // sanity: nie schodź poniżej minimalnego kroku wielkości
+      if (sz <= 0) throw new Error("computed size <= 0");
+
+      const res = await ex.order({
+        orders: [{ a, b: false, p: px.toString(), s: sz.toString(), r: false, t: { limit: { tif: "Gtc" } } }],
+        grouping: "na",
+      });
+      console.log(`[${coin}] SELL seeded px=${px} sz=${sz} ok: ${(res as any).status}`);
+    } catch (e:any) {
+      console.error(`[${coin}] ❌ ${e?.message || e}`);
+      process.exitCode = 2;
+    }
+  }
+}
+main();

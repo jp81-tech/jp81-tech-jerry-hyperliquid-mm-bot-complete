@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/hyperliquid-mm-bot-complete
+
+ROTATION_CANDIDATES=${ROTATION_CANDIDATES:-10}
+ROTATION_TARGET=${ROTATION_TARGET:-4}
+NANSEN_MAX_PAIRS=${NANSEN_MAX_PAIRS:-2}
+ACTIVE_MIN=${ACTIVE_MIN:-4}
+ACTIVE_MAX=${ACTIVE_MAX:-6}
+NANSEN_MODE=${NANSEN_MODE:-nonoverlap_fill}
+
+mkdir -p runtime
+: > runtime/.rot_top10 || true
+: > runtime/.rot_pick4 || true
+: > runtime/.nansen_raw || true
+: > runtime/.nansen_pick || true
+
+if [ -s runtime/rotation_candidates.json ]; then
+  jq -r ".pairs[0:${ROTATION_CANDIDATES}][]" runtime/rotation_candidates.json | awk "NF" > runtime/.rot_top10 || true
+fi
+
+if [ ! -s runtime/.rot_top10 ]; then
+  if [ -s runtime/active_pairs.json.backup ]; then
+    jq -r ".ranked[0:${ROTATION_CANDIDATES}][].pair" runtime/active_pairs.json.backup | awk "NF" > runtime/.rot_top10 || true
+  fi
+fi
+
+head -n "${ROTATION_TARGET}" runtime/.rot_top10 | awk "NF" > runtime/.rot_pick4 || true
+
+if [ -s runtime/nansen_signals.json ]; then
+  jq -r ".signals[].coin" runtime/nansen_signals.json | awk "NF" > runtime/.nansen_raw || true
+fi
+
+ROT_SET="$(cat runtime/.rot_pick4 2>/dev/null || true)"
+NANSEN_SET="$(cat runtime/.nansen_raw 2>/dev/null || true)"
+
+case "$NANSEN_MODE" in
+  nonoverlap_fill)
+    comm -23 <(printf "%s\n" $NANSEN_SET | sort -u) <(printf "%s\n" $ROT_SET | sort -u) | head -n "${NANSEN_MAX_PAIRS}" > runtime/.nansen_pick
+    ;;
+  allow_overlap)
+    printf "%s\n" $NANSEN_SET | sort -u | head -n "${NANSEN_MAX_PAIRS}" > runtime/.nansen_pick
+    ;;
+  priority_nansen)
+    printf "%s\n" $NANSEN_SET | sort -u | head -n "${NANSEN_MAX_PAIRS}" > runtime/.nansen_pick
+    ROT_NO_OVER="$(comm -23 <(printf "%s\n" $ROT_SET | sort -u) <(cat runtime/.nansen_pick | sort -u))"
+    printf "%s\n" $ROT_NO_OVER | awk "NF" > runtime/.rot_pick4
+    ;;
+  *)
+    comm -23 <(printf "%s\n" $NANSEN_SET | sort -u) <(printf "%s\n" $ROT_SET | sort -u) | head -n "${NANSEN_MAX_PAIRS}" > runtime/.nansen_pick
+    ;;
+esac
+
+cat runtime/.rot_pick4 runtime/.nansen_pick 2>/dev/null | awk "NF" | awk "!seen[\$0]++" > runtime/.merged
+
+CNT=$(wc -l < runtime/.merged | tr -d " ")
+if [ "$CNT" -gt "$ACTIVE_MAX" ]; then
+  head -n "$ACTIVE_MAX" runtime/.merged > runtime/.effective
+elif [ "$CNT" -lt "$ACTIVE_MIN" ]; then
+  cat runtime/.merged runtime/.rot_top10 | awk "NF" | awk "!seen[\$0]++" | head -n "$ACTIVE_MIN" > runtime/.effective
+else
+  cp runtime/.merged runtime/.effective
+fi
+
+TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+printf "{\n  \"ts\": \"%s\",\n  \"pairs\": [\n" "$TS" > runtime/effective_active_pairs.json
+awk "{print \"    \\\"\"\$0\"\\\",\"}" runtime/.effective >> runtime/effective_active_pairs.json
+sed -i "\$s/,\$//" runtime/effective_active_pairs.json
+printf "  ]\n}\n" >> runtime/effective_active_pairs.json
+
+cp runtime/effective_active_pairs.json runtime/active_pairs.json
+
+echo "Rotation_top10:"; cat runtime/.rot_top10 2>/dev/null || true
+echo; echo "Rotation_pick4:"; cat runtime/.rot_pick4 2>/dev/null || true
+echo; echo "Nansen_mode:"; echo "$NANSEN_MODE"
+echo "Nansen_raw:"; cat runtime/.nansen_raw 2>/dev/null | head -10 || true
+echo; echo "Nansen_pick:"; cat runtime/.nansen_pick 2>/dev/null || true
+echo; echo "Effective_pairs:"; jq -r ".pairs[]" runtime/effective_active_pairs.json 2>/dev/null || true

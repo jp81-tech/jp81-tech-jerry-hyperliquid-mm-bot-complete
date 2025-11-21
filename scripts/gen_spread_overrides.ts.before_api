@@ -1,0 +1,131 @@
+#!/usr/bin/env -S npx tsx
+/**
+ * Generate Spread Overrides
+ *
+ * Collects real-time metrics and calculates optimal spreads for each token
+ */
+
+import { execSync } from "child_process"
+import { readFileSync, existsSync } from "fs"
+import { calculateSpreadForPair, type PairMetrics, type SpreadConfig, type SpreadOverrides } from "../src/spreadCalculator.js"
+
+const BASE_DIR = "/root/hyperliquid-mm-bot-complete"
+
+// Load configuration
+const configPath = `${BASE_DIR}/spread_config.json`
+const overridesPath = `${BASE_DIR}/manual_spread_overrides.json`
+
+const config: SpreadConfig = JSON.parse(readFileSync(configPath, "utf-8"))
+const manualOverrides: SpreadOverrides = existsSync(overridesPath)
+  ? JSON.parse(readFileSync(overridesPath, "utf-8"))
+  : {}
+
+// Get Nansen data from logs with timestamp validation
+function getNansenMetrics(): Map<string, any> {
+  const logs = execSync(
+    "tail -2000 /root/.pm2/logs/mm-bot-out.log | grep 'Nansen.*base=' | tail -20",
+    { encoding: "utf-8" }
+  )
+
+  const metrics = new Map()
+  const now = Date.now()
+  const MAX_AGE_MS = 4 * 60 * 60 * 1000  // 4 hours
+
+  for (const line of logs.split("\n")) {
+    // Extract timestamp from log line (format: 2025-11-08T21:24:40:)
+    const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/)
+
+    if (tsMatch) {
+      const logTime = new Date(tsMatch[1]).getTime()
+      const ageMs = now - logTime
+
+      // Skip stale data (older than 4 hours)
+      if (ageMs > MAX_AGE_MS) {
+        const ageHours = (ageMs / (60 * 60 * 1000)).toFixed(1)
+        console.error(`# Skipping stale data (${ageHours}h old): ${tsMatch[1]}`)
+        continue
+      }
+    }
+
+    const match = line.match(
+      /\[Nansen\] ([A-Z0-9]+): base=([\d.]+), nansen=\+([\d.]+), total=([\d.]+) \| (🟢|🔴) (BUYING|SELLING) \$([\d.]+[KM]) \| ([\d]+) traders/
+    )
+
+    if (match) {
+      const [_, symbol, base, nansen, total, emoji, side, volume, traders] = match
+      metrics.set(symbol, {
+        symbol,
+        baseScore: parseFloat(base),
+        nansenBoost: parseFloat(nansen),
+        totalScore: parseFloat(total),
+        side,
+        volumeStr: volume,
+        activeTraders: parseInt(traders)
+      })
+    }
+  }
+
+  return metrics
+}
+
+// Convert volume string to number
+function parseVolume(volStr: string): number {
+  const num = parseFloat(volStr.replace(/[KM]/g, ""))
+  if (volStr.includes("M")) return num * 1_000_000
+  if (volStr.includes("K")) return num * 1_000
+  return num
+}
+
+async function main() {
+  const nansenMetrics = getNansenMetrics()
+
+  if (nansenMetrics.size === 0) {
+    console.error("# ⚠️  No fresh Nansen data found in logs (< 4h old)")
+    console.error("# Keeping previous spread overrides")
+    console.error("# This is normal if bot just restarted or no Nansen signals recently")
+    process.exit(0)  // Graceful exit - keep old spreads
+  }
+
+  console.log("# Dynamic Spread Overrides")
+  console.log(`# Generated: ${new Date().toISOString()}`)
+  console.log(`# Tokens: ${nansenMetrics.size}`)
+  console.log("")
+  console.log("# Add these to .env and restart bot:")
+  console.log("")
+
+  const spreads: Array<{symbol: string, spread: number, reason: string}> = []
+
+  for (const [symbol, data] of nansenMetrics) {
+    const metrics: PairMetrics = {
+      token: symbol,
+      volumeUsd24h: parseVolume(data.volumeStr),
+      activeTraders: data.activeTraders,
+      baseScore: data.baseScore,
+      nansenBoost: data.nansenBoost
+    }
+
+    const spread = calculateSpreadForPair(metrics, config, manualOverrides)
+
+    let reason = "calculated"
+    if (manualOverrides[symbol]) {
+      reason = `manual override`
+    } else if (data.nansenBoost >= 2.0) {
+      reason = `confluence (Nansen +${data.nansenBoost.toFixed(2)})`
+    }
+
+    spreads.push({ symbol, spread, reason })
+  }
+
+  // Sort by spread (tightest first)
+  spreads.sort((a, b) => a.spread - b.spread)
+
+  for (const {symbol, spread, reason} of spreads) {
+    console.log(`SPREAD_OVERRIDE_${symbol}=${spread}  # ${reason}`)
+  }
+
+  console.log("")
+  console.log(`# Spread range: ${config.minSpreadBps}-${config.maxSpreadBps} bps`)
+  console.log(`# Weights: Vol=${config.volumeWeight} Traders=${config.tradersWeight} Base=${config.baseScoreWeight} Nansen=${config.nansenWeight}`)
+}
+
+main().catch(console.error)

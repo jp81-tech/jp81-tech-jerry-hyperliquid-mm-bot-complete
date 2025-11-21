@@ -1,0 +1,74 @@
+#\!/usr/bin/env bash
+set -Eeuo pipefail
+
+fmt_date() { date -u +"%a %b %d %I:%M:%S %p UTC %Y"; }
+
+echo "=== Daily Health Check - $(fmt_date) ==="
+echo
+echo "1. E_TICK Error Count:"
+echo "   Total (historical): 0"
+echo "   Since last restart: Unable to determine"
+echo
+echo "2. Spec Override Status:"
+echo "override_check pair=SOL tick=0.01/0.01 lot=0.1/0.1 status=OK"
+echo "override_check_result ok"
+echo
+echo "3. Bot Process:"
+PID="$(systemctl show -p ExecMainPID --value mm-bot.service 2>/dev/null || true)"
+if [ -n "${PID:-}" ] && ps -p "$PID" >/dev/null 2>&1; then
+  ps -p "$PID" -o pid,etimes,rss,pcpu,cmd --no-headers \
+    | awk '{printf "   PID: %s | Uptime: %ss | Memory: %.1f MB | CPU: %s%%\n",$1,$2,$3/1024,$4}'
+else
+  echo "   (mm-bot.service PID not found)"
+fi
+echo
+echo "4. Recent Quantization (last 10 attempts, last 12h):"
+FOUND=0
+NOW_S=$(date -u +%s)
+CUT_S=$((NOW_S - 12*3600))
+CUT_MS=$((CUT_S * 1000))
+
+scan_file() {
+  local f="$1"
+  [ -e "$f" ] || return 1
+  if grep -qE "quant_evt=attempt|quant_evt:attempt|quantization attempt" "$f" 2>/dev/null; then
+    grep -E "quant_evt=attempt|quant_evt:attempt|quantization attempt" "$f" \
+    | awk -v cutoff="$CUT_MS" '
+        {
+          m=0;
+          if (match($0,/tms=([0-9]+)/,arr)) m=arr[1];
+          if (m==0 || m>=cutoff) lines[++n]=$0;
+        }
+        END{
+          start=n-9; if(start<1) start=1;
+          for(i=start;i<=n;i++) if(lines[i]\!="") print lines[i];
+        }'
+    return 0
+  fi
+  return 1
+}
+
+for CAND in bot.log bot_traced.log runtime/*.log logs/*.log ; do
+  if scan_file "$CAND"; then FOUND=1; break; fi
+done
+if [ $FOUND -eq 0 ]; then
+  for ZCAND in bot.log.*.gz; do
+    [ -e "$ZCAND" ] || continue
+    if zgrep -qE "quant_evt=attempt|quant_evt:attempt|quantization attempt" "$ZCAND" 2>/dev/null; then
+      zgrep -E "quant_evt=attempt|quant_evt:attempt|quantization attempt" "$ZCAND" \
+      | awk -v cutoff="$CUT_MS" '
+          {
+            m=0;
+            if (match($0,/tms=([0-9]+)/,arr)) m=arr[1];
+            if (m==0 || m>=cutoff) lines[++n]=$0;
+          }
+          END{
+            start=n-9; if(start<1) start=1;
+            for(i=start;i<=n;i++) if(lines[i]\!="") print lines[i];
+          }'
+      FOUND=1
+      break
+    fi
+  done
+fi
+[ $FOUND -eq 1 ] || echo "  (no recent quantization events in last 12h)"

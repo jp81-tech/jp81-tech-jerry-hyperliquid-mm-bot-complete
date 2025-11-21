@@ -1,0 +1,136 @@
+/**
+ * Dynamic Spread Calculator
+ *
+ * Automatically calculates optimal spread for each token based on:
+ * - Volume 24h USD (35% weight)
+ * - Active Traders (25% weight)
+ * - Base Score - liquidity/volatility metric (30% weight)
+ * - Nansen Boost - smart money signal (10% weight)
+ */
+
+export interface PairMetrics {
+  token: string
+  volumeUsd24h: number
+  activeTraders: number
+  baseScore: number
+  nansenBoost?: number
+}
+
+export interface SpreadOverrides {
+  [token: string]: number
+}
+
+export interface SpreadConfig {
+  defaultSpreadBps: number
+  minSpreadBps: number
+  maxSpreadBps: number
+  minMultiplier?: number
+  volumeWeight: number
+  tradersWeight: number
+  baseScoreWeight: number
+  nansenWeight: number
+  confluenceReductionBps: number
+}
+
+/**
+ * Calculate optimal spread for a token based on its metrics
+ *
+ * @param metrics Token metrics (volume, traders, scores)
+ * @param config Spread calculation configuration
+ * @param manualOverrides Manual overrides for specific tokens
+ * @returns Spread in basis points (bps)
+ */
+export function calculateSpreadForPair(
+  metrics: PairMetrics,
+  config: SpreadConfig,
+  manualOverrides: SpreadOverrides = {}
+): number {
+  // 1) Check manual override first
+  if (manualOverrides[metrics.token] !== undefined) {
+    return manualOverrides[metrics.token]
+  }
+
+  // 2) Normalize metrics (0-1 range)
+  // Volume: $10M = 1.0, $20M = 2.0
+  const volNorm = Math.min(metrics.volumeUsd24h / 10_000_000, 2.0)
+
+  // Traders: 2000 = 1.0, 4000 = 2.0
+  const tradersNorm = Math.min(metrics.activeTraders / 2000, 2.0)
+
+  // Base score: 30 = 1.0, 40 = 1.33
+  const baseScoreNorm = Math.min(metrics.baseScore / 30, 1.5)
+
+  // Nansen boost: +2.5 = 1.0, +3.0 = 1.2
+  const nansenNorm = metrics.nansenBoost
+    ? Math.min(metrics.nansenBoost / 2.5, 1.2)
+    : 0
+
+  // 3) Calculate composite liquidity score
+  const L =
+    config.volumeWeight * volNorm +
+    config.tradersWeight * tradersNorm +
+    config.baseScoreWeight * baseScoreNorm +
+    config.nansenWeight * nansenNorm
+
+  // 4) Map liquidity score to spread (inverse relationship)
+  // High liquidity (L high) → Low spread
+  // Low liquidity (L low) → High spread
+  let rawSpread =
+    config.maxSpreadBps - L * (config.maxSpreadBps - config.minSpreadBps)
+
+  // 5) SAFETY FLOOR #1: Hard minimum spread (e.g., 8 bps)
+  rawSpread = Math.max(rawSpread, config.minSpreadBps)
+
+  // 6) SAFETY FLOOR #2: Minimum multiplier relative to global spread
+  // e.g., never go below 0.6x of defaultSpreadBps (0.6 * 35 = 21 bps)
+  if (config.minMultiplier !== undefined) {
+    const minByMultiplier = Math.round(config.defaultSpreadBps * config.minMultiplier)
+    rawSpread = Math.max(rawSpread, minByMultiplier)
+  }
+
+  // 7) Apply confluence bonus if token has strong Nansen signal
+  // (AFTER safety floors to avoid going too low)
+  let adjustedSpread = rawSpread
+  if (metrics.nansenBoost !== undefined && metrics.nansenBoost >= 2.0) {
+    adjustedSpread = rawSpread - config.confluenceReductionBps
+  }
+
+  // 8) Final boundaries - re-apply BOTH safety floors
+  // This ensures confluence bonus doesn't break safety floors
+  let finalSpread = Math.round(adjustedSpread)
+  
+  // Re-apply safety floor #1 (absolute minimum)
+  finalSpread = Math.max(finalSpread, config.minSpreadBps)
+  
+  // Re-apply safety floor #2 (relative minimum)
+  if (config.minMultiplier !== undefined) {
+    const minByMultiplier = Math.round(config.defaultSpreadBps * config.minMultiplier)
+    finalSpread = Math.max(finalSpread, minByMultiplier)
+  }
+  
+  // Apply maximum boundary
+  finalSpread = Math.min(finalSpread, config.maxSpreadBps)
+
+  return finalSpread
+}
+
+/**
+ * Calculate spreads for multiple pairs
+ */
+export function calculateSpreadsForPairs(
+  pairsMetrics: PairMetrics[],
+  config: SpreadConfig,
+  manualOverrides: SpreadOverrides = {}
+): Record<string, number> {
+  const spreads: Record<string, number> = {}
+
+  for (const metrics of pairsMetrics) {
+    spreads[metrics.token] = calculateSpreadForPair(
+      metrics,
+      config,
+      manualOverrides
+    )
+  }
+
+  return spreads
+}

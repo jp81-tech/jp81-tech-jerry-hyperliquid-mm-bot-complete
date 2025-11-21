@@ -1,0 +1,73 @@
+Crash detected at: Tue Nov 11 09:19:43 UTC 2025 | Last submit: 08:04:29 | Pattern: Multi-Layer ALL coins logged, then SILENT CRASH (no errors in log)
+Crash #4 at: Tue Nov 11 09:28:59 UTC 2025 | Runtime: ~7 minutes | Pattern: IDENTICAL - Multi-Layer → silence
+
+🎯 BREAKTHROUGH DISCOVERY (09:30):
+Bot crashes at EXACTLY 26 open orders!
+Math: 5 coins × 4 orders + ETH × 6 orders (bias boost) = 26
+Hypothesis: HL API limit of 25 orders OR Promise.all overflow
+
+
+🔧 FIX APPLIED (09:35 UTC):
+Changed ACTIVE_LAYERS from 3 to 2 in .env
+Expected orders: 5 coins × 3 + ETH × 6 (bias) = 21 orders (safe under 25 limit)
+Bot restarted at 09:35 UTC with PID 3182077
+Status: Running, placing orders normally
+
+🚨 CRASH #5 (09:38 UTC) - AFTER FIX ATTEMPT:
+- Bot started 09:35 with ACTIVE_LAYERS=2
+- Multi-Layer logged correctly (BTC=3, ETH=6, SOL=3, LINK=3, UMA=3, AVAX=3)
+- Placed ONLY 3 orders successfully (seq=1,2,3)
+- Started attempting more (seq=4,5,6,7,8) but NO more submits
+- Process died silently ~09:36-09:37
+- ❌ FIX DID NOT WORK - problem is NOT about 26 orders limit
+- Real issue: Likely unhandled rejection in submitAll() or API error
+
+CONCLUSION: The 26-order theory was WRONG. Bot crashes even with much fewer orders.
+Root cause: Silent crash during order submission, not hitting any limit.
+Crash #6 detected at:
+Tue Nov 11 11:10:32 UTC 2025
+Pattern: attempt seq=5,6,7,8 logged but only seq=2,3 submitted successfully. Process died.
+
+
+═══════════════════════════════════════════════════════════════════
+📌 Crash #6 – 2025-11-11 09:36:13 UTC (CORRECTED ANALYSIS)
+═══════════════════════════════════════════════════════════════════
+
+1. Stan procesu
+   ps aux | grep -E 'mm_hl|npm start' | grep -v grep
+   → Exit code: 1  → BRAK procesu mm_hl.ts
+   To znaczy: w MOMENCIE sprawdzania (11:10 UTC) proces był już martwy.
+
+2. Logi z końca bot.log
+   - Ostatni timestamp w logu: 2025-11-11T09:36:13Z
+   - Widać: quant_evt=attempt seq=5,6,7,8 (LINK, SOL, UMA, BTC)
+   - Widać: quant_evt=submit tylko dla seq=2,3 (UMA, BTC)
+   - Brak jakiegokolwiek [FATAL] / error / stack trace
+
+3. Wniosek
+   Bot DZIAŁAŁ do ~09:36:13 UTC i wtedy się wywalił (silent crash).
+   → Padł pomiędzy quant_evt=attempt (seq=5–8) a quant_evt=submit.
+   W momencie analizy (ps aux) był JUŻ martwy – widzimy tylko ostatnie wpisy w logach.
+
+4. Root Cause
+   BRAK global error handlers:
+   - process.on('unhandledRejection')
+   - process.on('uncaughtException')
+   
+   → Unhandled promise rejection w placeOrder() → exchClient.order()
+   → Proces umiera bez logowania błędu
+
+5. Fix Applied (2025-11-11 12:10 UTC)
+   Dodano 3 warstwy ochrony w src/mm_hl.ts:
+   a) Global error handlers (przed main())
+   b) Comprehensive try/catch w main()
+   c) Enhanced error logging w placeOrder() at crash point
+
+6. Verification
+   Bot restarted z PID 3331418, successful submits seq=10-21+
+   No crashes after exceeding previous failure thresholds.
+
+Crash #2 after memory clear - watchdog also died
+Tue Nov 11 14:18:58 UTC 2025
+Crash #3 - bot killed after 4min, watchdog died
+Tue Nov 11 14:29:31 UTC 2025

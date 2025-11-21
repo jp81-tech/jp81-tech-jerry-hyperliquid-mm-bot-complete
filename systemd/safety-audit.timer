@@ -1,0 +1,14 @@
+[Unit]
+Description=Run Hyperliquid Spread Safety Audit every 30 minutes (Europe/Berlin)
+
+[Timer]
+OnCalendar=*:0/30
+Timezone=Europe/Berlin
+Unit=safety-audit.service
+AccuracySec=1m
+RandomizedDelaySec=45
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

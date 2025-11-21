@@ -1,0 +1,121 @@
+═══════════════════════════════════════════════════════════════
+MIN-NOTIONAL ALERT: UPDATED TO 30-MINUTE WINDOW ✅
+═══════════════════════════════════════════════════════════════
+
+Date: 2025-11-13 08:50 UTC
+Status: COMPLETE
+
+═══════════════════════════════════════════════════════════════
+PROBLEM
+═══════════════════════════════════════════════════════════════
+
+Alert showed historical min-notional events from OLD pairs:
+- HMSTR (notional $0.00)
+- BOME (notional $0.01)
+- POPCAT (notional $1.24)
+
+These pairs are NO LONGER ACTIVE. Bot now trades only ZEC + UNI.
+
+Alert timestamp: 2025-11-13 08:43:38 UTC
+But events from:   2025-11-13 07:11-07:24 UTC (over 1h old)
+
+═══════════════════════════════════════════════════════════════
+SOLUTION
+═══════════════════════════════════════════════════════════════
+
+Updated scripts/min_notional_alert.sh to:
+
+1. Use journalctl instead of old log files
+   BEFORE: tail -n 400 bot.log + zgrep bot.log.*.gz
+   AFTER:  journalctl -u mm-bot.service --since "30 minutes ago"
+
+2. Only check LAST 30 MINUTES
+   Avoids false positives from historical data
+
+3. Show event count in alert
+   Alert message now includes: "(last 30min: X events)"
+
+═══════════════════════════════════════════════════════════════
+CHANGES TO SCRIPT
+═══════════════════════════════════════════════════════════════
+
+FILE: scripts/min_notional_alert.sh
+
+BEFORE (old approach):
+  - Scanned old bot.log files
+  - Checked compressed archives (bot.log.*.gz)
+  - No time limit - checked ALL history
+
+AFTER (new approach):
+  - Uses journalctl for mm-bot.service
+  - Only checks last 30 minutes
+  - Counts events in timeframe
+  - Only alerts if COUNT > 0
+
+TIMEFRAME: 30 minutes ago
+
+═══════════════════════════════════════════════════════════════
+BACKUP
+═══════════════════════════════════════════════════════════════
+
+Original script backed up as:
+  scripts/min_notional_alert.sh.backup_old_version
+
+═══════════════════════════════════════════════════════════════
+TESTING
+═══════════════════════════════════════════════════════════════
+
+Test run after update:
+  bash scripts/min_notional_alert.sh
+
+Result:
+  ✅ Exit code: 0
+  ✅ No alert sent (0 events in last 30min)
+  ✅ Current active pairs: ZEC, UNI only
+
+Verification:
+  journalctl -u mm-bot.service --since "30 minutes ago" --no-pager \
+    | grep -c "quant_evt=below_min"
+
+  Result: 0 events
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS MEANS
+═══════════════════════════════════════════════════════════════
+
+✅ No more false alerts from old inactive pairs
+✅ Only alerts on RECENT min-notional events (last 30min)
+✅ Current pairs (ZEC, UNI) have high enough notional values
+✅ Alert will only trigger if bot CURRENTLY has issues
+
+FUTURE ALERTS:
+  Will only appear if there are min-notional violations in
+  the last 30 minutes with CURRENT active pairs.
+
+═══════════════════════════════════════════════════════════════
+HOW TO TEST
+═══════════════════════════════════════════════════════════════
+
+Manual test:
+  cd /root/hyperliquid-mm-bot-complete
+  bash scripts/min_notional_alert.sh
+
+Check if alert would trigger:
+  journalctl -u mm-bot.service --since "30 minutes ago" \
+    | grep "quant_evt=below_min"
+
+If output is empty → no alert will be sent ✅
+
+═══════════════════════════════════════════════════════════════
+RELATED CHANGES
+═══════════════════════════════════════════════════════════════
+
+Also completed today:
+1. PM2 daemon checks removed from health scripts
+2. Anti-FOMO guards set to "degen mode" (relaxed thresholds)
+3. Min-notional alerts now only check recent data
+
+═══════════════════════════════════════════════════════════════
+Last Updated: 2025-11-13 08:50 UTC
+Status: ✅ COMPLETE
+═══════════════════════════════════════════════════════════════

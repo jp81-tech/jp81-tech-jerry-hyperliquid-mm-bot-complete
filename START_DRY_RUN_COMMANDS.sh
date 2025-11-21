@@ -1,0 +1,26 @@
+#!/bin/bash
+# Komendy do skopiowania i wykonania na serwerze
+
+echo "🚀 DRY RUN - Komendy do wykonania na serwerze"
+echo "=============================================="
+echo ""
+echo "1️⃣ Połącz się z serwerem:"
+echo "   ssh root@207.246.xx.xx"
+echo ""
+echo "2️⃣ Przejdź do katalogu bota:"
+echo "   cd /root/hyperliquid-mm-bot-complete"
+echo ""
+echo "3️⃣ Uruchom automatyczny start:"
+echo "   ./scripts/start-dry-run.sh"
+echo ""
+echo "4️⃣ W drugim oknie SSH (monitoring):"
+echo "   ssh root@207.246.xx.xx"
+echo "   cd /root/hyperliquid-mm-bot-complete"
+echo "   tail -f bot.log | grep -E 'SNAPSHOT|RISK|NANSEN|PAPER TRADING|LIVE TRADING'"
+echo ""
+echo "📋 Alternatywnie - monitoring z kolorami:"
+echo "   ./scripts/monitor-logs.sh bot.log"
+echo ""
+echo "✅ Szybka weryfikacja DRY_RUN:"
+echo "   ./scripts/verify-dry-run.sh"
+

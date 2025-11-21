@@ -1,0 +1,165 @@
+═══════════════════════════════════════════════════════════════
+NY1 SERVER: PROD ONLY - NO DRY_RUN MODE 🔒
+═══════════════════════════════════════════════════════════════
+
+Date: 2025-11-13 09:15 UTC
+Server: NY1 (207.246.92.212)
+Purpose: Production trading ONLY - no testing mode
+
+═══════════════════════════════════════════════════════════════
+WHAT WAS DONE
+═══════════════════════════════════════════════════════════════
+
+1️⃣ DRY_RUN removed from .env
+   - Line `DRY_RUN=X` completely deleted
+   - No longer possible to accidentally enable test mode
+   - Bot always runs in production mode
+
+2️⃣ DRY_RUN check removed from rogue_watch.sh
+   - No more alerts about DRY_RUN mode
+   - Simplified monitoring (KILL_SWITCH + rogue processes only)
+   - Backup: /usr/local/bin/rogue_watch.sh.backup_before_no_dryrun
+
+3️⃣ Bot restarted in pure production mode
+   - Service: active ✅
+   - DRY_RUN references: 0 ✅
+   - Trading: ZEC + UNI ✅
+
+═══════════════════════════════════════════════════════════════
+FILES MODIFIED
+═══════════════════════════════════════════════════════════════
+
+📄 .env
+   BEFORE: DRY_RUN=1 or DRY_RUN=0
+   AFTER:  No DRY_RUN line at all
+   BACKUP: .env.backup_before_no_dryrun
+
+📄 /usr/local/bin/rogue_watch.sh
+   BEFORE: Checked DRY_RUN and stopped bot if DRY_RUN=1
+   AFTER:  No DRY_RUN checking - PROD ONLY
+   BACKUP: /usr/local/bin/rogue_watch.sh.backup_before_no_dryrun
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS MEANS
+═══════════════════════════════════════════════════════════════
+
+✅ This server = PRODUCTION ONLY
+✅ No accidental testing mode
+✅ No DRY_RUN alerts
+✅ Simplified monitoring
+✅ Clear separation: NY1 = PROD, other server = TEST
+
+═══════════════════════════════════════════════════════════════
+REMAINING SAFEGUARDS (STILL ACTIVE)
+═══════════════════════════════════════════════════════════════
+
+🛡️ KILL_SWITCH (runtime/KILL_SWITCH)
+   - Can stop bot immediately if set to 1
+   - Monitored by rogue_watch every 5 minutes
+
+🛡️ Rogue Process Detection
+   - Kills any bot processes outside systemd
+   - Prevents multiple bot instances
+
+🛡️ ANTI-FOMO Guards
+   - Pump guard, RSI guard, FOMO volume guard
+   - All active in DEGEN mode
+
+🛡️ SystemD Management
+   - mm-bot.service running via systemctl
+   - Auto-restart on failure
+   - Journalctl logging
+
+═══════════════════════════════════════════════════════════════
+MONITORING ACTIVE
+═══════════════════════════════════════════════════════════════
+
+✅ ZEC/UNI Monitor (every 15 minutes)
+   - Positions
+   - Submits
+   - ANTI-FOMO blocks
+   - Margin errors
+   - Synced fills
+
+✅ Rogue Watch (every 5 minutes)
+   - KILL_SWITCH enforcement
+   - Rogue process detection
+   - NO MORE DRY_RUN CHECKS
+
+✅ Min-Notional Alert (real-time)
+   - Only last 30 minutes
+   - No historical false alarms
+
+═══════════════════════════════════════════════════════════════
+BOT STATUS
+═══════════════════════════════════════════════════════════════
+
+Service: active
+Mode: PRODUCTION (no DRY_RUN)
+Pairs: ZEC + UNI
+ANTI-FOMO: DEGEN MODE (relaxed guards)
+WebSocket: Connected
+Monitoring: All active
+
+═══════════════════════════════════════════════════════════════
+IF YOU NEED TO TEST SOMETHING
+═══════════════════════════════════════════════════════════════
+
+❌ DO NOT use DRY_RUN on this server
+✅ Use a different server/computer for testing
+✅ This keeps NY1 clean and production-only
+
+═══════════════════════════════════════════════════════════════
+ROLLBACK (if absolutely needed)
+═══════════════════════════════════════════════════════════════
+
+To restore DRY_RUN capability (NOT RECOMMENDED):
+
+1. Restore .env:
+   cd /root/hyperliquid-mm-bot-complete
+   cp .env.backup_before_no_dryrun .env
+
+2. Restore rogue_watch.sh:
+   cp /usr/local/bin/rogue_watch.sh.backup_before_no_dryrun /usr/local/bin/rogue_watch.sh
+
+3. Restart bot:
+   systemctl restart mm-bot.service
+
+═══════════════════════════════════════════════════════════════
+VERIFICATION COMMANDS
+═══════════════════════════════════════════════════════════════
+
+Check DRY_RUN status:
+grep -n "DRY_RUN" /root/hyperliquid-mm-bot-complete/.env
+
+Should return: (nothing) or exit code 1
+
+Check bot status:
+systemctl status mm-bot.service
+
+Check positions:
+cd /root/hyperliquid-mm-bot-complete
+npx tsx scripts/check_position_pnl.ts | grep -E "^(ZEC|UNI|TOTAL)"
+
+Check rogue_watch:
+grep -n "DRY_RUN" /usr/local/bin/rogue_watch.sh
+
+Should return: Only comments about removal
+
+═══════════════════════════════════════════════════════════════
+SUMMARY
+═══════════════════════════════════════════════════════════════
+
+🔒 NY1 Server = PROD ONLY
+✅ DRY_RUN completely removed from .env
+✅ DRY_RUN checks removed from rogue_watch.sh
+✅ Bot running in production mode
+✅ All monitoring active
+✅ No more DRY_RUN confusion
+
+This server is now 100% production - clean, simple, no test mode.
+
+═══════════════════════════════════════════════════════════════
+Last Updated: 2025-11-13 09:15 UTC
+Status: ✅ PRODUCTION ONLY
+═══════════════════════════════════════════════════════════════

@@ -1,0 +1,151 @@
+═══════════════════════════════════════════════════════════════
+ANTI-FOMO SYSTEM: DEGEN MODE ACTIVE 🚀
+═══════════════════════════════════════════════════════════════
+
+Updated: 2025-11-13 08:27 UTC
+Mode: DEGEN BUT SMART
+Status: LIVE & TRADING
+
+═══════════════════════════════════════════════════════════════
+CURRENT GUARD SETTINGS (RELAXED)
+═══════════════════════════════════════════════════════════════
+
+🛡️ LAYER 1: Anti-Pump Guard
+   ANTI_TOP_PUMP_RET1M=0.035      (3.5% in 1min)
+   ANTI_TOP_PUMP_RET5M=0.060      (6.0% in 5min)
+   
+   Blocks BUY only when:
+   - Price moves >3.5% in 1 minute, OR
+   - Price moves >6.0% in 5 minutes
+   
+   Effect: 75% more relaxed than paranoid mode
+
+🛡️ LAYER 2: RSI Top Guard
+   RSI_OVERBOUGHT=78
+   TOP_HIGH_DISTANCE_BPS=120      (1.2% from 24h high)
+   
+   Blocks BUY only when:
+   - RSI > 78 AND
+   - Within 1.2% of 24h high
+   
+   Effect: Allows buying much higher, blocks only extreme overbought
+
+🛡️ LAYER 3: FOMO Volume Guard
+   FOMO_VOLUME_ZSCORE=3.0
+   FOMO_HIGH_DISTANCE_BPS=150     (1.5% from 24h high)
+   
+   Blocks BUY only when:
+   - Volume z-score > 3.0 (3 sigma spike) AND
+   - Within 1.5% of 24h high
+   
+   Effect: Must be crazy volume spike to trigger
+
+═══════════════════════════════════════════════════════════════
+WHAT THIS MEANS IN PRACTICE
+═══════════════════════════════════════════════════════════════
+
+✅ NORMAL MOVES - BOT BUYS FREELY:
+   - ZEC +2% in 1min → ✅ BUY allowed
+   - ZEC +4% in 5min → ✅ BUY allowed  
+   - RSI=75, 1% from high → ✅ BUY allowed
+   - Volume 2x normal → ✅ BUY allowed
+
+❌ EXTREME MOVES - GUARD BLOCKS:
+   - ZEC +4% in 1min → ❌ BLOCKED (pump guard)
+   - ZEC +7% in 5min → ❌ BLOCKED (pump guard)
+   - RSI=80, 0.5% from high → ❌ BLOCKED (RSI guard)
+   - Volume 3.5x + near ATH → ❌ BLOCKED (FOMO guard)
+
+═══════════════════════════════════════════════════════════════
+COMPARISON: PARANOID vs DEGEN MODE
+═══════════════════════════════════════════════════════════════
+
+PARANOID MODE (before):
+   Pump: ret1m > 2% OR ret5m > 3.5%
+   RSI: RSI > 70 AND within 0.5% of high
+   FOMO: vol z > 2.0 AND within 0.75% of high
+   
+   Result: Guards triggered frequently, many BUY orders blocked
+
+DEGEN MODE (now):
+   Pump: ret1m > 3.5% OR ret5m > 6.0%
+   RSI: RSI > 78 AND within 1.2% of high
+   FOMO: vol z > 3.0 AND within 1.5% of high
+   
+   Result: Guards trigger only on extreme conditions, bot trades freely
+
+═══════════════════════════════════════════════════════════════
+BOT STATUS
+═══════════════════════════════════════════════════════════════
+
+✅ Trading: ZEC + UNI
+✅ Daily PnL: +$30.30
+✅ Execution: 100% success (6365/6365)
+✅ WebSocket: Connected (volume tracking active)
+✅ Guards: Active but relaxed
+✅ Health: OK
+
+═══════════════════════════════════════════════════════════════
+MONITORING
+═══════════════════════════════════════════════════════════════
+
+Watch for guard triggers (should be rare now):
+journalctl -u mm-bot.service -f | grep "ANTI-FOMO"
+
+Expected output when triggered:
+🛡️ ANTI-FOMO: Skip ZEC BUY L2 - pump_guard ret5m=6.5%
+🛡️ ANTI-FOMO: Skip UNI BUY L1 - rsi_top_guard rsi=79.2 distBps=85
+
+Watch all trading activity:
+journalctl -u mm-bot.service -f | grep -E "submit|filled"
+
+Check performance:
+npx tsx scripts/check_position_pnl.ts
+
+═══════════════════════════════════════════════════════════════
+IF YOU WANT EVEN MORE AGGRESSIVE
+═══════════════════════════════════════════════════════════════
+
+Option A - Ultra Degen:
+   sed -i 's/^RSI_OVERBOUGHT=.*/RSI_OVERBOUGHT=80/' .env
+   sed -i 's/^ANTI_TOP_PUMP_RET5M=.*/ANTI_TOP_PUMP_RET5M=0.08/' .env
+   sed -i 's/^FOMO_VOLUME_ZSCORE=.*/FOMO_VOLUME_ZSCORE=4.0/' .env
+   systemctl restart mm-bot.service
+
+Option B - Disable Specific Guard:
+   # Disable RSI guard entirely
+   sed -i 's/^RSI_TOP_GUARD_ENABLED=.*/RSI_TOP_GUARD_ENABLED=false/' .env
+   
+   # OR disable FOMO guard entirely
+   sed -i 's/^FOMO_GUARD_ENABLED=.*/FOMO_GUARD_ENABLED=false/' .env
+   
+   systemctl restart mm-bot.service
+
+Option C - Keep Current (Recommended):
+   Current settings are balanced for "degen but smart"
+   Observe for 24h before making more changes
+
+═══════════════════════════════════════════════════════════════
+FILES MODIFIED
+═══════════════════════════════════════════════════════════════
+
+/.env - Updated guard thresholds
+/src/mm_hl.ts - Anti-FOMO guards integrated
+/src/utils/topGuards.ts - Guard logic
+/src/utils/topGuardMetrics.ts - Real-time metrics calculation
+
+═══════════════════════════════════════════════════════════════
+RECOMMENDATION
+═══════════════════════════════════════════════════════════════
+
+✅ Keep current settings for 24 hours
+✅ Monitor guard triggers (should be rare)
+✅ Check if bot trades more actively
+✅ Adjust further if needed
+
+Current mode = Sweet spot between protection and aggression
+
+═══════════════════════════════════════════════════════════════
+Last Updated: 2025-11-13 08:27 UTC
+Mode: DEGEN BUT SMART 🚀
+═══════════════════════════════════════════════════════════════

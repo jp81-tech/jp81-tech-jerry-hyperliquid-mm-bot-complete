@@ -1,0 +1,37 @@
+[Unit]
+Description=Hyperliquid Market Maker Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+
+ExecStart=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/start-bot.sh
+ExecStop=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/stop-bot.sh
+
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=30
+StartLimitBurst=10
+RemainAfterExit=yes
+
+Environment="NODE_ENV=production"
+
+KillSignal=SIGINT
+TimeoutStopSec=25
+KillMode=control-group
+
+StandardOutput=journal
+StandardError=journal
+
+User=jerry
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/jerry/hyperliquid-mm-bot-complete
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

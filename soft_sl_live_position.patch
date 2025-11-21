@@ -1,0 +1,93 @@
+diff --git a/src/mm_hl.ts b/src/mm_hl.ts
+index 0000000..0000000 100644
+--- a/src/mm_hl.ts
++++ b/src/mm_hl.ts
+@@ -3158,7 +3200,41 @@
+     return true
+   }
+ 
++  // ────────────────────────────────────────────────────────────────
++  // LIVE POSITION FETCH (bypasses StateManager)
++  // ────────────────────────────────────────────────────────────────
++  private async getLivePositionForPair(pair: string) {
++    try {
++      const userState: any = await this.api.infoClient.clearinghouseState({
++        user: this.walletAddress,
++      })
++
++      if (\!userState || \!userState.assetPositions) {
++        return null
++      }
++
++      const assetPos = userState.assetPositions.find((p: any) => {
++        try {
++          return p.position && p.position.coin === pair
++        } catch {
++          return false
++        }
++      })
++
++      if (\!assetPos || \!assetPos.position) {
++        return null
++      }
++
++      const raw = assetPos.position
++      const sizeNum = Number(raw.szi)
++      if (\!sizeNum) {
++        return null
++      }
++
++      const entryPx = Number(raw.entryPx || 0)
++      if (\!entryPx) {
++        return null
++      }
++
++      return {
++        size: Math.abs(sizeNum),
++        entryPrice: entryPx,
++        side: sizeNum > 0 ? ('long' as 'long') : ('short' as 'short'),
++      }
++    } catch (err) {
++      this.notifier.error(
++        `❌ getLivePositionForPair failed for ${pair}: ${String(err)}`
++      )
++      return null
++    }
++  }
++
+   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
+@@ -3316,22 +3392,32 @@
+-    // Get position and calculate inventory skew
+-    const state = this.stateManager.getState()
+-    const position = state.positions[pair]
+-
+-    let positionSize = 0
+-    let positionSide: 'long' | 'short' | 'flat' = 'flat'
+-    let positionEntryPrice = 0
+-    let inventorySkew = 0
+-
+-    if (position) {
+-      positionSize = position.size
+-      positionSide = position.side
+-      positionEntryPrice = position.entryPrice
+-      inventorySkew = position.side === 'long' ? position.size : -position.size
+-    }
++    // Get LIVE position and calculate inventory skew (bypasses StateManager)
++    const livePosition = await this.getLivePositionForPair(pair)
++
++    let positionSize = 0
++    let positionSide: 'long' | 'short' | 'flat' = 'flat'
++    let positionEntryPrice = 0
++    let inventorySkew = 0
++
++    if (livePosition) {
++      positionSize = livePosition.size
++      positionSide = livePosition.side
++      positionEntryPrice = livePosition.entryPrice
++      inventorySkew =
++        livePosition.side === 'long'
++          ? livePosition.size
++          : -livePosition.size
++    }
+ 
+     // 🔥 Get Nansen directional bias for risk management

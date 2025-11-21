@@ -1,0 +1,50 @@
+#\!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/root/hyperliquid-mm-bot-complete"
+cd "$ROOT"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
+if [ -z "${SLACK_ZEC_UNI_MONITOR_WEBHOOK:-}" ]; then
+  echo "SLACK_ZEC_UNI_MONITOR_WEBHOOK not set, exiting"
+  exit 0
+fi
+
+SINCE_UTC="$(date -u -d '15 minutes ago' '+%Y-%m-%d %H:%M:%S')"
+UNTIL_UTC="$(date -u '+%Y-%m-%d %H:%M:%S')"
+
+POS=$(npx tsx scripts/check_position_pnl.ts 2>/dev/null | egrep -E '^(ZEC|UNI|TOTAL)' || true)
+
+JLOG=$(journalctl -u mm-bot.service --since "$SINCE_UTC" --until "$UNTIL_UTC" --no-pager || true)
+
+ZEC_SUBMITS=$(printf "%s\n" "$JLOG" | grep -c "pair=ZEC" || true)
+UNI_SUBMITS=$(printf "%s\n" "$JLOG" | grep -c "pair=UNI" || true)
+
+ZEC_FOMO=$(printf "%s\n" "$JLOG" | grep -c "ANTI-FOMO: Skip ZEC BUY" || true)
+UNI_FOMO=$(printf "%s\n" "$JLOG" | grep -c "ANTI-FOMO: Skip UNI BUY" || true)
+
+ZEC_MARGIN_ERR=$(printf "%s\n" "$JLOG" | grep -c "ZEC buy.*Insufficient margin" || true)
+UNI_MARGIN_ERR=$(printf "%s\n" "$JLOG" | grep -c "UNI buy.*Insufficient margin" || true)
+
+# FIX: Count fills from "Synced X new fills" format
+FILLS_COUNT=$(printf "%s\n" "$JLOG" | grep -oE "Synced [0-9]+ new fills" | awk '{sum+=$2} END{print sum+0}')
+
+TEXT=$(
+  printf ":mag: ZEC / UNI Monitor — last 15m\n"
+  printf "UTC window: %s → %s\n" "$SINCE_UTC" "$UNTIL_UTC"
+  printf "\n*Positions:*\n"
+  printf "\`\`\`%s\n\`\`\`\n" "$POS"
+  printf "*Activity (last 15m):*\n"
+  printf "• ZEC: submits=%s, anti_fomo=%s, margin_errors=%s\n" "$ZEC_SUBMITS" "$ZEC_FOMO" "$ZEC_MARGIN_ERR"
+  printf "• UNI: submits=%s, anti_fomo=%s, margin_errors=%s\n" "$UNI_SUBMITS" "$UNI_FOMO" "$UNI_MARGIN_ERR"
+  printf "• Synced fills (all pairs): %s\n" "$FILLS_COUNT"
+)
+
+curl -s -X POST -H 'Content-type: application/json' \
+  --data "$(jq -Rn --arg text "$TEXT" '{text: $text}')" \
+  "$SLACK_ZEC_UNI_MONITOR_WEBHOOK" >/dev/null 2>&1 || true

@@ -1,0 +1,301 @@
+/**
+ * error_alert.ts
+ *
+ * Co godzinę:
+ *  - czyta ostatnie ~500 linii z pm2 logs mm-bot
+ *  - znajduje wszystkie quant_evt=submit
+ *  - zlicza err!=none (globalnie i per typ)
+ *  - zapisuje metryki do ./alerts/
+ *  - na podstawie progów wysyła alert na Slack
+ *
+ * Progi:
+ *   SPECJALNE:
+ *     invalid_size >= 3          → 🚨 CRITICAL
+ *     invalid_size >= 1          → ⚠️ WARNING
+ *     insufficient_margin >= 3   → 🚨 CRITICAL
+ *     insufficient_margin >= 1   → ⚠️ WARNING
+ *
+ *   OGÓLNE (jeśli powyższe nie zadziałają):
+ *     0–2 błędy  → tylko log na serwerze
+ *     3–5 błędów → ⚠️  Slack WARNING
+ *     >5 błędów  → 🚨  Slack CRITICAL
+ */
+
+import { execSync } from 'node:child_process'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+type ErrorStats = {
+  totalErrors: number
+  byType: Record<string, number>
+  totalSubmits: number
+}
+
+function getSlackWebhook(): string | null {
+  const fromUrl = process.env.SLACK_WEBHOOK_URL
+  const fromGeneric = process.env.SLACK_WEBHOOK
+  return fromUrl || fromGeneric || null
+}
+
+function parseErrorStats(logText: string): ErrorStats {
+  const lines = logText.split('\n')
+  const byType: Record<string, number> = {}
+  let totalErrors = 0
+  let totalSubmits = 0
+
+  const submitRe = /quant_evt=submit\b.*?\berr=([a-zA-Z0-9_]+)/
+
+  for (const line of lines) {
+    const m = line.match(submitRe)
+    if (!m) continue
+
+    totalSubmits++
+    const err = m[1]
+
+    if (err !== 'none') {
+      totalErrors++
+      byType[err] = (byType[err] || 0) + 1
+    }
+  }
+
+  return { totalErrors, byType, totalSubmits }
+}
+
+async function postToSlack(webhook: string, text: string) {
+  try {
+    execSync(`curl -sS -X POST -H Content-Type: application/json --data '${JSON.stringify({ text })}' ${webhook}`, {
+      encoding: 'utf8'
+    })
+  } catch (e) {
+    throw new Error(`Failed to post to Slack: ${e}`)
+  }
+}
+
+function formatSlackMessage(
+  stats: ErrorStats,
+  level: 'warn' | 'critical',
+  reasons: string[]
+): string {
+  const prefix =
+    level === 'critical'
+      ? '🚨 *MM Bot Error Alert (CRITICAL)*'
+      : '⚠️ *MM Bot Error Alert*'
+
+  const { totalErrors, byType, totalSubmits } = stats
+
+  const lines: string[] = []
+  lines.push(`${prefix}`)
+  lines.push('')
+  lines.push(
+    `Detected *${totalErrors}* order submission error(s) in the last check.`
+  )
+  if (totalSubmits > 0) {
+    const pct = ((totalErrors / totalSubmits) * 100).toFixed(1)
+    lines.push(
+      `Total submits seen: *${totalSubmits}* (error rate: *${pct}%*).`
+    )
+  }
+  lines.push('')
+  if (reasons.length > 0) {
+    lines.push('*Alert reasons:*')
+    reasons.forEach((r) => lines.push(`• ${r}`))
+    lines.push('')
+  }
+  lines.push('*Error breakdown:*')
+  Object.entries(byType)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([err, count]) => {
+      lines.push(`• \`${err}\`: *${count}*`)
+    })
+
+  lines.push('')
+  lines.push('Check logs on server: `mm-logs-focus`')
+  lines.push('Server: `root@207.246.92.212`')
+
+  return lines.join('\n')
+}
+
+function ensureAlertsDir(): string {
+  const dir = join(process.cwd(), 'alerts')
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+  return dir
+}
+
+function persistStats(stats: ErrorStats) {
+  const alertsDir = ensureAlertsDir()
+  const now = new Date()
+  const timestamp = now.toISOString()
+  const unixTs = Math.floor(now.getTime() / 1000)
+
+  const payload = {
+    timestamp,
+    totalErrors: stats.totalErrors,
+    totalSubmits: stats.totalSubmits,
+    byType: stats.byType
+  }
+
+  // Ostatni snapshot (czytelny JSON)
+  const latestPath = join(alertsDir, 'error_stats_latest.json')
+  writeFileSync(latestPath, JSON.stringify(payload, null, 2) + '\n', {
+    encoding: 'utf8'
+  })
+
+  // Historia (JSONL – 1 linia = 1 uruchomienie)
+  const historyPath = join(alertsDir, 'error_stats_history.log')
+  writeFileSync(historyPath, JSON.stringify(payload) + '\n', {
+    encoding: 'utf8',
+    flag: 'a'
+  })
+
+  // ──────────────────────────────────────────────
+  // Prometheus textfile metrics (.prom)
+  // ──────────────────────────────────────────────
+  const byType = stats.byType
+  const invalid = byType['invalid_size'] || 0
+  const margin = byType['insufficient_margin'] || 0
+
+  // zsumuj pozostałe typy do "other"
+  let other = 0
+  for (const [k, v] of Object.entries(byType)) {
+    if (k === 'invalid_size' || k === 'insufficient_margin') continue
+    other += v
+  }
+
+  const promLines: string[] = []
+
+  promLines.push(
+    `mm_bot_order_errors_total{type="invalid_size"} ${invalid}`
+  )
+  promLines.push(
+    `mm_bot_order_errors_total{type="insufficient_margin"} ${margin}`
+  )
+  promLines.push(
+    `mm_bot_order_errors_total{type="other"} ${other}`
+  )
+  promLines.push(
+    `mm_bot_order_submits_total ${stats.totalSubmits}`
+  )
+  promLines.push(
+    `mm_bot_last_run_timestamp ${unixTs}`
+  )
+
+  const promPath = join(alertsDir, 'error_metrics.prom')
+  writeFileSync(promPath, promLines.join('\n') + '\n', {
+    encoding: 'utf8'
+  })
+}
+
+
+function decideAlertLevel(
+  stats: ErrorStats
+): { level: 'none' | 'warn' | 'critical'; reasons: string[] } {
+  const { totalErrors, byType } = stats
+  let level: 'none' | 'warn' | 'critical' = 'none'
+  const reasons: string[] = []
+
+  const invalid = byType['invalid_size'] || 0
+  const margin = byType['insufficient_margin'] || 0
+
+  // Specjalne traktowanie invalid_size
+  if (invalid >= 3) {
+    level = 'critical'
+    reasons.push('invalid_size >= 3')
+  } else if (invalid >= 1) {
+    if (level === 'none') level = 'warn'
+    reasons.push('invalid_size >= 1')
+  }
+
+  // Specjalne traktowanie insufficient_margin
+  if (margin >= 3) {
+    level = 'critical'
+    reasons.push('insufficient_margin >= 3')
+  } else if (margin >= 1) {
+    if (level === 'none') level = 'warn'
+    reasons.push('insufficient_margin >= 1')
+  }
+
+  // Ogólne progi, tylko jeśli nic specjalnego nie zapaliło level
+  if (level === 'none') {
+    if (totalErrors >= 3 && totalErrors <= 5) {
+      level = 'warn'
+      reasons.push('totalErrors between 3 and 5')
+    } else if (totalErrors > 5) {
+      level = 'critical'
+      reasons.push('totalErrors > 5')
+    }
+  }
+
+  return { level, reasons }
+}
+
+async function main() {
+  console.log('[ERROR ALERT] Checking logs for errors (last 500 lines)...')
+
+  let logs: string
+  try {
+    logs = execSync('pm2 logs mm-bot --lines 500 --nostream', {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+  } catch (e) {
+    console.error('[ERROR ALERT] Failed to read pm2 logs:', e)
+    return
+  }
+
+  const stats = parseErrorStats(logs)
+  const { totalErrors, byType, totalSubmits } = stats
+
+  // Zapisz metryki do ./alerts/ niezależnie od tego, czy będzie Slack, czy nie
+  persistStats(stats)
+
+  if (totalSubmits === 0) {
+    console.log(
+      '[ERROR ALERT] No quant_evt=submit events found in last 500 lines (bot idle?).'
+    )
+    return
+  }
+
+  if (totalErrors === 0) {
+    console.log('[ERROR ALERT] No errors detected - all good!')
+    return
+  }
+
+  console.log(
+    `[ERROR ALERT] Found ${totalErrors} error(s) out of ${totalSubmits} submits.`
+  )
+  console.log('[ERROR ALERT] Breakdown:', byType)
+
+  const { level, reasons } = decideAlertLevel(stats)
+
+  if (level === 'none') {
+    console.log(
+      '[ERROR ALERT] Error count / types below thresholds - no Slack alert sent.'
+    )
+    return
+  }
+
+  const webhook = getSlackWebhook()
+  if (!webhook) {
+    console.warn(
+      '[ERROR ALERT] SLACK_WEBHOOK / SLACK_WEBHOOK_URL is not set - cannot send alert.'
+    )
+    return
+  }
+
+  const msg = formatSlackMessage(stats, level === 'warn' ? 'warn' : 'critical', reasons)
+
+  try {
+    await postToSlack(webhook, msg)
+    console.log(
+      `[ERROR ALERT] Slack alert sent (level=${level}, totalErrors=${totalErrors}).`
+    )
+  } catch (e) {
+    console.error('[ERROR ALERT] Failed to send Slack alert:', e)
+  }
+}
+
+main().catch((e) => {
+  console.error('[ERROR ALERT] Unhandled error in script:', e)
+})

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/hyperliquid-mm-bot-complete
+
+EFFECTIVE_FILE=runtime/effective_active_pairs.json
+if [ ! -s "$EFFECTIVE_FILE" ]; then
+  echo "effective_active_pairs.json missing"
+  exit 0
+fi
+
+EFFECTIVE=$(jq -r ".pairs[]" "$EFFECTIVE_FILE" | tr "\n" " ")
+
+# 1) Zbierz current (otwarte zlecenia + pozycje)
+ORDERS_JSON=$(npx tsx scripts/check-all-orders.ts 2>/dev/null || true)
+POS_JSON=$(npx tsx scripts/check_position_pnl.ts 2>/dev/null || true)
+
+open_pairs=$(printf "%s\n" "$ORDERS_JSON" | jq -r "..|.coin?|strings" 2>/dev/null | grep -E "^[A-Z0-9]{2,10}$" | sort -u || true)
+pos_pairs=$(printf "%s\n" "$POS_JSON"  | grep -E "^[[:space:]]*[A-Z0-9]{2,10}[[:space:]]+\|" | awk "{print \$1}" | sort -u || true)
+all_current=$(printf "%s\n%s\n" "$open_pairs" "$pos_pairs" | awk "NF" | sort -u)
+
+echo "Effective:"
+printf "%s\n" $EFFECTIVE
+echo
+echo "Current:"
+printf "%s\n" $all_current
+echo
+
+# 2) Zamknij wszystko poza efektywnymi parami (force-close)
+non_effective=$(comm -23 <(printf "%s\n" $all_current | sort) <(printf "%s\n" $EFFECTIVE | sort) || true)
+if [ -n "$non_effective" ]; then
+  echo "To close:"
+  printf "%s\n" $non_effective
+  for c in $non_effective; do
+    npx tsx scripts/force-close.ts "$c" || true
+  done
+fi
+
+# 3) STAŁY SELL SEEDING (na wszystkich efektywnych) — idempotentny
+echo
+echo "Seeding SELL for effective pairs:"
+SEED_SET=$(jq -r ".pairs[]" "$EFFECTIVE_FILE" | xargs echo)
+if [ -n "$SEED_SET" ]; then
+  npx tsx scripts/seed-sell-safe.ts $SEED_SET || true
+fi
+
+echo "Done"

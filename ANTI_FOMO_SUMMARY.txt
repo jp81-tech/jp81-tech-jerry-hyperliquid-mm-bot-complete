@@ -1,0 +1,54 @@
+=== ANTI-FOMO PROTECTION - 3 LAYERS ===
+
+Layer 1: Anti-Pump/Dump (volatilityGuards.ts)
+- Blocks BUY when price moves +2% in 1m or +3.5% in 5m
+- Blocks SELL when price moves -2% in 1m or -3.5% in 5m
+
+Layer 2: RSI Guards (topGuards.ts - NEW)
+- RSI Top: Blocks BUY when RSI > 70 AND near 24h high
+- RSI Bottom: Blocks SELL when RSI < 30 AND near 24h low
+
+Layer 3: FOMO/Crowd Guard (topGuards.ts - NEW)
+- Blocks BUY when volume spike (z-score > 2.0) AND near 24h high
+- Prevents buying during crowd FOMO moments
+
+=== CONFIGURATION ===
+
+Added to .env:
+RSI_TOP_GUARD_ENABLED=true
+RSI_BOTTOM_GUARD_ENABLED=true
+RSI_OVERBOUGHT=70
+RSI_OVERSOLD=30
+TOP_HIGH_DISTANCE_BPS=50
+BOTTOM_LOW_DISTANCE_BPS=50
+
+FOMO_GUARD_ENABLED=true
+FOMO_VOLUME_ZSCORE=2.0
+FOMO_HIGH_DISTANCE_BPS=75
+
+=== USAGE EXAMPLE ===
+
+import { shouldSkipTopBuy } from "./utils/topGuards";
+
+const guard = shouldSkipTopBuy({
+  pair: "ZEC",
+  side: "buy",
+  midPx: 510.50,
+  high24h: 515.00,
+  low24h: 495.00,
+  rsi5m: 72.5,
+  volume5mZscore: 2.3,
+});
+
+if (guard.block) {
+  console.log(guard.reason);
+  return;  // Skip order
+}
+
+=== FILES CREATED ===
+
+src/utils/topGuards.ts - RSI + FOMO protection logic
+src/utils/riskConfig.ts - Updated with new parameters
+.env - New guard configuration
+
+Last Updated: 2025-11-13 08:15 UTC

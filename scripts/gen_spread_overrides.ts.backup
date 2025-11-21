@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+/**
+ * Generate Spread Overrides - Direct Nansen API Integration
+ *
+ * Collects real-time metrics from Nansen API and calculates optimal spreads for each token
+ * NO LONGER DEPENDS ON LOG PARSING - calls Nansen API directly
+ */
+
+import 'dotenv/config'
+import { readFileSync, existsSync } from "fs"
+import { calculateSpreadForPair, type PairMetrics, type SpreadConfig, type SpreadOverrides } from "../src/spreadCalculator.js"
+import { NansenHyperliquidAPI } from "../src/integrations/nansen_scoring.js"
+
+const BASE_DIR = "/root/hyperliquid-mm-bot-complete"
+
+// Load configuration
+const configPath = `${BASE_DIR}/spread_config.json`
+const overridesPath = `${BASE_DIR}/manual_spread_overrides.json`
+
+const config: SpreadConfig = JSON.parse(readFileSync(configPath, "utf-8"))
+const manualOverrides: SpreadOverrides = existsSync(overridesPath)
+  ? JSON.parse(readFileSync(overridesPath, "utf-8"))
+  : {}
+
+// Get Nansen data directly from API
+async function getNansenMetricsFromAPI(): Promise<Map<string, any>> {
+  const nansen = new NansenHyperliquidAPI(process.env.NANSEN_API_KEY)
+  
+  if (!nansen.isEnabled()) {
+    console.error("# ⚠️  Nansen API key not found - spread generation disabled")
+    return new Map()
+  }
+
+  try {
+    // Fetch top 100 tokens by buy/sell pressure
+    const tokens = await nansen.getPerpScreener({ 
+      limit: 100, 
+      sortBy: 'buy_sell_pressure' 
+    })
+
+    if (tokens.length === 0) {
+      console.error("# ⚠️  No Nansen data returned from API")
+      return new Map()
+    }
+
+    const metrics = new Map()
+    const nansenWeight = parseFloat(process.env.NANSEN_WEIGHT || '0.35')
+
+    for (const token of tokens) {
+      // Calculate Nansen boost using same logic as nansen_scoring.ts
+      const nansenScore = nansen.getTokenScore(token)
+      const nansenBoost = nansenScore * nansenWeight
+      
+      // Base score - we don't have volatility score here, so use volume/traders as proxy
+      const volumeScore = Math.log10(1 + token.volume) * 0.5
+      const tradersScore = Math.log10(1 + token.trader_count) * 0.5
+      const baseScore = volumeScore + tradersScore
+
+      metrics.set(token.token_symbol, {
+        symbol: token.token_symbol,
+        baseScore,
+        nansenBoost,
+        totalScore: baseScore + nansenBoost,
+        volumeUsd24h: token.volume,
+        activeTraders: token.trader_count,
+        buySellPressure: token.buy_sell_pressure,
+        side: token.buy_sell_pressure > 0 ? 'BUYING' : 'SELLING'
+      })
+    }
+
+    console.error(`# ✅ Fetched ${metrics.size} tokens from Nansen API`)
+    return metrics
+
+  } catch (error: any) {
+    console.error(`# ❌ Failed to fetch Nansen data:`, error.message)
+    return new Map()
+  }
+}
+
+async function main() {
+  const nansenMetrics = await getNansenMetricsFromAPI()
+
+  if (nansenMetrics.size === 0) {
+    console.error("# ⚠️  No Nansen data available")
+    console.error("# Keeping previous spread overrides")
+    console.error("# Check NANSEN_API_KEY and network connectivity")
+    process.exit(0)  // Graceful exit - keep old spreads
+  }
+
+  console.log("# Dynamic Spread Overrides (Nansen API)")
+  console.log(`# Generated: ${new Date().toISOString()}`)
+  console.log(`# Tokens: ${nansenMetrics.size}`)
+  console.log("")
+  console.log("# Add these to .env and restart bot:")
+  console.log("")
+
+  const spreads: Array<{symbol: string, spread: number, reason: string}> = []
+
+  for (const [symbol, data] of nansenMetrics) {
+    const metrics: PairMetrics = {
+      token: symbol,
+      volumeUsd24h: data.volumeUsd24h,
+      activeTraders: data.activeTraders,
+      baseScore: data.baseScore,
+      nansenBoost: data.nansenBoost
+    }
+
+    const spread = calculateSpreadForPair(metrics, config, manualOverrides)
+
+    let reason = "calculated"
+    if (manualOverrides[symbol]) {
+      reason = `manual override`
+    } else if (data.nansenBoost >= 2.0) {
+      reason = `confluence (Nansen +${data.nansenBoost.toFixed(2)})`
+    }
+
+    spreads.push({ symbol, spread, reason })
+  }
+
+  // Sort by spread (tightest first)
+  spreads.sort((a, b) => a.spread - b.spread)
+
+  for (const {symbol, spread, reason} of spreads) {
+    console.log(`SPREAD_OVERRIDE_${symbol}=${spread}  # ${reason}`)
+  }
+
+  console.log("")
+  console.log(`# Spread range: ${config.minSpreadBps}-${config.maxSpreadBps} bps`)
+  console.log(`# Weights: Vol=${config.volumeWeight} Traders=${config.tradersWeight} Base=${config.baseScoreWeight} Nansen=${config.nansenWeight}`)
+  console.log(`# Source: Nansen API (direct fetch, no log parsing)`)
+}
+
+main().catch(console.error)

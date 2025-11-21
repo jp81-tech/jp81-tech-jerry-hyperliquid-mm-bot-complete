@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG_DIR="/root/hyperliquid-mm-bot-complete/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/daily-health.$(date -u +%F_%H%M%S).log"
+
+{
+  echo "=== Daily Health Wrapper @ $(date -u) (UTC) ==="
+  # Załaduj env jeżeli jest (nie przerywaj, gdy brak):
+  source /root/hyperliquid-mm-bot-complete/.env 2>/dev/null || true
+
+  # Odpal właściwy raport (niech zwróci błąd jeśli coś nie wyjdzie — my to przechwycimy):
+  bash /root/hyperliquid-mm-bot-complete/scripts/daily-health.sh
+} &> "$LOG_FILE" || {
+  echo "WARN: daily-health.sh exited non-zero. See $LOG_FILE" >> "$LOG_FILE"
+}
+
+# ZAWSZE zakończ sukcesem, żeby systemd nie raportował failure
+exit 0

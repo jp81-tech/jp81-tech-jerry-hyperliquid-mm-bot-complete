@@ -1,0 +1,11 @@
+{
+  "defaultSpreadBps": 35,
+  "minSpreadBps": 8,
+  "maxSpreadBps": 60,
+  "minMultiplier": 0.6,
+  "volumeWeight": 0.35,
+  "tradersWeight": 0.25,
+  "baseScoreWeight": 0.30,
+  "nansenWeight": 0.10,
+  "confluenceReductionBps": 5
+}

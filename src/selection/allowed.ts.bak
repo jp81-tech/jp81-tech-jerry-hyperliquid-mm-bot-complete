@@ -1,0 +1,51 @@
+import fs from "fs";
+import path from "path";
+
+export type AllowedSource = {
+  pairs: string[];
+  from: "active_pairs.json" | "env" | "fallback";
+};
+
+function readActivePairsJson(baseDir: string): string[] | null {
+  try {
+    const p = path.join(baseDir, "runtime", "active_pairs.json");
+    if (!fs.existsSync(p)) return null;
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+    const ts = Date.parse(raw.timestamp ?? 0);
+    const fresh = !Number.isNaN(ts) && (Date.now() - ts) / 1000 < 900;
+    if (!fresh) return null;
+    const arr = Array.isArray(raw.pairs) ? raw.pairs : [];
+    return arr.map((s: string) => s.toUpperCase());
+  } catch {
+    return null;
+  }
+}
+
+function readEnvPairs(): string[] | null {
+  const env = process.env.ACTIVE_PAIRS ?? "";
+  const arr = env.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+  return arr.length ? arr : null;
+}
+
+export function loadAllowed(baseDir: string): AllowedSource {
+  const json = readActivePairsJson(baseDir);
+  if (json && json.length) return { pairs: json, from: "active_pairs.json" };
+  const env = readEnvPairs();
+  if (env && env.length) return { pairs: env, from: "env" };
+  return { pairs: [], from: "fallback" };
+}
+
+export function enforceAllowed(baseDir: string, candidates: string[], log?: (s: string)=>void): string[] {
+  const { pairs: allowed, from } = loadAllowed(baseDir);
+  const onlyAllowed = (process.env.ONLY_ALLOWED ?? "1") !== "0";
+  if (!onlyAllowed) return candidates;
+  if (!allowed.length) return candidates;
+  const a = new Set(allowed.map(s => s.toUpperCase()));
+  const out = candidates.filter(c => a.has(c.toUpperCase()));
+  if (log) {
+    const allowedStr = allowed.join(", ");
+    const outStr = out.join(", ") || "(empty)";
+    log("Allowed pairs (" + from + "): " + allowedStr + " | filtered=" + outStr);
+  }
+  return out;
+}
