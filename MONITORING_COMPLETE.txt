@@ -1,0 +1,223 @@
+═══════════════════════════════════════════════════════════════════
+✅ MONITORING SYSTEM SETUP COMPLETE
+═══════════════════════════════════════════════════════════════════
+Date: 2025-11-11 11:54 UTC
+
+## 📦 Installed Components
+
+### 1. Manual Crash Collection
+   ✅ collect_crash.sh (5.0K)
+      - Collects crash data on demand
+      - Saves crash snapshots
+      - Updates crash_timeline.txt automatically
+
+### 2. Automated Health Checks
+   ✅ scripts/check_bot_alive.sh (1.4K)
+      - Checks process status
+      - Verifies recent activity (quant_evt=submit)
+      - 5-minute activity window
+
+### 3. Slack Alerting
+   ✅ scripts/slack_alert.sh (2.4K)
+      - Sends rich Slack messages
+      - 10-minute cooldown (no spam)
+      - Includes diagnostic info + action buttons
+
+### 4. Cron Setup Tool
+   ✅ /tmp/setup_monitoring_cron.sh (2.2K)
+      - Installs monitoring cron job
+      - Runs every 5 minutes
+      - Logs to /var/log/mm_bot_monitor.log
+
+### 5. Documentation
+   ✅ MONITORING_SETUP.md (7.7K)
+      - Complete system documentation
+      - Setup instructions
+      - Troubleshooting guide
+   
+   ✅ MONITORING_QUICKSTART.txt (3.4K)
+      - Quick start for both modes
+      - Common commands reference
+
+═══════════════════════════════════════════════════════════════════
+
+## 🚀 Quick Start Options
+
+### Option A: Manual Only (No Slack)
+```bash
+cd /root/hyperliquid-mm-bot-complete
+./collect_crash.sh "bot issue description"
+```
+
+### Option B: Automated with Slack Alerts
+```bash
+# 1. Set webhook
+export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+echo 'export SLACK_WEBHOOK_URL="..."' >> ~/.bashrc
+
+# 2. Setup monitoring
+/tmp/setup_monitoring_cron.sh
+
+# 3. Test
+cd /root/hyperliquid-mm-bot-complete
+./scripts/slack_alert.sh
+
+# 4. Monitor
+tail -f /var/log/mm_bot_monitor.log
+```
+
+═══════════════════════════════════════════════════════════════════
+
+## 📊 System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     MM Bot Process                          │
+│                  (mm_hl.ts running)                         │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+                     │ Writes logs
+                     ▼
+              ┌─────────────┐
+              │  bot.log    │
+              └──────┬──────┘
+                     │
+        ┌────────────┴────────────┐
+        │                         │
+        ▼                         ▼
+┌───────────────┐         ┌──────────────────┐
+│ Manual Check  │         │  Automated Cron  │
+│ (on demand)   │         │  (every 5 min)   │
+└───────┬───────┘         └────────┬─────────┘
+        │                          │
+        │                          ▼
+        │                 ┌─────────────────────┐
+        │                 │ check_bot_alive.sh  │
+        │                 │  - Process alive?   │
+        │                 │  - Recent submits?  │
+        │                 └──────────┬──────────┘
+        │                            │
+        │                            │ If dead/hung
+        │                            ▼
+        │                  ┌──────────────────┐
+        │                  │ slack_alert.sh   │
+        │                  │ - Send webhook   │
+        │                  │ - Log alert      │
+        │                  └──────────────────┘
+        │                            │
+        │                            ▼
+        │                  ┌──────────────────┐
+        │                  │  Slack Channel   │
+        │                  │  "⚠️ Bot Down"   │
+        │                  └──────────────────┘
+        │
+        ▼
+┌────────────────────┐
+│ collect_crash.sh   │
+│ - Save crash log   │
+│ - Analyze metrics  │
+│ - Update timeline  │
+└─────────┬──────────┘
+          │
+          ▼
+┌──────────────────────────────┐
+│  crash_timeline.txt          │
+│  crash_20251111_*.log        │
+│  (Permanent crash records)   │
+└──────────────────────────────┘
+```
+
+═══════════════════════════════════════════════════════════════════
+
+## 📁 File Locations
+
+/root/hyperliquid-mm-bot-complete/
+├── collect_crash.sh               ← Manual crash collection
+├── crash_timeline.txt             ← Crash history
+├── crash_*.log                    ← Individual crash logs
+├── MONITORING_SETUP.md            ← Full documentation
+├── MONITORING_QUICKSTART.txt      ← Quick start guide
+├── MONITORING_COMPLETE.txt        ← This file
+└── scripts/
+    ├── check_bot_alive.sh         ← Health check
+    └── slack_alert.sh             ← Alert sender
+
+/tmp/
+└── setup_monitoring_cron.sh       ← Cron installer
+
+/var/log/
+└── mm_bot_monitor.log             ← Monitoring logs
+
+═══════════════════════════════════════════════════════════════════
+
+## 📝 Next Steps
+
+1. Choose your monitoring mode:
+   □ Manual only → Just use ./collect_crash.sh when needed
+   □ Automated → Follow Option B setup above
+
+2. Test the system:
+   □ Run: ./collect_crash.sh "test run"
+   □ Check output: tail -80 crash_timeline.txt
+   
+3. For automated mode:
+   □ Get Slack webhook from: https://api.slack.com/messaging/webhooks
+   □ Run: /tmp/setup_monitoring_cron.sh
+   □ Test: ./scripts/slack_alert.sh
+   □ Monitor: tail -f /var/log/mm_bot_monitor.log
+
+4. Read full documentation:
+   cat MONITORING_SETUP.md
+
+═══════════════════════════════════════════════════════════════════
+
+## ✅ Integration with Existing System
+
+This monitoring system complements:
+
+✅ Global error handlers (src/mm_hl.ts)
+   - process.on('unhandledRejection')
+   - process.on('uncaughtException')
+
+✅ Crash documentation system
+   - crash_timeline.txt (updated by collect_crash.sh)
+   - CRASH_TEMPLATE.txt (template for manual entries)
+   - README_DEBUG.md (debugging playbook)
+
+✅ Debugging tools
+   - scripts/check_positions.ts
+   - scripts/check-all-orders.ts
+   - Manual analysis guides
+
+Complete workflow:
+1. Bot crashes → Global error handlers log it
+2. Monitoring detects → Slack alert sent
+3. SSH to server → Run collect_crash.sh
+4. Analyze → Review crash_timeline.txt + crash_*.log
+5. Fix code → Apply changes
+6. Restart → Monitor continues
+
+═══════════════════════════════════════════════════════════════════
+
+## 🎯 Monitoring Best Practices
+
+Daily:
+  □ Check monitoring logs: tail -50 /var/log/mm_bot_monitor.log
+  □ Review bot health: ./scripts/check_bot_alive.sh
+
+Weekly:
+  □ Review crash timeline: tail -200 crash_timeline.txt
+  □ Look for patterns (same coins, times, error types)
+  □ Clean old crash logs: ls -t crash_*.log | tail -n +11 | xargs rm -f
+
+Monthly:
+  □ Test Slack alerts (temporarily stop bot)
+  □ Verify cron is running: crontab -l | grep slack_alert
+  □ Review monitoring effectiveness
+
+═══════════════════════════════════════════════════════════════════
+
+🎉 Monitoring system ready to use\!
+
+For help, see: MONITORING_SETUP.md
+

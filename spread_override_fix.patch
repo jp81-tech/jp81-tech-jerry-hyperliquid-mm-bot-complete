@@ -1,0 +1,65 @@
+diff --git a/src/mm_hl.ts b/src/mm_hl.ts
+index 0000000..0000000 100644
+--- a/src/mm_hl.ts
++++ b/src/mm_hl.ts
+@@ -1,12 +1,6 @@
+-import { config as dotenvConfig } from 'dotenv'
+-import { fileURLToPath } from 'url'
+-import fs from 'fs'
+-import path from 'path'
+-
+-// Load .env explicitly from bot directory
+-const __filename = fileURLToPath(import.meta.url)
+-const __dirname = path.dirname(__filename)
+-dotenvConfig({ path: path.join(__dirname, '..', '.env') })
++import 'dotenv/config'
++import fs from 'fs'
++import path from 'path'
+ import { HyperliquidAPI, VolatilityScore } from './api/hyperliquid.js'
+ import { VolatilityRotation } from './utils/volatility_rotation.js'
+ import { Supervisor, SupervisorHooks } from './supervisor/index.js'
+@@ -1691,16 +1685,28 @@ export class MarketMakerHL {
+-    // ────────────────────────────────────────────────────────────────
+-
+-    /**
+-     * Get per-token spread override if defined, otherwise return global spread
+-     */
+-    getSpreadForPair(pair: string): number {
+-      const overrideKey = `SPREAD_OVERRIDE_${pair}`
+-      const override = process.env[overrideKey]
+-      if (override) {
+-        const spreadBps = Number(override)
+-        if (!isNaN(spreadBps) && spreadBps > 0) {
+-          return spreadBps
+-        }
+-      }
+-      return this.makerSpreadBps
+-    }
+-
+-    // ────────────────────────────────────────────────────────────────
++    // ────────────────────────────────────────────────────────────────
++
++    /**
++     * Get per-token spread override if defined, otherwise return global spread.
++     *
++     * Env format:
++     *   SPREAD_OVERRIDE_TAO=10
++     *   SPREAD_OVERRIDE_ZEC=10
++     */
++    getSpreadForPair(pair: string): number {
++      // pair może być np. TAO-PERP, TAO_USDC, ZEC-PERP itd.
++      const symbol = pair.split(/[-_]/)[0].toUpperCase()
++      const overrideKey = `SPREAD_OVERRIDE_${symbol}`
++      const override = process.env[overrideKey]
++
++      if (override != null) {
++        const spreadBps = Number(override)
++        if (!Number.isNaN(spreadBps) && spreadBps > 0) {
++          return spreadBps
++        }
++      }
++
++      return this.makerSpreadBps
++    }
++
++    // ────────────────────────────────────────────────────────────────

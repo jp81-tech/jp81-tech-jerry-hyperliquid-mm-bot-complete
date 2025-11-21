@@ -1,0 +1,86 @@
+#!/bin/bash
+set -euo pipefail
+
+BOT_DIR="/root/hyperliquid-hyperliquid-mm-complete"
+BIAS_FILE="$BOT_DIR/runtime/nansen_bias.json"
+
+# Load .env for SLACK_WEBHOOK
+set -a
+source "$BOT_DIR/.env"
+set +a
+
+if [ -z "${SLACK_WEBHOOK:-}" ] || [ "$SLACK_WEBHOOK" = "CHANGE_ME_SLACK_WEBHOOK_URL" ]; then
+  echo "⚠️  SLACK_WEBHOOK not configured, skipping dashboard"
+  exit 0
+fi
+
+# ─────────────────────────────────────────────────────────
+# Helper: Send Slack message
+# ─────────────────────────────────────────────────────────
+send_slack() {
+  local message="$1"
+  curl -sS -X POST -H "Content-Type: application/json" \
+    --data "{\"text\":\"$message\"}" \
+    "$SLACK_WEBHOOK" >/dev/null || echo "Failed to send Slack message"
+}
+
+# ─────────────────────────────────────────────────────────
+# Get current equity and PnL
+# ─────────────────────────────────────────────────────────
+cd "$BOT_DIR"
+EQUITY=$(npx tsx scripts/check_balance.ts 2>/dev/null | grep -oP 'Total Equity: \$\K[0-9,]+' | tr -d ',' || echo "N/A")
+
+# Get daily PnL from recent logs (rough estimate)
+DAILY_PNL=$(pm2 logs hyperliquid-mm --lines 1000 --nostream 2>/dev/null | grep -oP 'Daily PnL: [+-]?\$?\K[0-9.-]+' | tail -1 || echo "N/A")
+
+# Get position count
+POSITION_COUNT=$(npx tsx scripts/check_positions.ts 2>/dev/null | grep -cE '^\s+[A-Z]+:' || echo "0")
+
+# Get active pairs from logs
+ACTIVE_PAIRS=$(pm2 logs hyperliquid-mm --lines 50 --nostream 2>/dev/null | grep -oP '📊 Active pairs \(\d+/\d+\): \K.*' | tail -1 || echo "N/A")
+
+# Get top 3 Nansen biases
+TOP_BIASES=$(jq -r 'to_entries | sort_by(-.value.boost) | limit(3;.[]) | "  \(.value.boost | tostring | .[0:4]) \(.value.direction) \(.key) [\(.value.biasStrength)]"' "$BIAS_FILE" 2>/dev/null || echo "  N/A")
+
+# Get funding rate estimate (from recent logs)
+FUNDING=$(pm2 logs hyperliquid-mm --lines 500 --nostream 2>/dev/null | grep -oP 'Funding.*\$\K[0-9.-]+' | tail -1 || echo "N/A")
+
+# Calculate Nansen bias age
+if [ -f "$BIAS_FILE" ]; then
+  MTIME=$(stat -c %Y "$BIAS_FILE" 2>/dev/null || stat -f %m "$BIAS_FILE")
+  AGE=$(( ($(date +%s) - MTIME) / 60 ))
+  BIAS_AGE="${AGE}m"
+  if [ $AGE -gt 120 ]; then
+    BIAS_WARNING="⚠️ STALE ($AGE min)"
+  else
+    BIAS_WARNING="✅"
+  fi
+else
+  BIAS_AGE="N/A"
+  BIAS_WARNING="❌"
+fi
+
+# ─────────────────────────────────────────────────────────
+# Build Daily Summary Message
+# ─────────────────────────────────────────────────────────
+MESSAGE="━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 *Hyperliquid MM Bot - Daily Summary*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💰 *Equity:* \$$EQUITY
+📈 *Daily PnL:* \$$DAILY_PNL
+📊 *Positions:* $POSITION_COUNT
+
+🧭 *Active Pairs:* $ACTIVE_PAIRS
+
+⚡ *Top Nansen Signals:*
+$TOP_BIASES
+
+🔥 *Funding (est):* \$$FUNDING/day
+🕐 *Nansen Bias Age:* $BIAS_AGE $BIAS_WARNING
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Last update: $(date -u +"%Y-%m-%d %H:%M UTC")"
+
+send_slack "$MESSAGE"
+echo "✅ Slack dashboard sent"

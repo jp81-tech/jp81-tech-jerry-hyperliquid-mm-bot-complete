@@ -1,0 +1,18 @@
+#\!/usr/bin/env bash
+set -euo pipefail
+
+SLACK_WEBHOOK="${SLACK_WEBHOOK_MIN_NOTIONAL:-${SLACK_WEBHOOK_ALERTS:-${SLACK_WEBHOOK_URL:-}}}"
+if [[ -z "$SLACK_WEBHOOK" ]]; then
+  echo "[min-notional-alert-backup] Missing Slack webhook env (SLACK_WEBHOOK_MIN_NOTIONAL / SLACK_WEBHOOK_ALERTS / SLACK_WEBHOOK_URL)" >&2
+  exit 0
+fi
+WD="/root/hyperliquid-mm-bot-complete"
+cd "$WD"
+
+# CHANGED: Use journalctl for last 30 minutes instead of old log files
+# This avoids false alerts from historical data when pairs were different
+TIMEFRAME="30 minutes ago"
+
+# Check journalctl for recent min-notional events
+HIT="$(journalctl -u mm-bot.service --since "$TIMEFRAME" --no-pager 2>/dev/null \
+  | grep -iE quant_evt=below_min

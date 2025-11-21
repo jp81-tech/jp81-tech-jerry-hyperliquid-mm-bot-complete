@@ -1,0 +1,23 @@
+[Unit]
+Description=mm-bot health watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jerry
+Group=jerry
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+EnvironmentFile=-/home/jerry/hyperliquid-mm-bot-complete/.env
+ExecStart=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/scripts/mm-bot-health.sh
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/jerry/hyperliquid-mm-bot-complete
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
+
+

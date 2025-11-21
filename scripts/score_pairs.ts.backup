@@ -1,0 +1,271 @@
+#!/usr/bin/env -S npx tsx
+/**
+ * Pair Scoring Framework for MM Bot
+ * 
+ * Evaluates trading pairs using 5 key metrics:
+ * 1. PPK - Profit Per 1000 submits
+ * 2. Fill Rate - Quality of spreads
+ * 3. PVU - Profit per Volatility Unit
+ * 4. PFE - Profit per Fee efficiency
+ * 5. Max Drawdown - Intraday risk
+ */
+
+import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+
+interface PairMetrics {
+  pair: string;
+  submits: number;
+  fills: number;
+  fillRate: number;
+  pnl: number;
+  ppk: number; // Profit Per 1000 submits
+  maxDrawdown: number;
+  riskEvents: number;
+  score: number;
+}
+
+const LOOKBACK_HOURS = 10;
+const PAIRS = ['ZEC', 'UNI'];
+
+function getSubmitCount(pair: string): number {
+  try {
+    const since = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    const cmd = `journalctl -u mm-bot.service --since "${since}" --no-pager 2>/dev/null | grep -c "submit: pair=${pair}" || echo 0`;
+    const result = execSync(cmd, { encoding: 'utf8' }).trim();
+    return parseInt(result) || 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function getFillCount(): number {
+  try {
+    const since = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    const cmd = `journalctl -u mm-bot.service --since "${since}" --no-pager 2>/dev/null | grep -oE "Synced [0-9]+ new fills" | awk '{sum+=$2} END{print sum+0}'`;
+    const result = execSync(cmd, { encoding: 'utf8' }).trim();
+    return parseInt(result) || 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function getPnLFromLogs(): number {
+  try {
+    const since = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    const cmd = `journalctl -u mm-bot.service --since "${since}" --no-pager 2>/dev/null | grep "PnL Δ:" | grep -oE "\\$-?[0-9.]+" | sed 's/\\$//' | awk '{sum+=$1} END{print sum+0}'`;
+    const result = execSync(cmd, { encoding: 'utf8' }).trim();
+    return parseFloat(result) || 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function getMaxDrawdown(pair: string): number {
+  try {
+    const shadowLogPath = 'data/risk_shadow.log';
+    if (!fs.existsSync(shadowLogPath)) return 0;
+    
+    const since = Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000;
+    const lines = fs.readFileSync(shadowLogPath, 'utf8').split('\n');
+    
+    let maxDrawdown = 0;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const data = JSON.parse(line);
+        const ts = new Date(data.ts).getTime();
+        if (ts < since) continue;
+        if (data.pair !== pair) continue;
+        
+        const upnl = parseFloat(data.unrealizedPnlUsd);
+        if (upnl < maxDrawdown) {
+          maxDrawdown = upnl;
+        }
+      } catch (e) {
+        // Skip invalid lines
+      }
+    }
+    
+    return Math.abs(maxDrawdown);
+  } catch (err) {
+    return 0;
+  }
+}
+
+function getRiskEventCount(pair: string): number {
+  try {
+    const shadowLogPath = 'data/risk_shadow.log';
+    if (!fs.existsSync(shadowLogPath)) return 0;
+    
+    const since = Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000;
+    const lines = fs.readFileSync(shadowLogPath, 'utf8').split('\n');
+    
+    let count = 0;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const data = JSON.parse(line);
+        const ts = new Date(data.ts).getTime();
+        if (ts < since) continue;
+        if (data.pair !== pair) continue;
+        count++;
+      } catch (e) {
+        // Skip invalid lines
+      }
+    }
+    
+    return count;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function calculateScore(metrics: Omit<PairMetrics, 'score'>): number {
+  // Scoring weights:
+  // PPK: 40% (most important)
+  // Fill Rate: 20%
+  // Max Drawdown: 25% (risk is critical)
+  // Risk Events: 15%
+  
+  let score = 0;
+  
+  // PPK score (0-40 points)
+  if (metrics.ppk > 50) score += 40;
+  else if (metrics.ppk > 30) score += 35;
+  else if (metrics.ppk > 15) score += 25;
+  else if (metrics.ppk > 5) score += 10;
+  
+  // Fill rate score (0-20 points)
+  if (metrics.fillRate >= 20 && metrics.fillRate <= 35) score += 20;
+  else if (metrics.fillRate >= 15 && metrics.fillRate <= 40) score += 15;
+  else if (metrics.fillRate >= 10) score += 10;
+  
+  // Max drawdown score (0-25 points) - lower is better
+  if (metrics.maxDrawdown < 30) score += 25;
+  else if (metrics.maxDrawdown < 50) score += 20;
+  else if (metrics.maxDrawdown < 100) score += 10;
+  else if (metrics.maxDrawdown < 200) score += 5;
+  
+  // Risk events score (0-15 points) - lower is better
+  const riskEventsPerHour = metrics.riskEvents / LOOKBACK_HOURS;
+  if (riskEventsPerHour < 0.5) score += 15;
+  else if (riskEventsPerHour < 1) score += 10;
+  else if (riskEventsPerHour < 2) score += 5;
+  
+  return Math.round(score);
+}
+
+async function main() {
+  console.log('═══════════════════════════════════════════════');
+  console.log('  📊 PAIR SCORING FRAMEWORK');
+  console.log(`  Lookback: ${LOOKBACK_HOURS}h`);
+  console.log('═══════════════════════════════════════════════\n');
+  
+  const totalFills = getFillCount();
+  const totalPnL = getPnLFromLogs();
+  
+  console.log(`💰 Total PnL (${LOOKBACK_HOURS}h): $${totalPnL.toFixed(2)}`);
+  console.log(`📥 Total Fills: ${totalFills}\n`);
+  
+  const results: PairMetrics[] = [];
+  
+  for (const pair of PAIRS) {
+    const submits = getSubmitCount(pair);
+    const fillRate = totalFills > 0 ? (totalFills / (submits + getSubmitCount(PAIRS.find(p => p !== pair)!))) * 100 : 0;
+    const ppk = submits > 0 ? (totalPnL / (submits / 1000)) : 0;
+    const maxDrawdown = getMaxDrawdown(pair);
+    const riskEvents = getRiskEventCount(pair);
+    
+    const metricsWithoutScore = {
+      pair,
+      submits,
+      fills: totalFills, // Approximation
+      fillRate,
+      pnl: totalPnL / 2, // Approximation - split between pairs
+      ppk,
+      maxDrawdown,
+      riskEvents,
+    };
+    
+    const score = calculateScore(metricsWithoutScore);
+    
+    results.push({
+      ...metricsWithoutScore,
+      score,
+    });
+  }
+  
+  // Sort by score descending
+  results.sort((a, b) => b.score - a.score);
+  
+  console.log('┌─────────────────────────────────────────────────────────────┐');
+  console.log('│                    PAIR RANKING                             │');
+  console.log('├──────┬─────────┬──────────┬──────┬──────┬─────────┬────────┤');
+  console.log('│ Pair │ Submits │ Fill %   │ PPK  │ Draw │ Risks   │ SCORE  │');
+  console.log('├──────┼─────────┼──────────┼──────┼──────┼─────────┼────────┤');
+  
+  for (const r of results) {
+    const rankEmoji = r.score >= 80 ? '🥇' : r.score >= 70 ? '🥈' : r.score >= 60 ? '🥉' : '  ';
+    console.log(
+      `│ ${rankEmoji} ${r.pair.padEnd(3)} │ ${r.submits.toString().padStart(7)} │ ${r.fillRate.toFixed(1).padStart(7)}% │ ${r.ppk.toFixed(0).padStart(4)} │ ${r.maxDrawdown.toFixed(0).padStart(4)} │ ${r.riskEvents.toString().padStart(7)} │ ${r.score.toString().padStart(6)} │`
+    );
+  }
+  
+  console.log('└──────┴─────────┴──────────┴──────┴──────┴─────────┴────────┘\n');
+  
+  // Recommendations
+  console.log('📌 RECOMMENDATIONS:\n');
+  
+  for (const r of results) {
+    console.log(`${r.pair}:`);
+    
+    if (r.score >= 80) {
+      console.log(`  ✅ EXCELLENT - Keep this pair, ideal performance`);
+    } else if (r.score >= 70) {
+      console.log(`  ✅ GOOD - Solid performer, keep trading`);
+    } else if (r.score >= 60) {
+      console.log(`  ⚠️  ACCEPTABLE - Monitor closely`);
+    } else {
+      console.log(`  ❌ POOR - Consider replacing this pair`);
+    }
+    
+    // Specific feedback
+    if (r.ppk > 50) {
+      console.log(`  💰 Exceptional profitability (PPK: ${r.ppk.toFixed(0)})`);
+    } else if (r.ppk < 15) {
+      console.log(`  ⚠️  Low profitability (PPK: ${r.ppk.toFixed(0)})`);
+    }
+    
+    if (r.fillRate >= 20 && r.fillRate <= 35) {
+      console.log(`  ✅ Optimal fill rate (${r.fillRate.toFixed(1)}%)`);
+    } else if (r.fillRate > 40) {
+      console.log(`  ⚠️  High fill rate - consider wider spreads`);
+    }
+    
+    if (r.maxDrawdown > 100) {
+      console.log(`  ⚠️  High drawdown risk ($${r.maxDrawdown.toFixed(0)})`);
+    }
+    
+    if (r.riskEvents > LOOKBACK_HOURS * 2) {
+      console.log(`  ⚠️  Frequent risk events (${r.riskEvents})`);
+    }
+    
+    console.log();
+  }
+  
+  // Summary
+  const avgScore = results.reduce((sum, r) => sum + r.score, 0) / results.length;
+  console.log(`\n📊 Average Score: ${avgScore.toFixed(1)}/100`);
+  
+  if (avgScore >= 75) {
+    console.log(`\n✅ Portfolio quality: EXCELLENT - current pairs are optimal`);
+  } else if (avgScore >= 65) {
+    console.log(`\n✅ Portfolio quality: GOOD - minor optimizations possible`);
+  } else {
+    console.log(`\n⚠️  Portfolio quality: NEEDS IMPROVEMENT - consider pair rotation`);
+  }
+}
+
+main().catch(console.error);

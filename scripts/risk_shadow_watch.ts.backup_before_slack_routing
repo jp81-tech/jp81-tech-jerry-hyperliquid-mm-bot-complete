@@ -1,0 +1,230 @@
+#!/usr/bin/env -S npx tsx
+import 'dotenv/config'
+import fs from 'fs'
+import path from 'path'
+import * as hl from '@nktkas/hyperliquid'
+import { ethers } from 'ethers'
+
+type PositionSide = 'long' | 'short'
+
+type SimplePosition = {
+  coin: string
+  size: number
+  entryPx: number
+  markPx: number
+  side: PositionSide
+  unrealizedPnlUsd: number
+}
+
+async function getOpenPositionsFromApi(): Promise<SimplePosition[]> {
+  const pk = process.env.PRIVATE_KEY
+  if (!pk) throw new Error('PRIVATE_KEY not found in .env')
+  
+  const wallet = new ethers.Wallet(pk)
+  const infoClient = new hl.InfoClient({ transport: new hl.HttpTransport() })
+  
+  const chState = await infoClient.clearinghouseState({ user: wallet.address })
+  const positions = chState?.assetPositions ?? []
+  
+  const allMids = await infoClient.allMids()
+  const meta = await infoClient.meta()
+  
+  const result: SimplePosition[] = []
+  
+  for (const p of positions) {
+    const coin = p.position.coin
+    const szi = Number(p.position.szi)
+    if (Math.abs(szi) < 1e-12) continue
+    
+    const side: PositionSide = szi > 0 ? 'long' : 'short'
+    const entryPx = parseFloat(p.position.entryPx || '0')
+    const unrealizedPnl = parseFloat(p.position.unrealizedPnl)
+    
+    const assetIndex = meta.universe.findIndex(u => u.name === coin)
+    const markPrice = assetIndex >= 0 ? parseFloat(allMids[assetIndex] || '0') : 0
+    
+    result.push({
+      coin,
+      size: Math.abs(szi),
+      entryPx,
+      markPx: markPrice,
+      side,
+      unrealizedPnlUsd: unrealizedPnl,
+    })
+  }
+  
+  return result
+}
+
+function loadShadowConfig() {
+  const enabled = process.env.RISK_SHADOW_ENABLED === 'true'
+  const logPath = process.env.RISK_SHADOW_LOG_PATH
+    || '/root/hyperliquid-mm-bot-complete/data/risk_shadow.log'
+
+  const defaultMax = Number(process.env.RISK_SHADOW_DEFAULT_MAX_LOSS_USD || '20')
+  const zecMax = Number(process.env.RISK_SHADOW_ZEC_MAX_LOSS_USD || defaultMax)
+  const uniMax = Number(process.env.RISK_SHADOW_UNI_MAX_LOSS_USD || defaultMax)
+  
+  const slackWebhook = process.env.SLACK_WEBHOOK_URL || ''
+
+  return {
+    enabled,
+    logPath,
+    perPair: {
+      ZEC: zecMax,
+      UNI: uniMax,
+    } as Record<string, number>,
+    defaultMax,
+    slackWebhook,
+  }
+}
+
+function ensureLogDir(logPath: string) {
+  const dir = path.dirname(logPath)
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
+}
+
+function getLimitForPair(cfg: ReturnType<typeof loadShadowConfig>, pair: string): number {
+  const key = pair.toUpperCase()
+  return cfg.perPair[key] ?? cfg.defaultMax
+}
+
+async function sendSlackAlert(webhook: string, pair: string, side: string, unrealizedPnl: number, threshold: number) {
+  if (!webhook) return
+  
+  const emoji = side === 'long' ? '📈' : '📉'
+  const message = {
+    text: `⚠️ *RISK ALERT - Shadow Mode*`,
+    blocks: [
+      {
+        type: 'header',
+        text: {
+          type: 'plain_text',
+          text: `⚠️ RISK ALERT - Shadow Mode`,
+          emoji: true
+        }
+      },
+      {
+        type: 'section',
+        fields: [
+          {
+            type: 'mrkdwn',
+            text: `*Pair:*\n${emoji} ${pair}`
+          },
+          {
+            type: 'mrkdwn',
+            text: `*Side:*\n${side.toUpperCase()}`
+          },
+          {
+            type: 'mrkdwn',
+            text: `*Unrealized PnL:*\n💸 $${unrealizedPnl.toFixed(2)}`
+          },
+          {
+            type: 'mrkdwn',
+            text: `*Threshold:*\n🚨 -$${threshold.toFixed(2)}`
+          }
+        ]
+      },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `🕐 ${new Date().toISOString()} | 📝 Shadow mode (logging only, no action taken)`
+          }
+        ]
+      }
+    ]
+  }
+  
+  try {
+    const response = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message)
+    })
+    
+    if (!response.ok) {
+      console.error(`[RISK_SHADOW] Slack webhook failed: ${response.status}`)
+    }
+  } catch (err: any) {
+    console.error(`[RISK_SHADOW] Failed to send Slack alert: ${err?.message}`)
+  }
+}
+
+async function main() {
+  const cfg = loadShadowConfig()
+
+  if (!cfg.enabled) {
+    console.log('[RISK_SHADOW] disabled via RISK_SHADOW_ENABLED=false')
+    return
+  }
+
+  ensureLogDir(cfg.logPath)
+
+  let positions: SimplePosition[]
+  try {
+    positions = await getOpenPositionsFromApi()
+  } catch (err) {
+    console.error('[RISK_SHADOW] failed to load positions', err)
+    return
+  }
+
+  if (!positions.length) {
+    console.log('[RISK_SHADOW] no open positions')
+    return
+  }
+
+  const now = new Date().toISOString()
+  const lines: string[] = []
+  const alerts: Promise<void>[] = []
+
+  for (const pos of positions) {
+    const pair = pos.coin
+    const limit = getLimitForPair(cfg, pair)
+    const loss = pos.unrealizedPnlUsd
+
+    if (!Number.isFinite(loss)) continue
+    if (loss >= 0) continue
+
+    if (loss <= -limit) {
+      const entry = {
+        ts: now,
+        pair,
+        side: pos.side,
+        size: pos.size,
+        entryPx: pos.entryPx,
+        markPx: pos.markPx,
+        unrealizedPnlUsd: loss,
+        limitUsd: limit,
+        source: 'watcher',
+      }
+      lines.push(JSON.stringify(entry))
+      
+      // Send Slack alert
+      alerts.push(sendSlackAlert(cfg.slackWebhook, pair, pos.side, loss, limit))
+    }
+  }
+
+  if (!lines.length) {
+    console.log('[RISK_SHADOW] no positions beyond thresholds')
+    return
+  }
+
+  try {
+    fs.appendFileSync(cfg.logPath, lines.join('\n') + '\n', { encoding: 'utf8' })
+    console.log(`[RISK_SHADOW] logged ${lines.length} events to ${cfg.logPath}`)
+  } catch (err) {
+    console.error('[RISK_SHADOW] failed to append log file', err)
+  }
+  
+  // Wait for all Slack alerts to send
+  await Promise.all(alerts)
+}
+
+main().catch((err) => {
+  console.error('[RISK_SHADOW] fatal error in watcher', err)
+  process.exit(1)
+})

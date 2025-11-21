@@ -1,0 +1,94 @@
+================================================================================
+MM BOT - QUICK HEALTH CHECK (30 sekund)
+================================================================================
+
+1. SPRAWDŹ SPREADY (config vs runtime):
+
+   mm-spreads
+
+   LUB ręcznie:
+   grep SPREAD_OVERRIDE_ .env
+   tail -500 /root/.pm2/logs/mm-bot-out.log | grep 🎯 | tail -10
+   BOT_LOG_PATH=/root/.pm2/logs/mm-bot-out.log npx tsx scripts/check_spread_mismatch.ts
+
+   ✅ OK gdy: STATUS=MATCH dla aktywnych par
+   ⚠️  PROBLEM gdy: MISMATCH (ENV ≠ LOG)
+
+2. SPRAWDŹ BOT:
+
+   pm2 status mm-bot
+   pm2 logs mm-bot --lines 30 --nostream
+
+   ✅ OK gdy: status=online, uptime rośnie, brak errorów
+   ⚠️  PROBLEM gdy: status=errored/stopped, dużo restartów
+
+3. SPRAWDŹ AUTO-UPDATE:
+
+   systemctl list-timers spread-snippet.timer --no-pager
+
+   ✅ OK gdy: NEXT za <2h, LAST niedawno (success)
+   ⚠️  PROBLEM gdy: timer disabled lub LAST z błędem
+
+================================================================================
+TYPOWE PROBLEMY & QUICK FIXES
+================================================================================
+
+❌ "Spready nie pasują" (MISMATCH):
+   pm2 restart mm-bot --update-env
+   # Poczekaj 30s i sprawdź ponownie: mm-spreads
+
+❌ "Bot offline":
+   pm2 logs mm-bot --err --lines 50
+   # Szukaj ostatniego błędu, potem:
+   pm2 restart mm-bot
+
+❌ "Auto-update nie działa":
+   journalctl -u spread-snippet.service -n 50 --no-pager
+   # Jeśli "No fresh Nansen data" → OK (graceful skip)
+   # Jeśli error → ręczny test:
+   cd /root/hyperliquid-mm-bot-complete && ./scripts/gen_spread_snippet.sh
+
+❌ "Daily loss limit block":
+   grep MAX_DAILY_LOSS_USD .env  # Powinno być 700
+   npx tsx scripts/check_positions.ts  # Sprawdź realne pozycje
+   # Jeśli PnL faktycznie < -700 → CZEKAJ (safety works!)
+   # Jeśli PnL dodatnie a limit trafiony → bug, manual reset (emergency only)
+
+================================================================================
+KLUCZOWE WARTOŚCI (2025-11-09)
+================================================================================
+
+MAX_DAILY_LOSS_USD = 700      (.env)
+Global spread      = 35 bps   (.env - MAKER_SPREAD_BPS)
+Effective min      = 21 bps   (0.6 × 35, safety floor)
+Auto-update freq   = 2h       (even hours: 00:00, 02:00, 04:00...)
+Nansen max age     = 4h       (graceful skip if older)
+
+Oczekiwane spready (przykład):
+- TAO, ZEC, VIRTUAL = 21 bps (confluence: Nansen ≥ 2.0)
+- ASTER = 32 bps
+
+================================================================================
+EMERGENCY CONTACTS & FILES
+================================================================================
+
+Pełny troubleshooting: /root/hyperliquid-mm-bot-complete/TROUBLESHOOTING.md
+Config:                /root/hyperliquid-mm-bot-complete/.env
+Spread calc params:    /root/hyperliquid-mm-bot-complete/spread_config.json
+Bot state:             /root/hyperliquid-mm-bot-complete/data/bot_state.json
+PM2 logs:              /root/.pm2/logs/mm-bot-{out,err}.log
+Timer logs:            journalctl -u spread-snippet.service
+
+================================================================================
+CO NIE ROBIĆ W PANICE
+================================================================================
+
+❌ NIE kasuj .env na pałę
+❌ NIE edytuj TypeScript na produkcji "na szybko"
+❌ NIE resetuj dailyPnL jeśli strata jest realna (safety working!)
+
+✅ TAK: mm-spreads → mm-status → systemctl list-timers
+✅ TAK: Sprawdź logi przed działaniem
+✅ TAK: Backup przed każdą ręczną zmianą
+
+================================================================================

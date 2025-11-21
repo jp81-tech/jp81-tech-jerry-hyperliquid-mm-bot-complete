@@ -1,0 +1,91 @@
+═══════════════════════════════════════════════════════════════
+PM2 DAEMON CHECKS REMOVED FROM HEALTH MONITORING ✅
+═══════════════════════════════════════════════════════════════
+
+Date: 2025-11-13 08:40 UTC
+Status: COMPLETE
+
+═══════════════════════════════════════════════════════════════
+WHAT WAS DONE
+═══════════════════════════════════════════════════════════════
+
+Removed all PM2 daemon references from health monitoring scripts.
+Bot now runs via systemctl (mm-bot.service), not PM2.
+
+All health checks now use journalctl to read mm-bot.service logs
+instead of trying to query PM2 (which isnt installed).
+
+═══════════════════════════════════════════════════════════════
+SCRIPTS MODIFIED
+═══════════════════════════════════════════════════════════════
+
+1. scripts/daily_report.sh
+   - Changed: pm2 logs → journalctl -u mm-bot.service
+   
+2. scripts/health_check.sh
+   - Changed: pm2 logs → journalctl -u mm-bot.service
+   - Changed: pm2 status → systemctl status mm-bot.service
+   
+3. scripts/mm_healthcheck.sh
+   - Changed: pm2 logs → journalctl -u mm-bot.service
+   - Changed: pm2 status → systemctl status mm-bot.service
+   
+4. scripts/slack_dashboard.sh
+   - Changed: pm2 logs → journalctl -u mm-bot.service
+   - Changed: pm2 status → systemctl status mm-bot.service
+
+═══════════════════════════════════════════════════════════════
+CHANGES MADE
+═══════════════════════════════════════════════════════════════
+
+BEFORE (PM2):
+  pm2 logs hyperliquid-mm --lines 200 --nostream
+  pm2 status hyperliquid-mm
+  pm2 logs hyperliquid-mm --err --lines 10
+
+AFTER (systemctl):
+  journalctl -u mm-bot.service --no-pager -n 200
+  systemctl status mm-bot.service --no-pager
+  journalctl -u mm-bot.service --no-pager -p err -n 10
+
+═══════════════════════════════════════════════════════════════
+BACKUPS
+═══════════════════════════════════════════════════════════════
+
+Original scripts backed up with extension:
+  .backup_pm2_removal
+
+Example:
+  scripts/health_check.sh.backup_pm2_removal
+  scripts/mm_healthcheck.sh.backup_pm2_removal
+  scripts/slack_dashboard.sh.backup_pm2_removal
+  scripts/daily_report.sh.backup_pm2_removal
+
+═══════════════════════════════════════════════════════════════
+VERIFICATION
+═══════════════════════════════════════════════════════════════
+
+Test any health script:
+  bash scripts/mm_healthcheck.sh
+
+Expected result:
+  ✅ No PM2 daemon warnings
+  ✅ Logs from journalctl (systemd)
+  ✅ Status from systemctl
+
+═══════════════════════════════════════════════════════════════
+RESULT
+═══════════════════════════════════════════════════════════════
+
+No more PM2 daemon alerts will appear in:
+  - Daily health reports
+  - Slack/Telegram diagnostics  
+  - Health check scripts
+
+All monitoring now uses systemctl/journalctl, which matches
+how the bot actually runs (via mm-bot.service).
+
+═══════════════════════════════════════════════════════════════
+Last Updated: 2025-11-13 08:40 UTC
+Status: ✅ COMPLETE
+═══════════════════════════════════════════════════════════════

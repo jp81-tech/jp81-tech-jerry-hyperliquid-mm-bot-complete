@@ -1,0 +1,16 @@
+[Unit]
+Description=Run Nansen bias refresh every 2 hours (Berlin time)
+
+[Timer]
+OnCalendar=*:0/2
+Timezone=Europe/Berlin
+Unit=nansen-bias.service
+Persistent=true
+AccuracySec=1m
+RandomizedDelaySec=90
+
+[Install]
+WantedBy=timers.target
+
+
+

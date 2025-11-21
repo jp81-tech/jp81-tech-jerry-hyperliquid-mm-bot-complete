@@ -1,0 +1,122 @@
+═══════════════════════════════════════════════════════════════
+PM2 DAEMON ALERT REMOVAL - COMPLETE ✅
+═══════════════════════════════════════════════════════════════
+
+Date: 2025-11-13 09:00 UTC
+Issue: PM2 daemon OFFLINE alerts appearing despite not using PM2
+Resolution: Removed all PM2 checks from monitoring scripts
+
+═══════════════════════════════════════════════════════════════
+ROOT CAUSE IDENTIFIED
+═══════════════════════════════════════════════════════════════
+
+Source: /usr/local/bin/rogue_watch.sh
+- Runs via systemd timer: mm-rogue-watch.timer (every 5 minutes)
+- Line 26-28: Checked if PM2 daemon is online
+- Since PM2 not installed, check always failed
+- Sent Slack alert: "🚨 PM2 daemon is OFFLINE — no supervision active!"
+
+═══════════════════════════════════════════════════════════════
+SCRIPTS UPDATED
+═══════════════════════════════════════════════════════════════
+
+1️⃣ /usr/local/bin/rogue_watch.sh
+   BEFORE:
+   - Checked PM2 daemon health with `pm2 ping`
+   - Used PM2 to manage bot lifecycle
+   - Checked PM2 process IDs for rogue detection
+
+   AFTER:
+   - PM2 daemon check REMOVED (lines 24-26)
+   - Uses systemctl to manage mm-bot.service
+   - Checks systemd MainPID for rogue detection
+   - KILL_SWITCH now stops systemd service instead of PM2
+   - DRY_RUN enforcement uses systemctl
+
+   Backup: /usr/local/bin/rogue_watch.sh.backup_pm2_removal
+
+2️⃣ /usr/local/bin/mm-status
+   BEFORE:
+   - Displayed PM2 process list: `pm2 list`
+   - Searched for hyperliquid-mm, hl-lev, leverage-watch
+
+   AFTER:
+   - Shows systemd service status instead
+   - Uses `systemctl status mm-bot.service`
+   - No PM2 references
+
+   Backup: /usr/local/bin/mm-status.backup_pm2_removal
+
+═══════════════════════════════════════════════════════════════
+PREVIOUS PM2 REMOVAL (Session 1)
+═══════════════════════════════════════════════════════════════
+
+These were already fixed in the first PM2 removal session:
+
+✅ scripts/daily_report.sh
+✅ scripts/health_check.sh
+✅ scripts/mm_healthcheck.sh
+✅ scripts/slack_dashboard.sh
+
+All converted from `pm2 logs` to `journalctl -u mm-bot.service`
+
+═══════════════════════════════════════════════════════════════
+VERIFICATION
+═══════════════════════════════════════════════════════════════
+
+✅ rogue_watch.sh executes without errors
+✅ mm-status command works correctly
+✅ No PM2 daemon checks remain
+✅ All functionality preserved (rogue process detection, KILL_SWITCH, DRY_RUN)
+✅ Bot management now fully systemd-based
+
+Test commands:
+bash /usr/local/bin/rogue_watch.sh    # No PM2 alerts
+mm-status                              # Shows systemd status
+
+═══════════════════════════════════════════════════════════════
+MONITORING SCHEDULE
+═══════════════════════════════════════════════════════════════
+
+mm-rogue-watch.timer runs every 5 minutes
+- Next run: Check with `systemctl list-timers | grep rogue`
+- Should NOT send PM2 daemon alerts anymore
+
+═══════════════════════════════════════════════════════════════
+FILES MODIFIED
+═══════════════════════════════════════════════════════════════
+
+/usr/local/bin/rogue_watch.sh
+  - Removed PM2 daemon health check (lines 24-26)
+  - Changed PM2 commands to systemctl
+  - Updated process detection logic
+
+/usr/local/bin/mm-status
+  - Removed PM2 list section
+  - Added systemd service status
+  - Maintained all other checks
+
+═══════════════════════════════════════════════════════════════
+ROLLBACK (if needed)
+═══════════════════════════════════════════════════════════════
+
+To restore old versions:
+
+mv /usr/local/bin/rogue_watch.sh.backup_pm2_removal /usr/local/bin/rogue_watch.sh
+mv /usr/local/bin/mm-status.backup_pm2_removal /usr/local/bin/mm-status
+
+═══════════════════════════════════════════════════════════════
+SUMMARY
+═══════════════════════════════════════════════════════════════
+
+Problem: PM2 daemon OFFLINE alerts every 5 minutes
+Cause: rogue_watch.sh checking PM2 health
+Solution: Removed PM2 check, updated to use systemctl
+Result: No more PM2 daemon alerts ✅
+
+Bot now 100% systemd-managed with no PM2 dependencies.
+
+═══════════════════════════════════════════════════════════════
+Last Updated: 2025-11-13 09:00 UTC
+Status: ✅ COMPLETE - No more PM2 alerts
+═══════════════════════════════════════════════════════════════

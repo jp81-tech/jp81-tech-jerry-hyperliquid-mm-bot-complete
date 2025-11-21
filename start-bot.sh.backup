@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd /root/hyperliquid-mm-bot-complete
+
+exec npm exec tsx src/mm_hl.ts

@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Midday PnL report at 11:05 UTC (around 12:05 CET)
+
+[Timer]
+OnCalendar=*-*-* 11:05:00 UTC
+Persistent=true
+Unit=midday-pnl.service
+
+[Install]
+WantedBy=timers.target
+
+
+

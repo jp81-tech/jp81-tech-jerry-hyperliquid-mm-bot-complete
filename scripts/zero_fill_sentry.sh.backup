@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd /root/hyperliquid-mm-bot-complete
+
+# Load .env explicitly
+[ -f .env ] && set -a && source .env && set +a
+
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+ALERT_FILE="/tmp/zero_fill_alert_last_ts"
+ALERT_COOLDOWN_MIN=30
+POSITION_CACHE="/tmp/zero_fill_positions.json"
+
+echo "[$(date -u "+%Y-%m-%d %H:%M:%S UTC")] Zero-Fill Sentry Check..."
+
+# Check cooldown
+if [ -f "$ALERT_FILE" ]; then
+  last_ts=$(stat -c %Y "$ALERT_FILE" 2>/dev/null || echo 0)
+  now_ts=$(date +%s)
+  diff=$(( (now_ts - last_ts) / 60 ))
+  if [ "$diff" -lt "$ALERT_COOLDOWN_MIN" ]; then
+    echo "⏱️ Alert cooldown active (last alert $diff min ago) - skipping"
+    exit 0
+  fi
+fi
+
+# Get current positions (for proxy fill detection)
+CURRENT_POSITIONS=$(timeout 30 npx tsx scripts/check_position_pnl.ts 2>/dev/null | grep -E "^[A-Z]" | awk -F"|" "{gsub(/^[ \t]+|[ \t]+$/,\"\",\$1); gsub(/^[ \t]+|[ \t]+$/,\"\",\$3); print \$1\":\"\$3}" || echo "")
+
+# Load previous positions
+PREV_POSITIONS=""
+if [ -f "$POSITION_CACHE" ]; then
+  PREV_POSITIONS=$(cat "$POSITION_CACHE")
+fi
+
+# Save current positions for next run
+echo "$CURRENT_POSITIONS" > "$POSITION_CACHE"
+
+# Get effective pairs
+PAIRS="$(jq -r ".pairs[]" runtime/effective_active_pairs.json 2>/dev/null | xargs echo)"
+
+if [ -z "$PAIRS" ]; then
+  echo "No effective pairs - skipping"
+  exit 0
+fi
+
+# Check each pair for zero-fill condition
+ZERO_FILL_PAIRS=()
+for pair in $PAIRS; do
+  SUBMITS=$(journalctl -u mm-bot.service --since "15 min ago" --no-pager | grep -c "submit: pair=${pair}" || echo 0)
+  FILLS_LOG=$(journalctl -u mm-bot.service --since "15 min ago" --no-pager | grep -Eic "${pair}.*(filled|FILLED)" || echo 0)
+  
+  # Proxy fill detection: check if position size changed
+  FILLS_PROXY=0
+  if [ -n "$PREV_POSITIONS" ]; then
+    PREV_SIZE=$(echo "$PREV_POSITIONS" | grep "^${pair}:" | cut -d: -f2 || echo "")
+    CURR_SIZE=$(echo "$CURRENT_POSITIONS" | grep "^${pair}:" | cut -d: -f2 || echo "")
+    
+    if [ -n "$PREV_SIZE" ] && [ -n "$CURR_SIZE" ]; then
+      # If sizes are different -> fills happened (use string comparison to avoid bc)
+      if [ "$PREV_SIZE" != "$CURR_SIZE" ]; then
+        FILLS_PROXY=1
+        echo "  ${pair}: Position changed ($PREV_SIZE → $CURR_SIZE) = proxy fill detected"
+      fi
+    fi
+  fi
+  
+  FILLS=$(( FILLS_LOG + FILLS_PROXY ))
+  
+  echo "  ${pair}: Submits=$SUBMITS, Fills=$FILLS (log=$FILLS_LOG, proxy=$FILLS_PROXY)"
+  
+  if [ "$SUBMITS" -ge 100 ] && [ "$FILLS" -eq 0 ]; then
+    ZERO_FILL_PAIRS+=("$pair (${SUBMITS} submits, 0 fills)")
+  fi
+done
+
+if [ "${#ZERO_FILL_PAIRS[@]}" -eq 0 ]; then
+  echo "✅ No zero-fill issues detected"
+  exit 0
+fi
+
+# ZERO-FILL ALERT TRIGGERED
+echo
+echo "🚨 ZERO-FILL ALERT: ${#ZERO_FILL_PAIRS[@]} pairs with no fills"
+
+PAIRS_LIST=$(printf "%s\n" "${ZERO_FILL_PAIRS[@]}" | sed "s/^/• /")
+TS_UTC="$(date -u "+%Y-%m-%d %H:%M:%S UTC")"
+
+MSG="🚨 *Zero-Fill Sentry Alert*
+Time: ${TS_UTC}
+Period: last 15 minutes
+
+Pairs with high submits but ZERO fills:
+${PAIRS_LIST}
+
+Note: Checked both logs and position changes (proxy detection)
+
+Action required:
+• Check spreads (may be too wide)
+• Check order sizes (may be too small)
+• Check liquidity conditions
+• Consider emergency exit if positions are trapped"
+
+if [ -n "$SLACK_WEBHOOK_URL" ]; then
+  curl -s -X POST -H "Content-type: application/json" \
+       --data "$(jq -Rn --arg t "$MSG" "{text:\$t}")" \
+       "$SLACK_WEBHOOK_URL" >/dev/null 2>&1 || true
+fi
+
+if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+  TG_API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+  curl -s -X POST "$TG_API" -d "chat_id=${TELEGRAM_CHAT_ID}" \
+       --data-urlencode "text=${MSG}" >/dev/null 2>&1 || true
+fi
+
+# Update cooldown timestamp
+touch "$ALERT_FILE"
+
+echo "✅ Zero-fill alert sent"

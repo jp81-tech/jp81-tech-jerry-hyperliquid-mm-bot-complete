@@ -1,0 +1,5 @@
+mm_bot_order_errors_total{type="invalid_size"} 0
+mm_bot_order_errors_total{type="insufficient_margin"} 0
+mm_bot_order_errors_total{type="other"} 0
+mm_bot_order_submits_total 0
+mm_bot_last_run_timestamp 1762888251

@@ -1,0 +1,82 @@
+═══════════════════════════════════════════════════════════════════
+✅ OPTION D - DOCUMENTATION UPDATE COMPLETED
+═══════════════════════════════════════════════════════════════════
+Date: 2025-11-11 11:47 UTC
+
+## Co zostało zaktualizowane:
+
+### 1️⃣ crash_timeline.txt - UPDATED ✅
+   Dodano poprawioną analizę Crash #6 z jasnym rozróżnieniem:
+   - Stan procesu (ps): MARTWY w momencie sprawdzania
+   - Logi: Pokazują aktywność do 09:36:13 UTC
+   - Wniosek: Bot crashnął o 09:36:13 (nie 11:10!)
+   
+   Lokalizacja: /root/hyperliquid-mm-bot-complete/crash_timeline.txt
+   Rozmiar: 3.2K
+
+### 2️⃣ CRASH_TEMPLATE.txt - CREATED ✅
+   Prosty szablon do kopiowania przy przyszłych crashach:
+   - 9-punktowa struktura dokumentacji
+   - Gotowe komendy bash do zbierania danych
+   - Ultra-krótki format (copy-paste ready)
+   
+   Lokalizacja: /root/hyperliquid-mm-bot-complete/CRASH_TEMPLATE.txt
+   Rozmiar: 2.1K
+
+### 3️⃣ README_DEBUG_UPDATE.patch.txt - CREATED ✅
+   Sekcja do dodania do README_DEBUG.md zawiera:
+   
+   a) Nowa sekcja: "🔬 Rozróżnienie: Stan procesu vs analiza logów"
+      - Przykład prawidłowej analizy
+      - Przykład BŁĘDU (co NIE mówić)
+      - Szybki test logiczny (tabele)
+   
+   b) CASE STUDY: Crash #6 (2025-11-11)
+      - Symptomy (z timestampami)
+      - Analiza krok po kroku
+      - Wniosek z poprawnym datowaniem
+      - Weryfikacja fixa
+   
+   c) Odniesienie do CRASH_TEMPLATE.txt
+   
+   Lokalizacja: /root/hyperliquid-mm-bot-complete/README_DEBUG_UPDATE.patch.txt
+   Rozmiar: 3.2K
+
+═══════════════════════════════════════════════════════════════════
+
+## Kluczowa zmiana w języku:
+
+### PRZED (błąd):
+"⚠️ UWAGA! Bot JUŻ DZIAŁA i crashuje w TYM MOMENCIE!"
+
+### PO (poprawne):
+"Bot DZIAŁAŁ do ~09:36:13 UTC i wtedy się wywalił (silent crash).
+W momencie analizy (ps aux) był JUŻ martwy – widzimy tylko 
+ostatnie wpisy w logach."
+
+═══════════════════════════════════════════════════════════════════
+
+## Jak użyć tych plików:
+
+1. crash_timeline.txt
+   → Gotowe, już zawiera poprawną analizę Crash #6
+
+2. CRASH_TEMPLATE.txt
+   → Przy następnym crashu: cat CRASH_TEMPLATE.txt
+   → Wypełnij template i dopisz do crash_timeline.txt
+
+3. README_DEBUG_UPDATE.patch.txt
+   → To jest PATCH - zawartość do skopiowania do README_DEBUG.md
+   → Możesz ręcznie dodać te sekcje lub użyć jako referencja
+
+═══════════════════════════════════════════════════════════════════
+
+## Stan bota po zmianach:
+
+✅ Bot działa z PID 3331418 (od 12:10 UTC)
+✅ Successful submits seq=10-21+
+✅ Brak crashów >2h (poprzednio <2min)
+✅ Global error handlers zainstalowane
+✅ Dokumentacja zaktualizowana
+
+═══════════════════════════════════════════════════════════════════

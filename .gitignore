@@ -6,8 +6,10 @@ runtime/*.env
 
 # Logs
 *.log
+*.log.*
 logs/
 runtime/*.log
+runtime/
 
 # Node modules
 node_modules/
@@ -17,6 +19,7 @@ dist/
 backups/
 *.tgz
 *.tar.gz
+data/
 
 # OS files
 .DS_Store

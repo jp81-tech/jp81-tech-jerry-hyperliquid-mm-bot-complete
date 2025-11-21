@@ -1,0 +1,40 @@
+{
+  "weights": {
+    "w_vol": 0.45,
+    "w_spread": 0.25,
+    "w_depth": 0.15,
+    "w_flow": 0.1,
+    "w_fee": 0.05
+  },
+  "filters": {
+    "min_depth_usd": 5000,
+    "max_spread_bps": 60,
+    "min_trades_5m": 10,
+    "denylist": []
+  },
+  "scaling": {
+    "base_clip_usd": 20,
+    "base_maker_spread_bps": 110,
+    "clip_scale_min": 0.6,
+    "clip_scale_max": 1.8,
+    "layer_scale_min": 0.5,
+    "layer_scale_max": 2
+  },
+  "killswitch": {
+    "markout_60s_bps_min": -8,
+    "reject_rate_max": 0.01,
+    "below_min_rate_max": 0.1,
+    "global_pnl_30m_usd_floor": -50
+  },
+  "nansen": {
+    "enabled": false,
+    "min_quality": 0.6,
+    "blend": "smart_buy_ratio*0.6 + netflow_score*0.4"
+  },
+  "topN": 6,
+  "window_min": 240,
+  "output": {
+    "topN": 6
+  },
+  "protected": []
+}

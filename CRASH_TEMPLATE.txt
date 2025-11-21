@@ -1,0 +1,59 @@
+═══════════════════════════════════════════════════════════════════
+📌 CRASH DOCUMENTATION TEMPLATE
+═══════════════════════════════════════════════════════════════════
+
+Use this template for documenting future crashes:
+
+────────────────────────────────────────────────────────────────────
+Crash #N – YYYY-MM-DD HH:MM UTC
+────────────────────────────────────────────────────────────────────
+
+1. Process status (ps)
+   Alive / Dead / Hung
+   PID: ...
+
+2. Last log timestamp
+   YYYY-MM-DDTHH:MM:SSZ
+
+3. Last quant_evt=attempt
+   seq=... (coins: ...)
+
+4. Last quant_evt=submit
+   seq=... (coins: ...)
+
+5. Open orders at crash time
+   N orders (check HL UI)
+
+6. Error messages in log
+   Yes: [paste last 10 lines]
+   No: silent crash
+
+7. Diagnosis
+   [Brief description of what happened]
+
+8. Fix applied (if any)
+   [Code changes / config changes]
+
+9. Verification
+   [How crash was verified fixed]
+
+────────────────────────────────────────────────────────────────────
+
+QUICK COMMANDS FOR DATA COLLECTION:
+
+# 1. Save crash log
+tail -200 bot.log > crash_20251111_124358.log
+
+# 2. Check process
+ps aux | grep mm_hl.ts | grep -v grep
+
+# 3. Find last loop/submit
+grep "LOOP\[" bot.log | tail -5
+grep "quant_evt=submit" bot.log | tail -5
+
+# 4. Check for errors
+grep -i "error\|exception\|uncaught\|unhandled" bot.log | tail -10
+
+# 5. Timestamp
+echo "Crash detected at: $(date)" >> crash_timeline.txt
+

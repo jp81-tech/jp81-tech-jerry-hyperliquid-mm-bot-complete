@@ -9,12 +9,6 @@ import { positionSizeUSD } from './utils/position_sizing.js'
 import { killSwitchActive } from './utils/kill_switch.js'
 import { getNansenProAPI, CopyTradingSignal } from './integrations/nansen_pro.js'
 import { OrderReporter } from './utils/order_reporter.js'
-import { loadActivePairs } from './selection/active_pairs_consumer.js'
-import {
-  getFinalPairsWithAllocation,
-  type ConfluenceAnalysis,
-  type RotationScore
-} from './selection/confluence.js'
 import {
   roundToTick,
   roundToLot,
@@ -28,9 +22,160 @@ import {
 import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
 import { RateLimitReserver } from './utils/rate_limit_reserve.js'
 import { GridManager, GridOrder } from './utils/grid_manager.js'
+import { applyBehaviouralRiskToLayers, type BehaviouralRiskMode } from './behaviouralRisk.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder, LegacyPosition } from './utils/legacy_unwinder.js'
+import {
+  quantizeSize,
+  quantizePrice,
+  quantizeOrder,
+  validateFormat,
+  calculateNotionalInt,
+  checkMinNotionalInt,
+  adjustPriceByTicks,
+  getPriceDecimals,
+  getSizeDecimals,
+  intToDecimalString
+} from './utils/quant.js'
+import { applySpecOverrides } from './utils/spec_overrides.js'
+import { sendRiskAlert, sendSystemAlert, sendPerformanceAlert } from './utils/slack_router.js'
 import * as hl from '@nktkas/hyperliquid'
 import { ethers } from 'ethers'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TYPE EXTENSIONS - Fix TypeScript errors without changing runtime
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Extend HyperliquidAPI to include infoClient (exists at runtime)
+type ExtendedHyperliquidAPI = HyperliquidAPI & {
+  infoClient: hl.InfoClient
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INSTITUTIONAL SIZE CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+type InstitutionalSizeConfig = {
+  minUsd: number           // twarde minimum notional (np. min notional HL + buffer)
+  targetUsd: number        // docelowy rozmiar pojedynczego childa
+  maxUsd: number           // hard cap per order
+  maxUsdAbs?: number       // dodatkowy absolutny limit (np. 800$ dla ZEC)
+}
+
+const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
+  // duże, drogie coiny – chcemy małe liczby coinów, ale sensowne USD
+  ZEC: {
+    minUsd: 12,    // zawsze >= 10$
+    targetUsd: 18, // docelowy child
+    maxUsd: 45,    // pojedynczy order nie > 45$
+    maxUsdAbs: 900 // absolutny sufit bezpieczeństwa (ok. 1.3 ZEC)
+  },
+  UNI: {
+    minUsd: 11,
+    targetUsd: 16,
+    maxUsd: 40      // pojedynczy child max 40$
+  },
+  // memki / tańsze
+  VIRTUAL: {
+    minUsd: 10,
+    targetUsd: 14,
+    maxUsd: 30
+  },
+  HMSTR: {
+    minUsd: 11,
+    targetUsd: 16,
+    maxUsd: 40
+  },
+  BOME: {
+    minUsd: 11,
+    targetUsd: 16,
+    maxUsd: 40
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAX INVENTORY PER COIN (institutional guard)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function envNumber(key: string, fallback: number): number {
+  const raw = process.env[key]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const MAX_INVENTORY_COINS: Record<string, number> = {
+  ZEC: envNumber("ZEC_INVENTORY_CAP_COINS", 4),
+  UNI: envNumber("UNI_INVENTORY_CAP_COINS", 120),
+  VIRTUAL: envNumber("VIRTUAL_INVENTORY_CAP_COINS", 2000),
+  HMSTR: envNumber("HMSTR_INVENTORY_CAP_COINS", 800000),
+  BOME: envNumber("BOME_INVENTORY_CAP_COINS", 250000)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNWIND MODE CONFIG
+// ─────────────────────────────────────────────────────────────────────────────
+
+type UnwindMode = "off" | "manual" | "auto"
+
+function getUnwindMode(): UnwindMode {
+  const mode = (process.env.UNWIND_MODE || "off").toLowerCase()
+  return mode === "manual" || mode === "auto" ? mode : "off"
+}
+
+function getUnwindCoins(): Set<string> {
+  const raw = process.env.UNWIND_COINS || ""
+  return new Set(
+    raw
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean)
+  )
+}
+
+function getUnwindThresholdMult(): number {
+  const mult = Number(process.env.UNWIND_AUTO_THRESHOLD_MULT ?? "1")
+  return Number.isFinite(mult) && mult > 0 ? mult : 1
+}
+
+function shouldUnwindCoin(coin: string, currentPosSz: number, maxInv: number): boolean {
+  const mode = getUnwindMode()
+  if (mode === "off") return false
+
+  const coins = getUnwindCoins()
+  if (!coins.has(coin)) return false
+
+  if (mode === "manual") return true
+
+  const thresholdMult = getUnwindThresholdMult()
+  const threshold = maxInv * thresholdMult
+  return Math.abs(currentPosSz) + EPS >= threshold
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DAILY NOTIONAL CAPS (per coin, per day)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GLOBAL_DAILY_NOTIONAL_CAP_USD = Number(process.env.DAILY_NOTIONAL_CAP_USD ?? "50000")
+
+const PER_COIN_DAILY_NOTIONAL_CAP_USD: Record<string, number> = {
+  ZEC: Number(process.env.ZEC_DAILY_NOTIONAL_CAP_USD ?? "60000"),
+  UNI: Number(process.env.UNI_DAILY_NOTIONAL_CAP_USD ?? "40000"),
+  VIRTUAL: Number(process.env.VIRTUAL_DAILY_NOTIONAL_CAP_USD ?? "40000"),
+  HMSTR: Number(process.env.HMSTR_DAILY_NOTIONAL_CAP_USD ?? "20000"),
+  BOME: Number(process.env.BOME_DAILY_NOTIONAL_CAP_USD ?? "20000")
+}
+
+function getDailyNotionalCapUsd(symbol: string): number {
+  return PER_COIN_DAILY_NOTIONAL_CAP_USD[symbol] ?? GLOBAL_DAILY_NOTIONAL_CAP_USD
+}
+
+/**
+ * Convert UTC hour to CET (UTC+1) and wrap into 0–23 range.
+ */
+function getCETHour(now: Date = new Date()): number {
+  const utcHour = now.getUTCHours()
+  return (utcHour + 1 + 24) % 24
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED CONSTANTS & HELPERS - Centralized rounding logic
@@ -129,7 +274,11 @@ function normalizeChildNotionals(
     const o = orders[i];
     // ensure we leave enough to fund remaining slots at least 'target' each
     const minReserve = (slots - 1) * target;
-    const alloc = Math.min(target, Math.max(opts.minUsd, remaining - minReserve));
+    let alloc = Math.min(target, Math.max(opts.minUsd, remaining - minReserve));
+    // Ensure alloc is at least minUsd (fix for UNI getting ~$7 orders)
+    if (alloc + 1e-9 < opts.minUsd) {
+      alloc = opts.minUsd
+    }
     if (alloc + 1e-9 >= opts.minUsd) {
       rebuilt.push({ ...o, sizeUsd: alloc });
       remaining -= alloc;
@@ -151,6 +300,7 @@ type BotState = {
   dailyPnl: number
   totalPnl: number
   lastResetDate: string
+  dailyPnlAnchorUsd?: number  // Anchor point: raw daily PnL from Hyperliquid at reset time
   execStats: { success: number; fail: number; latencies: number[] }
   lastProcessedFillTime?: number  // Track last synced fill to avoid double-counting
   processedFillOids?: string[]  // Track processed order IDs
@@ -265,12 +415,43 @@ class StateManager {
     this.saveState()
   }
 
-  resetDailyPnl() {
+  /**
+   * Resetuje lokalny licznik daily PnL, ustawiając anchor
+   * na „surowy” PnL z giełdy w momencie resetu.
+   */
+  resetDailyPnlWithAnchor(rawExchangeDailyPnlUsd: number): void {
+    this.state.dailyPnlAnchorUsd = rawExchangeDailyPnlUsd
+    this.state.dailyPnl = 0
+    const today = new Date().toISOString().split('T')[0]
+    this.state.lastResetDate = today
+    this.saveState()
+  }
+
+  /**
+   * Ustawia daily PnL na podstawie surowego PnL z giełdy,
+   * odejmując anchor (jeśli istnieje).
+   */
+  setDailyPnlFromRaw(rawExchangeDailyPnlUsd: number): void {
+    const anchor = this.state.dailyPnlAnchorUsd ?? 0
+    const effectiveDailyPnl = rawExchangeDailyPnlUsd - anchor
+    this.state.dailyPnl = effectiveDailyPnl
+    this.saveState()
+  }
+
+  resetDailyPnl(rawDailyPnlUsd?: number) {
     const today = new Date().toISOString().split('T')[0]
     if (this.state.lastResetDate !== today) {
-      this.state.dailyPnl = 0
-      this.state.lastResetDate = today
-      this.saveState()
+      // Set anchor to current raw daily PnL from Hyperliquid (if provided)
+      // This allows us to track PnL relative to reset point, not absolute daily PnL
+      if (rawDailyPnlUsd !== undefined) {
+        this.resetDailyPnlWithAnchor(rawDailyPnlUsd)
+      } else {
+        // If no raw PnL provided, reset anchor to 0 (will be set on next sync)
+        this.state.dailyPnlAnchorUsd = 0
+        this.state.dailyPnl = 0
+        this.state.lastResetDate = today
+        this.saveState()
+      }
     }
   }
 
@@ -278,7 +459,11 @@ class StateManager {
    * Sync PnL from Hyperliquid fills - uses exchange's reported closedPnl
    * This is the SOURCE OF TRUTH for PnL tracking
    */
-  async syncPnLFromHyperliquid(infoClient: hl.InfoClient, walletAddress: string): Promise<{newFills: number, pnlDelta: number}> {
+  async syncPnLFromHyperliquid(
+    infoClient: hl.InfoClient,
+    walletAddress: string,
+    onFill?: (pair: string, notionalUsd: number, fillTime: Date) => void
+  ): Promise<{newFills: number, pnlDelta: number}> {
     try {
       // Fetch all fills from Hyperliquid
       const fills = await infoClient.userFills({ user: walletAddress })
@@ -289,19 +474,51 @@ class StateManager {
 
       const today = new Date()
       today.setHours(0, 0, 0, 0)
+      const todayStr = today.toISOString().split('T')[0]
 
       // Initialize processedFillOids if not exists
       if (!this.state.processedFillOids) {
         this.state.processedFillOids = []
       }
 
+      // Calculate raw daily PnL from ALL fills from today (including already processed ones)
+      // This is needed to set the anchor correctly after reset
+      let rawDailyPnlUsd = 0
+      for (const fill of fills) {
+        const fillTime = new Date(fill.time)
+        if (fillTime >= today) {
+          const closedPnl = parseFloat(fill.closedPnl || '0')
+          const fee = parseFloat(fill.fee)
+          const netPnl = closedPnl + fee
+          rawDailyPnlUsd += netPnl
+        }
+      }
+
+      // Check if reset happened (new day)
+      const wasReset = this.state.lastResetDate !== todayStr
+      if (wasReset) {
+        // Reset happened: set anchor to current raw daily PnL from Hyperliquid
+        // This allows us to track PnL relative to reset point, not absolute daily PnL
+        this.resetDailyPnlWithAnchor(rawDailyPnlUsd)
+        console.log(`[PNL RESET] New day detected. Anchor set to: $${rawDailyPnlUsd.toFixed(2)}`)
+      }
+
+      // Initialize anchor if not set (first run or manual reset)
+      if (this.state.dailyPnlAnchorUsd === undefined || this.state.dailyPnlAnchorUsd === null) {
+        this.state.dailyPnlAnchorUsd = rawDailyPnlUsd
+        console.log(`[PNL ANCHOR] Initial anchor set to: $${rawDailyPnlUsd.toFixed(2)}`)
+        this.saveState()
+      }
+
+      const anchor = this.state.dailyPnlAnchorUsd ?? 0
+
       let newFills = 0
       let pnlDelta = 0
 
-      // Process fills newest to oldest
+      // Process fills newest to oldest (only new fills)
       for (const fill of fills) {
         // Skip if already processed
-        if (this.state.processedFillOids!.includes(fill.oid)) {
+        if (this.state.processedFillOids!.includes(String(fill.oid))) {
           continue
         }
 
@@ -315,9 +532,12 @@ class StateManager {
         // Add to total PnL
         this.state.totalPnl += netPnl
 
-        // Add to daily PnL if from today
-        if (fillTime >= today) {
-          this.state.dailyPnl += netPnl
+        // Track daily notional (for daily cap enforcement)
+        if (onFill) {
+          const fillSize = parseFloat(fill.sz)
+          const fillPrice = parseFloat(fill.px)
+          const notionalUsd = Math.abs(fillSize * fillPrice)
+          onFill(fill.coin, notionalUsd, fillTime)
         }
 
         pnlDelta += netPnl
@@ -335,6 +555,19 @@ class StateManager {
           size: parseFloat(fill.sz),
           pnl: netPnl
         })
+      }
+
+      // Calculate effective daily PnL: raw from HL minus anchor
+      // This gives us PnL relative to reset point, not absolute daily PnL
+      this.setDailyPnlFromRaw(rawDailyPnlUsd)
+      const effectiveDailyPnl = this.state.dailyPnl
+
+      // Log PnL sync details
+      if (newFills > 0 || wasReset) {
+        console.log(
+          `[PNL SYNC] rawDaily=$${rawDailyPnlUsd.toFixed(2)} anchor=$${anchor.toFixed(2)} ` +
+          `effective=$${effectiveDailyPnl.toFixed(2)} newFills=${newFills}`
+        )
       }
 
       // Keep only last 10000 processed OIDs to prevent unlimited growth
@@ -412,6 +645,11 @@ class PaperTrading implements TradingInterface {
     return Math.random() > 0.05 // 95% cancel success rate
   }
 
+  async cancelPairOrders(pair: string): Promise<void> {
+    // Paper trading: no-op, orders are simulated
+    return
+  }
+
   async getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null> {
     // Will be managed by StateManager
     return null
@@ -432,6 +670,149 @@ interface TradingInterface {
   ): Promise<{ success: boolean; fillPrice?: number; fee?: number }>
   cancelOrder(orderId: string): Promise<boolean>
   getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null>
+  cancelPairOrders(pair: string): Promise<void>
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INSTITUTIONAL ORDER SIZE NORMALIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+type NormalizeOrderSizeParams = {
+  coin: string
+  price: number
+  sizeCoins: number
+  coinStep: number
+  layerTargetUsd?: number   // target z grida (jeśli masz pod ręką)
+}
+
+type NormalizeOrderSizeResult = {
+  sizeCoins: number
+  notional: number
+  reason?: string
+}
+
+function normalizeOrderSizeInstitutional(params: NormalizeOrderSizeParams): NormalizeOrderSizeResult {
+  const { coin, price, coinStep } = params
+  let { sizeCoins } = params
+
+  if (price <= 0 || sizeCoins <= 0 || coinStep <= 0) {
+    return {
+      sizeCoins: 0,
+      notional: 0,
+      reason: "[SANITY] invalid px/size/step"
+    }
+  }
+
+  const cfg = INSTITUTIONAL_SIZE_CONFIG[coin] ?? {
+    minUsd: 10,
+    targetUsd: 12,
+    maxUsd: 40
+  }
+
+  let targetUsd = cfg.targetUsd
+
+  if (params.layerTargetUsd && params.layerTargetUsd > 0) {
+    // niech layer wpływa, ale niech nie zaniża nam targetu poniżej minUsd
+    targetUsd = Math.max(cfg.minUsd, Math.min(params.layerTargetUsd, cfg.maxUsd))
+  }
+
+  const maxUsd = cfg.maxUsd
+  const maxUsdAbs = cfg.maxUsdAbs ?? maxUsd * 3
+
+  // 1) bazowy notional
+  let notional = price * sizeCoins
+
+  // 2) clamp do minUsd
+  if (notional < cfg.minUsd) {
+    const newSize = cfg.minUsd / price
+    sizeCoins = Math.max(coinStep, Math.round(newSize / coinStep) * coinStep)
+    notional = price * sizeCoins
+    return {
+      sizeCoins,
+      notional,
+      reason: "[SANITY_MIN] bumped to minUsd"
+    }
+  }
+
+  // 3) clamp do targetUsd * 2 (miękki) i maxUsd (twardy)
+  const softCap = targetUsd * 2
+  let capUsd = Math.min(maxUsd, softCap)
+
+  if (notional > capUsd) {
+    const newSize = capUsd / price
+    sizeCoins = Math.max(coinStep, Math.round(newSize / coinStep) * coinStep)
+    notional = price * sizeCoins
+    return {
+      sizeCoins,
+      notional,
+      reason: "[SANITY_MAX] clipped to capUsd"
+    }
+  }
+
+  // 4) absolutny maksymalny notional na wszelki wypadek (np. flash spike)
+  if (notional > maxUsdAbs) {
+    const newSize = maxUsdAbs / price
+    sizeCoins = Math.max(coinStep, Math.round(newSize / coinStep) * coinStep)
+    notional = price * sizeCoins
+    return {
+      sizeCoins,
+      notional,
+      reason: "[SANITY_ABS] clipped to maxUsdAbs"
+    }
+  }
+
+  // 5) dopasowanie do stepu bez zmiany logiki
+  const steppedSize = Math.max(coinStep, Math.round(sizeCoins / coinStep) * coinStep)
+  notional = price * steppedSize
+
+  return {
+    sizeCoins: steppedSize,
+    notional,
+    reason: undefined
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INVENTORY GUARD (max position per coin)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type InventoryCheckParams = {
+  coin: string
+  side: "buy" | "sell"  // buy = long, sell = short
+  sizeCoins: number
+  currentPosSz: number  // dodatnie = long, ujemne = short
+}
+
+function isInventoryAllowed(params: InventoryCheckParams): {
+  allowed: boolean
+  projectedPos: number
+  reason?: string
+} {
+  const { coin, side, sizeCoins, currentPosSz } = params
+  const maxInv = MAX_INVENTORY_COINS[coin]
+
+  // jeśli nie skonfigurowano – nie ograniczamy
+  if (!maxInv || maxInv <= 0) {
+    return { allowed: true, projectedPos: currentPosSz }
+  }
+
+  const delta = side === "buy" ? sizeCoins : -sizeCoins
+  const projected = currentPosSz + delta
+  const crossesLimit = Math.abs(projected) > maxInv + EPS
+  const increasesExposure = Math.abs(projected) > Math.abs(currentPosSz) + EPS
+
+  if (crossesLimit && increasesExposure) {
+    return {
+      allowed: false,
+      projectedPos: projected,
+      reason: "[INVENTORY_GUARD] order would increase exposure beyond limit"
+    }
+  }
+
+  return {
+    allowed: true,
+    projectedPos: projected
+  }
 }
 
 class LiveTrading implements TradingInterface {
@@ -460,6 +841,46 @@ class LiveTrading implements TradingInterface {
   private rateLimitReserver: RateLimitReserver | null = null
   private l2BookCache: Map<string, L2BookUpdate> = new Map()  // Cache latest L2 book data
 
+  // Quantization telemetry per asset/side (rolling counters)
+  private quantTelemetry: Map<string, {
+    submit_ok: number
+    tick_err: number
+    size_err: number
+    alo_reject: number
+    sol_fallback_used: number
+    sol_fallback_success: number
+    recent_submits: Array<{ timestamp: number; tick_err: boolean }> // Last 30 submits for auto-suppression
+  }> = new Map()
+
+  // SOL discrepancy tracking (for backoff)
+  private solTickDiscrepancies: Array<{ timestamp: number; side: string; ticks: number }> = []
+  private solSuppressedUntil: number = 0
+  private solSuppressionLoggedAt: number = 0
+
+  // Precomputed minNotionalInt cache per asset (refresh on spec updates)
+  private minNotionalIntCache: Map<string, {
+    minNotionalInt: number
+    stepMultiplier: number
+    tickMultiplier: number
+    updatedAt: number
+  }> = new Map()
+
+  // Spec refresh timestamps (refresh every 5 min or on tick error)
+  private specRefreshTimestamps: Map<string, number> = new Map()
+
+  // SOL fallback & suppression toggles (from env)
+  private solTickFallbackEnabled: boolean
+  private solSuppressWindowSec: number
+  private solSuppressThreshold: number
+  private specsRefreshSec: number
+
+  // Per-process sequence counter for disambiguating concurrent attempts
+  private seq: number = 0
+
+  // Daily notional tracking (per coin, per day)
+  private dailyNotionalByPair: Map<string, number> = new Map()
+  private dailyNotionalDay: string | null = null
+
   constructor(privateKey: string, api: HyperliquidAPI, chaseConfig: ChaseConfig | null = null) {
     if (!privateKey) {
       throw new Error('Private key required for live trading')
@@ -483,6 +904,47 @@ class LiveTrading implements TradingInterface {
 
     // Read post-only setting from environment
     this.enablePostOnly = process.env.ENABLE_POST_ONLY === 'true'
+
+    // Read SOL fallback & suppression toggles from environment
+    this.solTickFallbackEnabled = (process.env.SOL_TICK_FALLBACK || 'on') === 'on'
+    this.solSuppressWindowSec = parseInt(process.env.SOL_SUPPRESS_WINDOW_SEC || '60', 10)
+    this.solSuppressThreshold = parseInt(process.env.SOL_SUPPRESS_THRESHOLD || '10', 10)
+    this.specsRefreshSec = parseInt(process.env.SPECS_REFRESH_SEC || '300', 10)
+
+    console.log(`🔧 SOL controls: fallback=${this.solTickFallbackEnabled} window=${this.solSuppressWindowSec}s threshold=${this.solSuppressThreshold}`)
+    console.log(`🔧 Spec refresh: ${this.specsRefreshSec}s TTL`)
+
+    const build = process.env.BUILD_ID || process.env.GIT_COMMIT || 'dev'
+    console.log(`🔧 Build=${build}`)
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // DAILY NOTIONAL TRACKING
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  private getDayKey(date: Date): string {
+    return date.toISOString().slice(0, 10) // "YYYY-MM-DD"
+  }
+
+  private resetDailyNotionalIfNeeded(now: Date): void {
+    const dayKey = this.getDayKey(now)
+    if (this.dailyNotionalDay !== dayKey) {
+      this.dailyNotionalDay = dayKey
+      this.dailyNotionalByPair.clear()
+      console.log(`[RISK] Reset daily notional counters for new day ${dayKey}`)
+    }
+  }
+
+  addDailyNotional(pair: string, notionalUsd: number, now: Date = new Date()): void {
+    this.resetDailyNotionalIfNeeded(now)
+    const prev = this.dailyNotionalByPair.get(pair) ?? 0
+    const next = prev + Math.max(0, notionalUsd)
+    this.dailyNotionalByPair.set(pair, next)
+  }
+
+  getDailyNotional(pair: string, now: Date = new Date()): number {
+    this.resetDailyNotionalIfNeeded(now)
+    return this.dailyNotionalByPair.get(pair) ?? 0
   }
 
   private deriveAddress(privateKey: string): string {
@@ -506,6 +968,167 @@ class LiveTrading implements TradingInterface {
     const counter = this.cloidCounter
     // Create 128-bit hex string (32 characters)
     return `0x${timestamp.toString(16).padStart(16, '0')}${counter.toString(16).padStart(16, '0')}`
+  }
+
+  /**
+   * Track quantization telemetry for asset/side
+   */
+  private trackQuant(pair: string, side: string, event: 'submit_ok' | 'tick_err' | 'size_err' | 'alo_reject' | 'sol_fallback_used' | 'sol_fallback_success') {
+    const key = `${pair}_${side}`
+    if (!this.quantTelemetry.has(key)) {
+      this.quantTelemetry.set(key, {
+        submit_ok: 0,
+        tick_err: 0,
+        size_err: 0,
+        alo_reject: 0,
+        sol_fallback_used: 0,
+        sol_fallback_success: 0,
+        recent_submits: []
+      })
+    }
+    const stats = this.quantTelemetry.get(key)!
+    stats[event]++
+
+    // Track recent submits for auto-suppression (last 30 only)
+    if (event === 'submit_ok' || event === 'tick_err') {
+      stats.recent_submits.push({
+        timestamp: Date.now(),
+        tick_err: event === 'tick_err'
+      })
+      // Keep only last 30
+      if (stats.recent_submits.length > 30) {
+        stats.recent_submits.shift()
+      }
+    }
+  }
+
+  /**
+   * Log telemetry summary (called every N orders)
+   */
+  private logQuantTelemetry() {
+    const totalSubmits = Array.from(this.quantTelemetry.values()).reduce((sum, s) => sum + s.submit_ok + s.tick_err + s.size_err, 0)
+    if (totalSubmits === 0) return
+
+    console.log(`\n📊 QUANT TELEMETRY (last ${totalSubmits} orders):`)
+    for (const [key, stats] of this.quantTelemetry.entries()) {
+      const total = stats.submit_ok + stats.tick_err + stats.size_err
+      if (total === 0) continue
+
+      const successRate = ((stats.submit_ok / total) * 100).toFixed(1)
+      const tickErrRate = ((stats.tick_err / total) * 100).toFixed(1)
+      const fallbackRate = stats.sol_fallback_used > 0 ? ((stats.sol_fallback_success / stats.sol_fallback_used) * 100).toFixed(1) : '0.0'
+
+      console.log(`  ${key}: ${successRate}% ok | ${tickErrRate}% tick_err | fallback: ${stats.sol_fallback_used}/${stats.sol_fallback_success} (${fallbackRate}%)`)
+    }
+  }
+
+  /**
+   * Track SOL tick discrepancy and check if should suppress
+   */
+  private trackSolDiscrepancy(side: string, ticks: number): void {
+    const now = Date.now()
+    this.solTickDiscrepancies.push({ timestamp: now, side, ticks })
+
+    // Keep only last N seconds (configurable)
+    const windowMs = this.solSuppressWindowSec * 1000
+    this.solTickDiscrepancies = this.solTickDiscrepancies.filter(d => d.timestamp > now - windowMs)
+
+    // If > threshold discrepancies in window, suppress SOL for window duration
+    if (this.solTickDiscrepancies.length > this.solSuppressThreshold && this.solSuppressedUntil < now) {
+      this.solSuppressedUntil = now + windowMs
+      console.warn(`⚠️  SOL suppressed for ${this.solSuppressWindowSec}s due to ${this.solTickDiscrepancies.length} tick discrepancies`)
+    }
+  }
+
+  /**
+   * Check if SOL is currently suppressed
+   */
+  private isSolSuppressed(): boolean {
+    return Date.now() < this.solSuppressedUntil
+  }
+
+  /**
+   * Check if SOL should be auto-suppressed (3+ tick errors in last 30 submits per side)
+   */
+  private checkSolAutoSuppression(pair: string, side: string): boolean {
+    if (pair !== 'SOL') return false
+
+    const key = `${pair}_${side}`
+    const stats = this.quantTelemetry.get(key)
+    if (!stats || stats.recent_submits.length < 10) return false // Need at least 10 samples
+
+    // Count tick errors in recent submits
+    const tickErrors = stats.recent_submits.filter(s => s.tick_err).length
+
+    // If 3+ tick errors in last 30 submits, suppress for 60s
+    if (tickErrors >= 3 && this.solSuppressedUntil < Date.now()) {
+      this.solSuppressedUntil = Date.now() + 60000
+
+      // Log once when entering suppression
+      if (this.solSuppressionLoggedAt < Date.now() - 60000) {
+        console.warn(`🔴 sol_suppressed_60s pair=SOL side=${side} tick_err_count=${tickErrors}/30 entering`)
+        this.solSuppressionLoggedAt = Date.now()
+      }
+
+      return true
+    }
+
+    // Log once when exiting suppression
+    if (this.solSuppressedUntil > 0 && Date.now() >= this.solSuppressedUntil && this.solSuppressionLoggedAt > 0) {
+      console.log(`✅ sol_suppressed_60s pair=SOL side=${side} exiting`)
+      this.solSuppressionLoggedAt = 0
+    }
+
+    return false
+  }
+
+  /**
+   * Check if specs should be refreshed (configurable TTL or on first tick error)
+   */
+  private shouldRefreshSpecs(pair: string): boolean {
+    const lastRefresh = this.specRefreshTimestamps.get(pair) || 0
+    const now = Date.now()
+    const refreshIntervalMs = this.specsRefreshSec * 1000
+    return now - lastRefresh > refreshIntervalMs
+  }
+
+  /**
+   * Refresh specs and precompute minNotionalInt for a pair
+   */
+  private refreshSpecsAndCache(pair: string): void {
+    const specs = getInstrumentSpecs(pair)
+    const tickSize = specs.tickSize
+    const lotSize = specs.lotSize
+    const pxDec = getPriceDecimals(tickSize)
+    const stepDec = getSizeDecimals(lotSize)
+
+    const stepMultiplier = Math.pow(10, stepDec)
+    const tickMultiplier = Math.pow(10, pxDec)
+    const minNotionalInt = Math.round(specs.minNotional * stepMultiplier * tickMultiplier)
+
+    this.minNotionalIntCache.set(pair, {
+      minNotionalInt,
+      stepMultiplier,
+      tickMultiplier,
+      updatedAt: Date.now()
+    })
+
+    this.specRefreshTimestamps.set(pair, Date.now())
+  }
+
+  /**
+   * Get cached minNotionalInt or compute on-demand
+   */
+  private getMinNotionalInt(pair: string): { minNotionalInt: number; stepMultiplier: number; tickMultiplier: number } {
+    let cached = this.minNotionalIntCache.get(pair)
+
+    // Refresh if stale (>5 min) or missing
+    if (!cached || this.shouldRefreshSpecs(pair)) {
+      this.refreshSpecsAndCache(pair)
+      cached = this.minNotionalIntCache.get(pair)!
+    }
+
+    return cached
   }
 
   /**
@@ -631,6 +1254,81 @@ class LiveTrading implements TradingInterface {
     await this.rateLimitReserver.autoReserve(currentUsage, 0.8)
   }
 
+  /**
+   * Normalizuje rozmiar orderu:
+   *  - zaokrągla do najbliższego kroku (coinStep)
+   *  - MAX clamp: jeśli notional > 2× targetUsd → skaluje w dół (dla ZEC: 1.00 → 0.01)
+   *  - MIN clamp: jeśli notional < minUsd → skaluje w górę (dla UNI: $7 → $12)
+   *
+   * Zwraca:
+   *  - szCoin  – finalny rozmiar w COINACH (np. 0.01 ZEC)
+   *  - notional – wartość w USDC (szCoin * px)
+   */
+  private normalizeOrderSize(
+    coin: string,
+    rawSzCoin: number,
+    px: number,
+    coinStep: number,
+    targetUsd: number,
+    minUsd: number = 0
+  ): { szCoin: number; notional: number } {
+    if (rawSzCoin <= 0 || !isFinite(rawSzCoin) || !isFinite(px)) {
+      console.warn(
+        `[SANITY] ${coin} got invalid rawSzCoin=${rawSzCoin}, px=${px} – forcing sz=0`
+      );
+      return { szCoin: 0, notional: 0 };
+    }
+
+    // Zaokrąglenie do najbliższego kroku
+    const steps = Math.round(rawSzCoin / coinStep);
+    let szCoin = steps * coinStep;
+    let notional = szCoin * px;
+
+    if (!isFinite(notional)) {
+      console.warn(
+        `[SANITY] ${coin} invalid notional after rounding: rawSz=${rawSzCoin}, ` +
+          `coinStep=${coinStep}, steps=${steps}, px=${px}`
+      );
+      return { szCoin: 0, notional: 0 };
+    }
+
+    // MAX clamp: nie pozwalamy, żeby notional był >> targetUsd (dla ZEC: 1.00 → 0.01)
+    if (targetUsd > 0 && notional > targetUsd * 2) {
+      const factor = targetUsd / notional;
+      const adjustedSteps = Math.max(1, Math.floor(steps * factor));
+      const newSzCoin = adjustedSteps * coinStep;
+      const newNotional = newSzCoin * px;
+
+      console.warn(
+        `[SANITY MAX] ${coin} rawSz=${rawSzCoin.toFixed(6)} coinStep=${coinStep} ` +
+          `steps=${steps} notional=${notional.toFixed(2)} > 2×target=${(targetUsd * 2).toFixed(2)} ` +
+          `→ clamp sz=${newSzCoin.toFixed(6)} notional=${newNotional.toFixed(2)}`
+      );
+
+      szCoin = newSzCoin;
+      notional = newNotional;
+    }
+
+    // MIN clamp: podbijamy rozmiar, jeśli notional < minUsd (dla UNI: $7 → $12)
+    if (minUsd > 0 && notional + 1e-9 < minUsd) {
+      const minSzCoin = minUsd / px;
+      const minSteps = Math.ceil(minSzCoin / coinStep);
+      const newSzCoin = minSteps * coinStep;
+      const newNotional = newSzCoin * px;
+
+      console.warn(
+        `[SANITY MIN] ${coin} rawSz=${rawSzCoin.toFixed(6)} coinStep=${coinStep} ` +
+          `steps=${steps} notional=${notional.toFixed(2)} < min=${minUsd.toFixed(2)} ` +
+          `→ clamp sz=${newSzCoin.toFixed(6)} notional=${newNotional.toFixed(2)}`
+      );
+
+      szCoin = newSzCoin;
+      notional = newNotional;
+    }
+
+    return { szCoin, notional };
+  }
+
   async placeOrder(
     pair: string,
     side: 'buy' | 'sell',
@@ -640,6 +1338,50 @@ class LiveTrading implements TradingInterface {
     reduceOnly: boolean = false
   ): Promise<{ success: boolean; fillPrice?: number; fee?: number }> {
     try {
+      const now = new Date()
+      let reduceOnlyLocal = reduceOnly
+
+      if (pair === 'ZEC') {
+        const cetHour = getCETHour(now)
+        const offStart = Number(process.env.ZEC_OFF_HOUR_START ?? '0')
+        const offEnd = Number(process.env.ZEC_OFF_HOUR_END ?? '7')
+
+        let inOffWindow = false
+        if (Number.isFinite(offStart) && Number.isFinite(offEnd) && offStart !== offEnd) {
+          if (offStart < offEnd) {
+            inOffWindow = cetHour >= offStart && cetHour <= offEnd
+          } else {
+            inOffWindow = cetHour >= offStart || cetHour <= offEnd
+          }
+        }
+
+        if (inOffWindow) {
+          console.warn(
+            `[ZEC_SCHEDULE] Skip ${pair} ${side} at CET hour=${cetHour} (off-window ${offStart}-${offEnd})`
+          )
+          return { success: false }
+        }
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
+      // DAILY NOTIONAL CAP CHECK (early exit)
+      // ═════════════════════════════════════════════════════════════════════
+      const capUsd = getDailyNotionalCapUsd(pair)
+      const usedUsd = this.getDailyNotional(pair, now)
+
+    if (usedUsd >= capUsd) {
+      console.warn(
+        `[NOTIONAL_CAP] (SOFT) pair=${pair} side=${side} used=${usedUsd.toFixed(2)} cap=${capUsd.toFixed(
+          2
+        )} → logging only, NOT blocking`
+      )
+    }
+
+      // Early return if SOL is temporarily suppressed
+      if (pair === 'SOL' && this.isSolSuppressed()) {
+        console.log(`⏸️  SOL order skipped (suppressed until ${new Date(this.solSuppressedUntil).toLocaleTimeString()})`)
+        return { success: false }
+      }
       // Get asset index and decimals
       const assetIndex = this.assetMap.get(pair)
       if (assetIndex === undefined) {
@@ -704,108 +1446,157 @@ class LiveTrading implements TradingInterface {
 
       // Ensure price is exactly on tick (round to tick first, then fix decimals)
       roundedPrice = roundToTick(roundedPrice, specs.tickSize)
-      const pxDec = priceDecimalsFromTick(specs.tickSize)
+      let pxDec = priceDecimalsFromTick(specs.tickSize) // Will be updated by quantResult below
       roundedPrice = Number(roundedPrice.toFixed(pxDec))
 
       // ═════════════════════════════════════════════════════════════════════
-      // AFTER-ROUNDING NOTIONAL CHECK: ceil one step if we fell below minNotional
+      // INSTITUTIONAL ORDER SIZE NORMALIZATION
+      // Twarde sito: min/target/max notional + coinStep
       // ═════════════════════════════════════════════════════════════════════
-      let notionalAfter = sizeInCoins * roundedPrice
-      if (notionalAfter + 1e-9 < specs.minNotional) {
-        const old = sizeInCoins
-        sizeInCoins = quantizeCeil(sizeInCoins + 1e-12, coinStep)
-        notionalAfter = sizeInCoins * roundedPrice
+      const oldSizeInCoins = sizeInCoins
+      const norm = normalizeOrderSizeInstitutional({
+        coin: pair,
+        price: roundedPrice,
+        sizeCoins: sizeInCoins,
+        coinStep: coinStep,
+        layerTargetUsd: sizeUsd // target z grida/rebucket
+      })
+
+      if (norm.sizeCoins <= 0) {
+        console.warn(
+          `[SKIP] ${pair} invalid normalized size. sizeCoins=${sizeInCoins} price=${roundedPrice} reason=${norm.reason}`
+        )
+        return { success: false }
+      }
+
+      // Update sizeInCoins with normalized value
+      sizeInCoins = norm.sizeCoins
+
+      // Log adjustment if size changed or reason provided
+      if (norm.reason || Math.abs(oldSizeInCoins - sizeInCoins) > 1e-9) {
         console.log(
-          `[ADJUST] ${pair} ${side.toUpperCase()}: ` +
-          `sz ${old.toFixed(sizeDecimals)}→${sizeInCoins.toFixed(sizeDecimals)} | ` +
-          `notional ${(old*roundedPrice).toFixed(2)}→${notionalAfter.toFixed(2)}`
+          `[INSTIT_SIZE] ${pair} ${side.toUpperCase()} ${norm.reason || 'OK'} :: ` +
+          `px=${roundedPrice.toFixed(4)} oldSize=${oldSizeInCoins.toFixed(sizeDecimals)} ` +
+          `newSize=${sizeInCoins.toFixed(sizeDecimals)} notional=${norm.notional.toFixed(2)}`
         )
       }
 
       // ═════════════════════════════════════════════════════════════════════
+      // UNWIND MODE + INVENTORY GUARD
+      // ═════════════════════════════════════════════════════════════════════
+      try {
+        const currentPosition = await this.getPosition(pair)
+        const currentPosSz = currentPosition?.size ?? 0  // dodatnie = long, ujemne = short
+        const maxInv = MAX_INVENTORY_COINS[pair]
+
+        // Reduce-only if unwind is active for this coin
+        if (maxInv && shouldUnwindCoin(pair, currentPosSz, maxInv)) {
+          reduceOnlyLocal = true
+          try {
+            console.log(
+              `[UNWIND_MODE] ${pair} active. side=${side} curPos=${currentPosSz.toFixed(sizeDecimals)} max=${maxInv} mode=${getUnwindMode()}`
+            )
+          } catch {
+            // ignore formatting errors
+          }
+        }
+
+        const invCheck = isInventoryAllowed({
+          coin: pair,
+          side: side,  // 'buy' or 'sell'
+          sizeCoins: sizeInCoins,
+          currentPosSz: currentPosSz
+        })
+
+        if (!invCheck.allowed) {
+          console.warn(
+            `[INVENTORY_GUARD] ${pair} skip order. side=${side} size=${sizeInCoins.toFixed(sizeDecimals)} ` +
+            `curPos=${currentPosSz.toFixed(sizeDecimals)} projected=${invCheck.projectedPos.toFixed(sizeDecimals)} ` +
+            `max=${MAX_INVENTORY_COINS[pair] ?? 'unlimited'} reason=${invCheck.reason}`
+          )
+          return { success: false }
+        }
+      } catch (error) {
+        // Jeśli guard się wywali – logujemy ale nie blokujemy (może być timeout)
+        console.warn(`[INVENTORY_GUARD] ${pair} inventory guard error: ${error}`)
+      }
+
+      // ═════════════════════════════════════════════════════════════════════
       // FINAL QUANTIZATION & STRINGIFY (right before submit)
+      // V2: Use spec-driven quantization with maker-safe ALO mode
       // ═════════════════════════════════════════════════════════════════════
 
-      // (a) derive exact step decimals
-      const stepDec = Math.max(0, -Math.floor(Math.log10(coinStep)))
-      // pxDec already declared above
+      // Use V2 quantizeOrder for spec-driven quantization with ENV overrides
+      const makerIntent = this.enablePostOnly ? 'alo' : 'gtc'
+      const baseSpec = { tickSize: specs.tickSize.toString(), lotSize: specs.lotSize.toString() }
+      const finalSpec = applySpecOverrides(pair, baseSpec)
+      const quantResult = quantizeOrder(
+        pair,
+        side,
+        makerIntent,
+        roundedPrice.toString(),
+        sizeInCoins.toString(),
+        finalSpec
+      )
 
-      // (b) Calculate integer number of steps (ensures exact divisibility)
-      let numSizeSteps = Math.floor((sizeInCoins + 1e-12) / coinStep)
+      let priceInt = quantResult.priceInt
+      let finalPriceStr = quantResult.pxQ
+      let numPriceTicks = quantResult.ticks
+      const sizeInt = quantResult.sizeInt
+      const finalSizeStr = quantResult.szQ
+      const numSizeSteps = quantResult.steps
+      pxDec = quantResult.pxDec // Update with spec-driven value
+      const stepDec = quantResult.stepDec
 
-      // CRITICAL FIX for IEEE 754: When coinStep has decimals (0.1, 0.01),
-      // some multiples cause float precision issues like 5128.2/0.1 = 51281.999...
-      // Solution: Round to safe multiples (×10 for 0.1, ×100 for 0.01)
-      if (coinStep === 0.1) {
-        if (numSizeSteps < 10) {
-          numSizeSteps = 10
-        } else {
-          numSizeSteps = Math.floor(numSizeSteps / 10) * 10
-        }
-      } else if (coinStep === 0.01) {
-        if (numSizeSteps < 100) {
-          numSizeSteps = 100
-        } else {
-          numSizeSteps = Math.floor(numSizeSteps / 100) * 100
-        }
-      }
-
-      // Side-aware tick snapping for price (avoid borderline rounding)
+      // Keep tickSizeInt for SOL fallback logic
       const tickMultiplier = Math.pow(10, pxDec)
       const tickSizeInt = Math.round(specs.tickSize * tickMultiplier)
-      let numPriceTicks: number
-      if (side === 'buy') {
-        numPriceTicks = Math.ceil((roundedPrice - 1e-12) / specs.tickSize)
-      } else {
-        numPriceTicks = Math.floor((roundedPrice + 1e-12) / specs.tickSize)
+
+      // (d) String format validation (last safety net before SDK)
+      if (!validateFormat(finalPriceStr, pxDec)) {
+        console.warn(`⚠️  Price string format invalid: ${finalPriceStr} (expected ${pxDec} decimals)`)
+        return { success: false }
+      }
+      if (!validateFormat(finalSizeStr, stepDec)) {
+        console.warn(`⚠️  Size string format invalid: ${finalSizeStr} (expected ${stepDec} decimals)`)
+        return { success: false }
       }
 
-      // (c) Build strings using PURE INTEGER arithmetic (zero floats)
+      // (e) DEBUG breadcrumb with tick counts for correlation
+      const finalNotional = Number(finalSizeStr) * Number(finalPriceStr)
+      const finalCoinStep = specs.lotSize || Math.pow(10, -stepDec)
+      console.log(
+        `🔍 DEBUG submit: pair=${pair} size=${finalSizeStr}(${numSizeSteps}steps) step=${finalCoinStep} price=${finalPriceStr}(${numPriceTicks}ticks) side=${side} notional=${finalNotional.toFixed(2)}`
+      )
+
+      // (f) Notional check using precomputed minNotionalInt (zero float comparison)
       const stepMultiplier = Math.pow(10, stepDec)
-      const coinStepInt = Math.round(coinStep * stepMultiplier)
+      const minNotionalCache = this.getMinNotionalInt(pair)
 
-      const sizeInt = numSizeSteps * coinStepInt
-      const priceInt = numPriceTicks * tickSizeInt
+      // Use cached minNotionalInt for pure integer comparison with overflow protection
+      const MAX_SAFE = Number.MAX_SAFE_INTEGER
+      let belowMinNotional = false
 
-      // Build decimal string manually: insert decimal point at correct position
-      function intToDecimalString(intVal: number, decimals: number): string {
-        if (decimals === 0) return intVal.toString()
-        const str = intVal.toString().padStart(decimals + 1, '0')
-        const decimalPos = str.length - decimals
-        return str.slice(0, decimalPos) + '.' + str.slice(decimalPos)
+      if (sizeInt > MAX_SAFE / Math.max(1, priceInt)) {
+        // Overflow risk - use safer comparison
+        belowMinNotional = (sizeInt / stepMultiplier) * (priceInt / tickMultiplier) < specs.minNotional
+      } else {
+        // Safe integer multiplication
+        belowMinNotional = sizeInt * priceInt < minNotionalCache.minNotionalInt
       }
 
-      const sizeStr = intToDecimalString(sizeInt, stepDec)
-      const priceStr = intToDecimalString(priceInt, pxDec)
-
-      // Update the actual values to match (for notional check below)
-      sizeInCoins = Number(sizeStr)
-      roundedPrice = Number(priceStr)
-
-      // (d) preflight integer divisibility asserts using integer math (not float)
-      // We already built sizeInt and priceInt as exact integer multiples above,
-      // so these should always pass. Keep as sanity check.
-      const sizeIntCheck = sizeInt % coinStepInt
-      const priceIntCheck = priceInt % tickSizeInt
-
-      if (sizeIntCheck !== 0) {
-        console.warn(`Drop order: size not divisible (${pair}) sizeInt=${sizeInt} stepInt=${coinStepInt}`)
-        return { success: false }
-      }
-      if (priceIntCheck !== 0) {
-        console.warn(`Drop order: price not divisible (${pair}) priceInt=${priceInt} tickInt=${tickSizeInt}`)
+      if (belowMinNotional) {
+        const notional = calculateNotionalInt(sizeInt, priceInt, stepMultiplier, tickMultiplier)
+        console.warn(`⚠️  Order below min notional: $${notional.toFixed(2)} < $${specs.minNotional}`)
+        // Machine-friendly log for SRE
+        const tsMin = new Date().toISOString()
+        console.log(`quant_evt=below_min ts=${tsMin} pair=${pair} side=${side} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} notional=${notional.toFixed(2)}`)
         return { success: false }
       }
 
-      // (e) DEBUG breadcrumb
-      console.log(`🔍 DEBUG submit: pair=${pair} size=${sizeStr} step=${coinStep} price=${priceStr} tick=${specs.tickSize}`)
-
-      // Safety check: ensure minimum notional
-      const notionalValue = sizeInCoins * roundedPrice
-      if (notionalValue < specs.minNotional) {
-        console.warn(`⚠️  Order below min notional: $${notionalValue.toFixed(2)} < $${specs.minNotional}`)
-        return { success: false }
-      }
+      // Update for logging only
+      sizeInCoins = Number(finalSizeStr)
+      roundedPrice = Number(finalPriceStr)
 
       // Sanity check: ensure no NaN or invalid values
       if (!Number.isFinite(roundedPrice) || !Number.isFinite(sizeInCoins)) {
@@ -908,9 +1699,41 @@ class LiveTrading implements TradingInterface {
       const maxRetries = this.chaseConfig?.retryOnPostOnlyReject || 1
       const autoShadeTicks = this.chaseConfig?.autoShadeOnRejectTicks || 1
 
+      // Capture seq for correlation (incremented once per order request, not per retry)
+      this.seq++
+      const seqOriginal = this.seq
+
+      // TIF and RO flags (used in logging throughout retry loop and after)
+      const tifLabel = this.enablePostOnly ? 'Alo' : 'Gtc'
+      const roFlag = reduceOnlyLocal ? 1 : 0
+
       // Use stringified values for submission (exact decimals, avoid float conversion)
-      let currentPriceStr = priceStr
-      let currentSizeStr = sizeStr
+      let currentPriceStr = finalPriceStr
+      let currentSizeStr = finalSizeStr
+      
+      // ═════════════════════════════════════════════════════════════════════
+      // SANITY CHECK: Ensure size is in COINS, not steps
+      // ═════════════════════════════════════════════════════════════════════
+      const sizeInCoinsFinal = Number(currentSizeStr)
+      const notionalFinal = sizeInCoinsFinal * Number(currentPriceStr)
+      const targetChildUsd = sizeUsd // Original target from grid/rebucket
+      const maxAllowedUsd = targetChildUsd * 2 // Allow 2x buffer for rounding
+      
+      if (notionalFinal > maxAllowedUsd) {
+        console.warn(
+          `⚠️  Size sanity check failed: ${pair} notional $${notionalFinal.toFixed(2)} > $${maxAllowedUsd.toFixed(2)} (target: $${targetChildUsd.toFixed(2)})`
+        )
+        // Clamp to reasonable size: recalculate from target USD
+        const clampedSizeCoins = targetChildUsd / Number(currentPriceStr)
+        const coinStep = specs.lotSize || Math.pow(10, -stepDec)
+        const clampedSteps = Math.round(clampedSizeCoins / coinStep)
+        const clampedSizeFinal = (clampedSteps * coinStep).toFixed(stepDec)
+        currentSizeStr = clampedSizeFinal
+        console.log(
+          `🔧 Clamped ${pair} size: ${sizeInCoinsFinal.toFixed(stepDec)} → ${clampedSizeFinal} (notional: $${(Number(clampedSizeFinal) * Number(currentPriceStr)).toFixed(2)})`
+        )
+      }
+      
       let attempt = 0
       let lastResult: any = null
 
@@ -925,7 +1748,7 @@ class LiveTrading implements TradingInterface {
             b: side === 'buy',
             p: currentPriceStr,
             s: currentSizeStr,
-            r: reduceOnly, // reduce-only flag for closing positions
+            r: reduceOnlyLocal, // reduce-only flag for closing/readjusting positions
             t: orderType === 'market'
               ? { limit: { tif: 'Ioc' } } // IOC for fast execution like market order
               : { limit: { tif: this.enablePostOnly ? 'Alo' : 'Gtc' } }, // Alo = post-only (maker-only), Gtc = can be taker
@@ -940,50 +1763,240 @@ class LiveTrading implements TradingInterface {
           ? Date.now() + (tifSeconds * 1000) // Short TIF (e.g., 3-5s)
           : Date.now() + (5 * 60 * 1000) // GTC fallback (5 min)
 
+        // SRE-friendly: Log attempt BEFORE SDK call (ISO + epoch for math/joins)
+        const tsObj = new Date()
+        const ts = tsObj.toISOString()
+        const tms = tsObj.getTime()
+        console.log(`quant_evt=attempt ts=${ts} tms=${tms} seq=${seqOriginal} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} cloid=${cloid} pxDec=${pxDec} stepDec=${stepDec} priceInt=${priceInt} sizeInt=${sizeInt} ticks=${numPriceTicks} steps=${numSizeSteps} try=${attempt}`)
+
         // Place order with expiresAfter (pass as options object)
         console.log(`[SDK DEBUG] Placing order: pair=${pair} p=${orderRequest.orders[0].p} s=${orderRequest.orders[0].s}`)
-        lastResult = await this.exchClient.order(orderRequest, { expiresAfter })
-        // console.log(`[DEBUG] Order result:`, JSON.stringify(lastResult, null, 2))
 
-        // Check for ALO rejection (post-only would cross)
-        if (lastResult && lastResult.response && lastResult.response.data) {
-          const statuses = lastResult.response.data.statuses
-          if (statuses && statuses[0] && 'error' in statuses[0]) {
-            const errorMsg = statuses[0].error || ''
+        try {
+          lastResult = await this.exchClient.order(orderRequest, { expiresAfter })
+          // console.log(`[DEBUG] Order result:`, JSON.stringify(lastResult, null, 2))
 
-            // ALO rejection - retry with shaded price
-            if (errorMsg.includes('Alo') || errorMsg.includes('would cross')) {
-              if (attempt <= maxRetries) {
-                // Auto-shade using pure integer tick arithmetic (avoid float)
-                const tickMultiplier = Math.pow(10, pxDec)
-                const currentTicks = Math.round(Number(currentPriceStr) * tickMultiplier)
-                const shadeTicks = side === 'buy' ? -autoShadeTicks : autoShadeTicks
-                const shadedTicks = Math.max(0, currentTicks + shadeTicks)
+          // Check for ALO rejection (post-only would cross)
+          if (lastResult && lastResult.response && lastResult.response.data) {
+            const statuses = lastResult.response.data.statuses
+            if (statuses && statuses[0] && 'error' in statuses[0]) {
+              const errorMsg = statuses[0].error || ''
 
-                // Build string from integer ticks (reuse helper)
-                function intToDecimalString(intVal: number, decimals: number): string {
-                  if (decimals === 0) return intVal.toString()
-                  const s = intVal.toString().padStart(decimals + 1, '0')
-                  const p = s.length - decimals
-                  return s.slice(0, p) + '.' + s.slice(p)
+              // ALO rejection - retry with shaded price
+              if (errorMsg.includes('Alo') || errorMsg.includes('would cross')) {
+                if (attempt <= maxRetries) {
+                  // Auto-shade using centralized utility (pure integer tick arithmetic)
+                  const shadeTicks = side === 'buy' ? -autoShadeTicks : autoShadeTicks
+                  currentPriceStr = adjustPriceByTicks(currentPriceStr, shadeTicks, specs.tickSize, pxDec)
+
+                  console.log(`⚠️  ALO reject - auto-shade attempt ${attempt}: ${side} @${currentPriceStr}`)
+                  continue // Retry with shaded price
                 }
-                currentPriceStr = intToDecimalString(shadedTicks, pxDec)
+              }
 
-                console.log(`⚠️  ALO reject - auto-shade attempt ${attempt}: ${side} @${currentPriceStr}`)
-                continue // Retry with shaded price
+              // SOL-specific ±1 tick fallback for "tick size" errors
+              if (pair === 'SOL' && errorMsg.toLowerCase().includes('tick') && attempt <= maxRetries) {
+                // Try ±1 tick variation (respect side-aware direction)
+                const tickDelta = side === 'buy' ? -1 : 1 // Buy: -1 tick (lower), Sell: +1 tick (higher)
+                const altPriceStr = adjustPriceByTicks(currentPriceStr, tickDelta, specs.tickSize, pxDec)
+
+                console.log(`🔧 SOL tick retry attempt ${attempt}: ${currentPriceStr} → ${altPriceStr} (${tickDelta > 0 ? '+' : ''}${tickDelta} tick)`)
+                currentPriceStr = altPriceStr
+                continue // Retry with adjusted price
               }
             }
           }
-        }
 
-        // Success or non-retryable error - break
-        break
+          // Success or non-retryable error - break
+          break
+        } catch (error: any) {
+          const msg = String(error?.message ?? error)
+          const isTickErr = /tick size/i.test(msg)
+          const isSizeErr = /invalid size/i.test(msg)
+          const isAloErr = /Alo|would cross/i.test(msg)
+          const isSOL = pair === 'SOL'
+
+          // Track telemetry
+          if (isTickErr) this.trackQuant(pair, side, 'tick_err')
+          if (isSizeErr) this.trackQuant(pair, side, 'size_err')
+          if (isAloErr) this.trackQuant(pair, side, 'alo_reject')
+
+          // Machine-friendly logs for SRE (single line per error with ISO + epoch + error codes)
+          const tsErrObj = new Date()
+          const tsErr = tsErrObj.toISOString()
+          const tmsErr = tsErrObj.getTime()
+          if (isTickErr) {
+            console.log(`quant_evt=submit ts=${tsErr} tms=${tmsErr} seq=${seqOriginal} cloid=${cloid} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} ok=0 err=tick_size err_code=E_TICK`)
+          }
+          if (isSizeErr) {
+            console.log(`quant_evt=submit ts=${tsErr} tms=${tmsErr} seq=${seqOriginal} cloid=${cloid} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} ok=0 err=invalid_size err_code=E_SIZE`)
+          }
+          if (isAloErr) {
+            console.log(`quant_evt=submit ts=${tsErr} tms=${tmsErr} seq=${seqOriginal} cloid=${cloid} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} ok=0 err=alo_reject err_code=E_ALO`)
+          }
+
+          // Check auto-suppression (3+ tick errors in last 30 submits)
+          if (isSOL && isTickErr && this.checkSolAutoSuppression(pair, side)) {
+            console.warn(`⏸️  SOL auto-suppressed (3+ tick errors in recent 30 submits)`)
+            const tsSuppObj = new Date()
+            const tsSupp = tsSuppObj.toISOString()
+            const tmsSupp = tsSuppObj.getTime()
+            console.log(`quant_evt=submit ts=${tsSupp} tms=${tmsSupp} seq=${seqOriginal} cloid=${cloid} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} ok=0 err=tick_size_auto_suppressed err_code=E_TICK_SUPP`)
+            return { success: false }
+          }
+
+          // SOL-only, airtight ±1 tick fallback using integer math
+          if (isSOL && isTickErr && attempt === 1 && this.solTickFallbackEnabled) {
+            this.trackQuant(pair, side, 'sol_fallback_used')
+
+            // Refresh specs on first tick error (in case pxDec/tickSize changed)
+            let specsChanged = false
+            if (this.shouldRefreshSpecs(pair)) {
+              const oldTickSize = specs.tickSize
+              const oldLotSize = specs.lotSize
+              this.refreshSpecsAndCache(pair)
+              const refreshedSpecs = getInstrumentSpecs(pair)
+
+              // Check if specs actually changed
+              if (refreshedSpecs.tickSize !== oldTickSize || refreshedSpecs.lotSize !== oldLotSize) {
+                specsChanged = true
+                console.log(`🔄 SOL specs changed: tick ${oldTickSize}→${refreshedSpecs.tickSize}, lot ${oldLotSize}→${refreshedSpecs.lotSize}`)
+
+                // CRITICAL: Recompute ALL locals with fresh specs
+                const pxDecRef = getPriceDecimals(refreshedSpecs.tickSize)
+                const stepDecRef = getSizeDecimals(refreshedSpecs.lotSize)
+                const tickMultRef = Math.pow(10, pxDecRef)
+                const tickSizeIntRef = Math.round(refreshedSpecs.tickSize * tickMultRef)
+
+                // Re-quantize with fresh specs
+                const qP = quantizePrice(roundedPrice, refreshedSpecs.tickSize, pxDecRef, side)
+                const qS = quantizeSize(sizeInCoins, refreshedSpecs.lotSize, stepDecRef)
+                currentPriceStr = qP.strValue
+                currentSizeStr = qS.strValue
+
+                console.log(`🔄 Re-quantized: p=${currentPriceStr}(${qP.numSteps}ticks) s=${currentSizeStr}(${qS.numSteps}steps)`)
+                // Retry with new quantization (skip fallback)
+                continue
+              }
+            }
+
+            try {
+              const pxDecLocal = pxDec
+              const tickInt = tickSizeInt
+
+              // derive integer ticks from the string without floating ops
+              const [iPart, fPartRaw = ''] = currentPriceStr.split('.')
+              const fPart = (fPartRaw + '0'.repeat(pxDecLocal)).slice(0, pxDecLocal)
+              const currentTicks = parseInt(iPart, 10) * tickMultiplier + parseInt(fPart || '0', 10)
+
+              // side-aware preference: buy → try -1 first, then +1; sell → try +1 first, then -1
+              const order = side === 'buy' ? [-1, +1] : [+1, -1]
+
+              let fallbackSuccess = false
+              for (const off of order) {
+                const altTicks = currentTicks + off
+                if (altTicks <= 0) continue
+
+                // rebuild string from ticks
+                const altPriceStr = intToDecimalString(altTicks, pxDecLocal)
+
+                // quick regex format check
+                const priceRegex = new RegExp(`^\\d+(\\.\\d{${pxDecLocal}})?$`)
+                if (!priceRegex.test(altPriceStr)) continue
+
+                // use same size string
+                const orderRequestAlt: any = {
+                  orders: [{
+                    a: assetIndex,
+                    b: side === 'buy',
+                    p: altPriceStr,
+                    s: currentSizeStr,
+                    r: reduceOnly,
+                    t: orderType === 'market' ? { limit: { tif: 'Ioc' } }
+                                              : { limit: { tif: this.enablePostOnly ? 'Alo' : 'Gtc' } },
+                    c: cloid
+                  }],
+                  grouping: 'na'
+                }
+
+                console.log(`[SDK DEBUG] SOL fallback ±1tick: try ${off > 0 ? '+1' : '-1'} -> p=${altPriceStr} s=${currentSizeStr}`)
+
+                const expiresAfterAlt = tifSeconds > 0
+                  ? Date.now() + (tifSeconds * 1000)
+                  : Date.now() + (5 * 60 * 1000)
+
+                try {
+                  lastResult = await this.exchClient.order(orderRequestAlt, { expiresAfter: expiresAfterAlt })
+
+                  // If successful, mark success and break
+                  if (lastResult && lastResult.status === 'ok') {
+                    currentPriceStr = altPriceStr
+                    fallbackSuccess = true
+                    this.trackQuant(pair, side, 'sol_fallback_success')
+                    console.log(`✅ SOL fallback succeeded with ${off > 0 ? '+1' : '-1'} tick`)
+                    break
+                  }
+                } catch (e3: any) {
+                  // If first direction fails, try opposite direction
+                  const e3Msg = String(e3?.message ?? e3)
+                  if (/tick size/i.test(e3Msg)) {
+                    console.log(`⚠️  SOL fallback ${off > 0 ? '+1' : '-1'} tick failed, trying opposite...`)
+                    continue // Try next offset
+                  } else {
+                    throw e3 // Re-throw non-tick errors
+                  }
+                }
+              }
+
+              if (!fallbackSuccess) {
+                console.error(`🔴 sol_tick_double_fail side=${side} pxDec=${pxDecLocal} ticks=${currentTicks} ts=${Date.now()}`)
+                // Track discrepancy for backoff
+                this.trackSolDiscrepancy(side, currentTicks)
+              }
+            } catch (e2) {
+              console.error(`SOL ±1tick fallback failed: ${e2}`)
+              // Track discrepancy
+              const [iPart, fPartRaw = ''] = currentPriceStr.split('.')
+              const fPart = (fPartRaw + '0'.repeat(pxDec)).slice(0, pxDec)
+              const ticks = parseInt(iPart, 10) * tickMultiplier + parseInt(fPart || '0', 10)
+              this.trackSolDiscrepancy(side, ticks)
+            }
+          }
+
+          // ALO rejection thrown as exception - retry with shaded price
+          if (isAloErr && attempt <= maxRetries) {
+            const shadeTicks = side === 'buy' ? -autoShadeTicks : autoShadeTicks
+            currentPriceStr = adjustPriceByTicks(currentPriceStr, shadeTicks, specs.tickSize, pxDec)
+
+            console.log(`⚠️  ALO reject (exception) - auto-shade attempt ${attempt}: ${side} @${currentPriceStr}`)
+            continue // Retry with shaded price
+          }
+
+          // If not retryable, just log and break (don't throw)
+          console.error(`Error placing order [${pair} ${side}]: ${msg}`)
+          break
+        }
       }
 
       const result = lastResult
 
       // Check if order was successful
       if (result && result.status === 'ok') {
+        // Track success telemetry
+        this.trackQuant(pair, side, 'submit_ok')
+
+        // Machine-friendly log for SRE (ISO + epoch)
+        const tsOkObj = new Date()
+        const tsOk = tsOkObj.toISOString()
+        const tmsOk = tsOkObj.getTime()
+        console.log(`quant_evt=submit ts=${tsOk} tms=${tmsOk} seq=${seqOriginal} cloid=${cloid} pair=${pair} side=${side} tif=${tifLabel} ro=${roFlag} ticks=${numPriceTicks} stepInt=${sizeInt} szInt=${sizeInt} ok=1 err=none`)
+
+        // Log telemetry every 200 orders
+        const totalOrders = Array.from(this.quantTelemetry.values()).reduce((sum, s) => sum + s.submit_ok + s.tick_err + s.size_err, 0)
+        if (totalOrders > 0 && totalOrders % 200 === 0) {
+          this.logQuantTelemetry()
+        }
+
         let oidValue: string | undefined
 
         // Save cloid mapping if we got an oid back
@@ -1058,7 +2071,7 @@ class LiveTrading implements TradingInterface {
   async getPosition(pair: string): Promise<{ size: number; entryPrice: number } | null> {
     try {
       // Get user state from Hyperliquid
-      const userState = await this.infoClient.userState({ user: this.walletAddress })
+      const userState = await this.infoClient.clearinghouseState({ user: this.walletAddress })
 
       if (!userState || !userState.assetPositions) {
         return null
@@ -1433,6 +2446,10 @@ class LiveTrading implements TradingInterface {
         try {
           // Get current market price
           const l2 = await this.infoClient.l2Book({ coin })
+          if (!l2 || !l2.levels) {
+            console.warn(`No L2 data for ${coin}, skipping close`)
+            continue
+          }
           const bestAsk = parseFloat(l2.levels[0]?.[0]?.px || '0')
           const bestBid = parseFloat(l2.levels[1]?.[0]?.px || '0')
           const midPrice = (bestAsk + bestBid) / 2
@@ -1443,26 +2460,27 @@ class LiveTrading implements TradingInterface {
             : midPrice * 0.95  // Sell to close long
 
           // Get tick size for proper quantization
-          const specs = this.getAssetSpecs(coin)
+          const specs = getInstrumentSpecs(coin)
           const tickSize = specs.tickSize
-          const pxDec = Math.max(0, -Math.floor(Math.log10(tickSize)))
+          const lotSize = specs.lotSize
+          const pxDec = getPriceDecimals(tickSize)
+          const szDec = getSizeDecimals(lotSize)
 
-          // Quantize close price using integer arithmetic (avoid float precision issues)
-          const numPriceTicks = Math.floor(closePrice / tickSize)
-          const tickMultiplier = Math.pow(10, pxDec)
-          const tickIntValue = Math.round(tickSize * tickMultiplier)
-          const priceInt = numPriceTicks * tickIntValue
-          const closePriceStr = (priceInt / tickMultiplier).toFixed(pxDec)
+          // Quantize close price using centralized utilities (side-aware)
+          const closeSide = size < 0 ? 'buy' : 'sell'
+          const priceQuant = quantizePrice(closePrice, tickSize, pxDec, closeSide)
+          const closePriceStr = priceQuant.strValue
 
-          // Round close size to szDecimals precision
-          const roundedCloseSize = this.roundToSzDecimals(closeSize, sizeDecimals)
+          // Quantize close size using centralized utilities
+          const sizeQuant = quantizeSize(closeSize, lotSize, szDec)
+          const roundedCloseSize = sizeQuant.strValue
 
           await this.exchClient.order({
             orders: [{
               a: assetIndex,
               b: size < 0,  // buy if short, sell if long
               p: closePriceStr,
-              s: roundedCloseSize.toString(),
+              s: roundedCloseSize,
               r: true,  // reduce-only
               t: { limit: { tif: 'Ioc' } }
             }],
@@ -1481,20 +2499,206 @@ class LiveTrading implements TradingInterface {
       throw error
     }
   }
+
+  /**
+   * Close position for a specific pair (used during rotation cleanup, conflict SL, etc.)
+   * @param pair - Trading pair to close
+   * @param reason - Reason for close (rotation_cleanup, conflict_SL, manual, etc.)
+   */
+  async closePositionForPair(pair: string, reason: string = 'rotation_cleanup'): Promise<void> {
+    try {
+      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress })
+
+      if (!state.assetPositions || state.assetPositions.length === 0) {
+        return
+      }
+
+      // Find position for this specific pair
+      const assetPos = state.assetPositions.find((ap: any) => ap.position?.coin === pair)
+      if (!assetPos) {
+        return // No position for this pair
+      }
+
+      const pos = assetPos.position
+      const size = parseFloat(pos.szi)
+
+      if (Math.abs(size) < 1e-6) {
+        return // Position too small, skip
+      }
+
+      // Extract unrealized PnL
+      const unrealizedPnl = parseFloat(pos.unrealizedPnl || '0')
+      const positionValue = parseFloat(pos.positionValue || '0')
+      const entryPrice = parseFloat(pos.entryPx || '0')
+
+      // Get Nansen bias for this pair
+      let biasInfo = ''
+      let biasRelation = 'unknown'
+      try {
+        const biasData = this.nansenBias.get(pair)
+        if (biasData) {
+          const posDir = size > 0 ? 'LONG' : 'SHORT'
+          const biasDir = biasData.direction?.toUpperCase() || 'NEUTRAL'
+          const biasStrength = biasData.biasStrength || 'neutral'
+          const biasBoost = biasData.boost || 0
+
+          // Classify relationship
+          if (posDir === biasDir) {
+            biasRelation = biasStrength === 'strong' ? 'strong-aligned' :
+                          biasStrength === 'soft' ? 'soft-aligned' : 'aligned'
+          } else if (posDir !== 'NEUTRAL' && biasDir !== 'NEUTRAL' && posDir !== biasDir) {
+            biasRelation = biasStrength === 'strong' ? 'strong-conflict' :
+                          biasStrength === 'soft' ? 'soft-conflict' : 'conflict'
+          } else {
+            biasRelation = 'neutral'
+          }
+
+          biasInfo = ` | biasDir=${biasDir} (${biasStrength}) boost=${biasBoost.toFixed(2)} | relation=${biasRelation}`
+        } else {
+          biasInfo = ' | bias=none'
+        }
+      } catch (err) {
+        biasInfo = ' | bias=error'
+      }
+
+      const assetIndex = this.assetMap.get(pair)
+      if (assetIndex === undefined) {
+        console.warn(`⚠️  Asset index not found for ${pair}`)
+        return
+      }
+
+      const sizeDecimals = this.assetDecimals.get(pair) || 8
+      const closeSize = Math.abs(size)
+
+      // Pre-close log with full context
+      const posDir = size > 0 ? 'LONG' : 'SHORT'
+      const pnlStr = unrealizedPnl >= 0 ? `+$${unrealizedPnl.toFixed(2)}` : `-$${Math.abs(unrealizedPnl).toFixed(2)}`
+
+      // Choose emoji based on conflict severity
+      let logEmoji = '💥'
+      if (biasRelation.includes('strong-conflict')) {
+        logEmoji = '⚠️'
+      } else if (biasRelation.includes('conflict')) {
+        logEmoji = '🟠'
+      } else if (biasRelation.includes('aligned')) {
+        logEmoji = '✅'
+      } else {
+        logEmoji = 'ℹ️'
+      }
+
+      console.log(`${logEmoji} Nansen-aware close ${pair}: pos=${posDir} ${closeSize.toFixed(4)} | uPnL=${pnlStr} | reason=${reason}${biasInfo}`)
+
+      try {
+        // Get current market price
+        const l2 = await this.infoClient.l2Book({ coin: pair })
+        if (!l2 || !l2.levels) {
+          console.warn(`No L2 data for ${pair}, skipping close`)
+          return
+        }
+        const bestAsk = parseFloat(l2.levels[0]?.[0]?.px || '0')
+        const bestBid = parseFloat(l2.levels[1]?.[0]?.px || '0')
+        const midPrice = (bestAsk + bestBid) / 2
+
+        // Close with market order (IOC with 5% slippage)
+        let closePrice = size < 0
+          ? midPrice * 1.05  // Buy to close short
+          : midPrice * 0.95  // Sell to close long
+
+        // Get tick size for proper quantization
+        const specs = getInstrumentSpecs(pair)
+        const tickSize = specs.tickSize
+        const lotSize = specs.lotSize
+        const pxDec = getPriceDecimals(tickSize)
+        const szDec = getSizeDecimals(lotSize)
+
+        // Quantize close price using centralized utilities (side-aware)
+        const closeSide = size < 0 ? 'buy' : 'sell'
+        const priceQuant = quantizePrice(closePrice, tickSize, pxDec, closeSide)
+        const closePriceStr = priceQuant.strValue
+
+        // Quantize close size using centralized utilities
+        const sizeQuant = quantizeSize(closeSize, lotSize, szDec)
+        const roundedCloseSize = sizeQuant.strValue
+
+        await this.exchClient.order({
+          orders: [{
+            a: assetIndex,
+            b: size < 0,  // buy if short, sell if long
+            p: closePriceStr,
+            s: roundedCloseSize,
+            r: true,  // reduce-only
+            t: { limit: { tif: 'Ioc' } }
+          }],
+          grouping: 'na'
+        })
+
+        console.log(`💥 Position closed for ${pair}: ${posDir} ${closeSize.toFixed(4)} (reason=${reason})`)
+      } catch (e) {
+        console.error(`Failed to close ${pair} position: ${e}`)
+      }
+    } catch (error) {
+      console.warn(`Error closing position for ${pair}: ${error}`)
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HYPERLIQUID MM BOT - Main bot class
 // ─────────────────────────────────────────────────────────────────────────────
 
+type NansenBias = 'long' | 'short' | 'neutral'
+
+// ===== Rotation & pair management =====
+const MAX_ACTIVE_PAIRS = Number(process.env.MAX_ACTIVE_PAIRS ?? 6)
+
+// Pary, które mogą zostać nawet jeśli na chwilę wypadną z rotacji
+const STICKY_PAIRS = (process.env.STICKY_PAIRS ?? 'ZEC,FIL')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0)
+
+// Bias configuration per strength level
+type BiasConfig = {
+  boostAmount: number      // Inventory skew adjustment
+  maxContraSkew: number    // Max position against bias
+  contraPnlLimit: number   // Stop-loss USD for contra positions
+  tightenFactor: number    // Multiplier for favorable side spreads
+  widenFactor: number      // Multiplier for unfavorable side spreads
+}
+
+const BIAS_CONFIGS: Record<string, BiasConfig> = {
+  'strong': {
+    boostAmount: 0.40,      // 40% push toward bias direction
+    maxContraSkew: 0.25,    // Max 25% position against bias
+    contraPnlLimit: -20,    // Close contra positions at -$20
+    tightenFactor: 0.7,     // 30% tighter on favorable side
+    widenFactor: 1.3        // 30% wider on unfavorable side
+  },
+  'soft': {
+    boostAmount: 0.15,      // 15% gentle push toward bias
+    maxContraSkew: 0.40,    // Max 40% position against bias (more freedom)
+    contraPnlLimit: -50,    // Close contra positions at -$50
+    tightenFactor: 0.9,     // 10% tighter on favorable side
+    widenFactor: 1.1        // 10% wider on unfavorable side
+  },
+  'neutral': {
+    boostAmount: 0,         // No directional push
+    maxContraSkew: 1.0,     // Full freedom (100% either direction)
+    contraPnlLimit: -700,   // Standard daily limit
+    tightenFactor: 1.0,     // Symmetric spreads
+    widenFactor: 1.0
+  }
+}
+
 class HyperliquidMMBot {
-  private api: HyperliquidAPI
+  private api: ExtendedHyperliquidAPI
   private rotation: VolatilityRotation
   private supervisor: Supervisor
   private stateManager: StateManager
   private trading: TradingInterface
   private notifier: ConsoleNotifier
   private nansen: ReturnType<typeof getNansenProAPI>
+  private nansenBias: NansenBiasService
   private orderReporter: OrderReporter
   private chaseConfig: ChaseConfig | null = null
   private gridManager: GridManager | null = null
@@ -1506,7 +2710,6 @@ class HyperliquidMMBot {
   private rotationIntervalSec: number
   private maxDailyLossUsd: number
   private lastRotationTime: number = 0
-  private lastActivePairsSource: string | null = null
 
   // Taker order strategy (unlocks API rate limits)
   private enableTakerOrders: boolean
@@ -1520,12 +2723,45 @@ class HyperliquidMMBot {
   private copyTradingMinTraders: number
   private lastCopyTradingCheck: number = 0
 
+  // Nansen bias lock (risk management against strong signals)
+  private nansenBiasCache: {
+    lastLoad: number
+    data: Record<string, { boost: number; direction: string; biasStrength: string; buySellPressure: number; updatedAt: string }>
+  } = { lastLoad: 0, data: {} }
+
+  // Nansen conflict protection
+  private nansenConflictCheckEnabled: boolean
+  private nansenStrongContraHardCloseUsd: number
+  private nansenStrongContraMaxLossUsd: number
+  private nansenStrongContraMaxHours: number
+
+  // Rotation time tracking (for 8h rule)
+  private rotationSince: Record<string, number> = {}
+
+  // Throttling dla debug logów multi-layer per para
+  private lastGridDebugAt: Record<string, number> = {}
+
+  // Per-pair limity spreadu (w bps) – override globalnych clampów
+  private static readonly PAIR_SPREAD_LIMITS: Record<string, { min: number; max: number }> = {
+    ZEC: { min: 10, max: 160 },
+    UNI: { min: 8, max: 140 },
+    VIRTUAL: { min: 9, max: 150 }
+  }
+
   private tuning = {
     orderUsdFactor: 1.0,
     maxConcurrent: 1,
     backoffMs: 0,
     makerSpreadFactor: 1.0
   }
+
+  private config = {
+    enableMultiLayer: false,
+    enableChaseMode: false,
+    spreadProfile: 'conservative' as 'conservative' | 'aggressive'
+  }
+
+  private behaviouralRiskMode: BehaviouralRiskMode = 'normal'
 
   private isDryRun: boolean
 
@@ -1539,19 +2775,56 @@ class HyperliquidMMBot {
     this.notifier = new ConsoleNotifier()
     this.nansen = getNansenProAPI()
     this.orderReporter = new OrderReporter(this.notifier)
+    
+    // Initialize Nansen Bias Service (filter/bias engine)
+    // Stub implementation - NansenBiasService not available
+    this.nansenBias = {
+      isEnabled: () => false,
+      get: (pair: string) => null,
+      getSignal: (pair: string) => null,
+      getRotationCandidates: (pairs: string[]) => pairs,
+      refreshForSymbols: async (pairs: string[]) => {}
+    } as any
 
     // Initialize chase config (Institutional preset - HFT mode)
-    const enableChaseMode = process.env.CHASE_MODE_ENABLED === 'true'
-    if (enableChaseMode) {
+    this.config.enableChaseMode = process.env.CHASE_MODE_ENABLED === 'true'
+    if (this.config.enableChaseMode) {
       this.chaseConfig = INSTITUTIONAL_PRESET
       console.log('🏁 Chase mode enabled: INSTITUTIONAL_PRESET')
     }
 
+    // Behavioural risk mode (anti-FOMO / anti-knife)
+    const riskModeFromEnv = (process.env.BEHAVIOURAL_RISK_MODE || 'normal').toLowerCase()
+    this.behaviouralRiskMode = riskModeFromEnv === 'aggressive' ? 'aggressive' : 'normal'
+    this.notifier.info(`🧠 Behavioural risk mode: ${this.behaviouralRiskMode}`)
+
     // Initialize GridManager (Institutional multi-layer quoting)
-    const enableMultiLayer = process.env.ENABLE_MULTI_LAYER === 'true'
-    if (enableMultiLayer) {
+    this.config.enableMultiLayer = process.env.ENABLE_MULTI_LAYER === 'true'
+    if (this.config.enableMultiLayer) {
       this.gridManager = new GridManager()
       console.log('🏛️  Multi-layer grid enabled:', this.gridManager.getSummary())
+    }
+
+    // Spread profile (conservative / aggressive)
+    const profileEnv = (process.env.SPREAD_PROFILE || 'conservative').toLowerCase()
+    this.config.spreadProfile = profileEnv === 'aggressive' ? 'aggressive' : 'conservative'
+    console.log(
+      `🎚️ Spread profile: ${this.config.spreadProfile} (env SPREAD_PROFILE=${process.env.SPREAD_PROFILE || 'conservative'})`
+    )
+
+    // 🔍 Debug: pokaż aktywny profil i warstwy dla kluczowych par
+    const profile =
+      (process.env.MULTI_LAYER_PROFILE as 'normal' | 'aggressive') || 'normal'
+
+    const symbolsToShow = ['ZEC', 'UNI', 'VIRTUAL'] as const
+
+    console.log(
+      `🧩 Multi-layer profile: ${profile} (source: MULTI_LAYER_PROFILE env, default="normal")`
+    )
+
+    for (const sym of symbolsToShow) {
+      // Layer budgets are handled by GridManager internally
+      console.log(`   • ${sym} layers: (using GridManager config)`)
     }
 
     // Initialize Legacy Unwinder
@@ -1575,6 +2848,12 @@ class HyperliquidMMBot {
     this.enableCopyTrading = process.env.COPY_TRADING_ENABLED === 'true'
     this.copyTradingMinConfidence = Number(process.env.COPY_TRADING_MIN_CONFIDENCE || 60)
     this.copyTradingMinTraders = Number(process.env.COPY_TRADING_MIN_TRADERS || 3)
+
+    // Nansen conflict protection configuration
+    this.nansenConflictCheckEnabled = process.env.NANSEN_CONFLICT_CHECK_ENABLED !== 'false'
+    this.nansenStrongContraHardCloseUsd = Number(process.env.NANSEN_STRONG_CONTRA_HARD_CLOSE_USD || 10)
+    this.nansenStrongContraMaxLossUsd = Number(process.env.NANSEN_STRONG_CONTRA_MAX_LOSS_USD || 25)
+    this.nansenStrongContraMaxHours = Number(process.env.NANSEN_STRONG_CONTRA_MAX_HOURS || 3)
 
     // Initialize trading interface based on mode
     if (this.isDryRun) {
@@ -1645,6 +2924,12 @@ class HyperliquidMMBot {
         this.notifier.info(`   📊 Copy-trading: ${this.copyTradingMinConfidence}% confidence, ${this.copyTradingMinTraders}+ traders`)
       }
     }
+    if (this.nansenConflictCheckEnabled) {
+      this.notifier.info(`   🛡️  Nansen Conflict Protection: ENABLED`)
+      this.notifier.info(`      Hard close threshold: $${this.nansenStrongContraHardCloseUsd}`)
+      this.notifier.info(`      Max loss limit: $${this.nansenStrongContraMaxLossUsd}`)
+      this.notifier.info(`      Max hold time: ${this.nansenStrongContraMaxHours}h`)
+    }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -1697,17 +2982,27 @@ class HyperliquidMMBot {
           break
         }
 
-        // Reset daily PnL if new day
-        this.stateManager.resetDailyPnl()
-
         // ⚡ SYNC PnL FROM HYPERLIQUID (SOURCE OF TRUTH)
+        // Note: syncPnLFromHyperliquid() handles daily PnL reset automatically
+        // when it detects a new day (lastResetDate !== today)
         if (this.trading instanceof LiveTrading) {
           const syncResult = await this.stateManager.syncPnLFromHyperliquid(
             (this.trading as any).infoClient,
-            (this.trading as any).walletAddress
+            (this.trading as any).walletAddress,
+            (pair: string, notionalUsd: number, fillTime: Date) => {
+              // Track daily notional for cap enforcement
+              (this.trading as LiveTrading).addDailyNotional(pair, notionalUsd, fillTime)
+            }
           )
           if (syncResult.newFills > 0) {
-            this.notifier.info(`✅ Synced ${syncResult.newFills} new fills | PnL Δ: $${syncResult.pnlDelta.toFixed(2)}`)
+            const state = this.stateManager.getState()
+            const anchor = state.dailyPnlAnchorUsd ?? 0
+            const rawDailyPnl = anchor + state.dailyPnl // Reconstruct raw from effective + anchor
+            this.notifier.info(
+              `✅ Synced ${syncResult.newFills} new fills | ` +
+              `rawDaily=$${rawDailyPnl.toFixed(2)} | effectiveDaily=$${state.dailyPnl.toFixed(2)} | ` +
+              `PnL Δ: $${syncResult.pnlDelta.toFixed(2)}`
+            )
           }
         }
 
@@ -1715,77 +3010,61 @@ class HyperliquidMMBot {
         const state = this.stateManager.getState()
         if (state.dailyPnl < -this.maxDailyLossUsd) {
           this.notifier.error(`❌ Daily loss limit reached: $${state.dailyPnl.toFixed(2)}`)
+
+          // Send risk alert to Slack
+          try {
+            await sendRiskAlert(
+              `Daily loss limit exceeded\n` +
+              `Loss: $${Math.abs(state.dailyPnl).toFixed(2)}\n` +
+              `Limit: $${this.maxDailyLossUsd.toFixed(2)}\n` +
+              `Action: Bot stopping\n` +
+              `Timestamp: ${new Date().toISOString()}`
+            )
+          } catch (e) {
+            console.error('[RISK] Failed to send daily loss alert', e)
+          }
+
           break
         }
 
         // Rotate pairs if needed
         await this.rotateIfNeeded()
 
-        // Execute market making
-        // Get active pairs using confluence-based allocation
-        // Priority: 1) active_pairs.json  2) ACTIVE_PAIRS env  3) confluence analysis
-        let activePairs: string[] = []
-
-        // Try loading from active_pairs.json first
-        const loadResult = loadActivePairs({ staleSec: 900, maxCount: 10 })
-        if (loadResult.ok && loadResult.pairs.length > 0) {
-          activePairs = loadResult.pairs
-          if (!this.lastActivePairsSource || this.lastActivePairsSource !== "file") {
-            this.notifier.info(`📋 Using pairs from active_pairs.json: ${activePairs.join(", ")}`)
-            this.lastActivePairsSource = "file"
-          }
-          // Clear confluence when using manual pairs
-          this.confluenceAnalysis = []
-        } else if (process.env.ACTIVE_PAIRS && process.env.ACTIVE_PAIRS.trim()) {
-          activePairs = process.env.ACTIVE_PAIRS.split(",").map(p => p.trim()).filter(Boolean)
-          if (!this.lastActivePairsSource || this.lastActivePairsSource !== "env") {
-            this.notifier.info(`🔧 Using pairs from ACTIVE_PAIRS env: ${activePairs.join(", ")}`)
-            this.lastActivePairsSource = "env"
-          }
-          // Clear confluence when using manual pairs
-          this.confluenceAnalysis = []
-        } else {
-          // Use confluence-based pair selection
-          const rotationPairs: RotationScore[] = this.rotation.getCurrentPairs().map((pair, idx) => ({
-            pair,
-            score: 100 - (idx * 10),  // Simple scoring based on rotation rank
-            volatility24h: undefined
-          }))
-
-          const copySignals = Array.from(this.copyTradingSignalMap.values())
-
-          this.confluenceAnalysis = getFinalPairsWithAllocation(
-            rotationPairs,
-            copySignals,
-            {
-              baseOrderUsd: this.baseOrderUsd,
-              totalCapital: Number(process.env.TOTAL_CAPITAL_USD || 12000),
-              minPairAllocation: Number(process.env.MIN_PAIR_ALLOCATION_USD || 150),
-              maxConfluenceBoost: Number(process.env.MAX_CONFLUENCE_BOOST || 2.0),
-              copyBoostWeight: Number(process.env.COPY_BOOST_WEIGHT || 0.4),
-              rotationBoostWeight: Number(process.env.ROTATION_BOOST_WEIGHT || 0.3)
-            }
-          )
-
-          activePairs = this.confluenceAnalysis.map(c => c.pair)
-
-          if (!this.lastActivePairsSource || this.lastActivePairsSource !== "confluence") {
-            this.notifier.info(`🎯 Using confluence-based pairs: ${activePairs.join(", ")}`)
-            this.lastActivePairsSource = "confluence"
-          }
+        // Check for Nansen strong conflicts and auto-close if needed
+        if (this.nansenConflictCheckEnabled) {
+          await this.checkNansenConflicts()
         }
 
-        // Trade ONLY configured pairs (no legacy position auto-trading)
-        const allPairsToTrade = activePairs
+        // Execute market making
+        // Check for manual rotation mode override
+        let activePairs: string[]
+        const rotationMode = process.env.ROTATION_MODE ?? 'auto'
+        const manualPairs = (process.env.MANUAL_ACTIVE_PAIRS ?? '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+        
+        if (rotationMode === 'manual' && manualPairs.length > 0) {
+          this.notifier.info(`[INFO] ROTATION_MODE=manual`)
+          this.notifier.info(`[INFO] Using MANUAL_ACTIVE_PAIRS=${manualPairs.join(',')}`)
+          activePairs = manualPairs
+        } else {
+          // Get active pairs from rotation (top by volatility + Nansen)
+          activePairs = this.rotation.getCurrentPairs()
+        }
 
-        if (allPairsToTrade.length > 0) {
+        // Apply rotation pair limits: close positions outside MAX_ACTIVE_PAIRS
+        await this.applyRotationPairs(activePairs)
+
+        // Now trade ONLY on active pairs (zombie positions have been cleaned)
+        if (activePairs.length > 0) {
           // Subscribe to L2 books for real-time data (WebSocket)
           if (this.trading instanceof LiveTrading) {
-            this.trading.subscribeToL2Books(allPairsToTrade)
+            this.trading.subscribeToL2Books(activePairs)
           }
 
-          // Execute MM for ALL pairs (active + legacy)
-          await this.executeMM(allPairsToTrade, activePairs)
+          // Execute MM for active pairs only
+          await this.executeMM(activePairs, activePairs)
 
           // Check and reserve rate limit if needed
           if (this.trading instanceof LiveTrading) {
@@ -1869,23 +3148,134 @@ class HyperliquidMMBot {
     }
 
     try {
-      const result = await this.rotation.rotate()
+      // 1) Get candidate pairs from volatility rotation
+      const topPairs = await this.rotation.getTop3Pairs()
+      const candidatePairs = topPairs.map(s => s.pair)
 
-      if (result.rotated) {
-        this.notifier.info(`✅ Rotated to: ${result.newPairs.join(', ')}`)
-        this.notifier.info(`   Reason: ${result.reason}`)
+      // 2) Refresh Nansen signals for these symbols (if enabled)
+      if (this.nansenBias.isEnabled()) {
+        await this.nansenBias.refreshForSymbols(candidatePairs)
+        
+        // Log Nansen signals
+        for (const pair of candidatePairs) {
+          const signal = this.nansenBias.getSignal(pair)
+          if (signal) {
+            this.notifier.info(
+              `🧠 [NANSEN] ${pair}: risk=${signal.riskLevel}, score=${signal.rotationScore.toFixed(0)}, ` +
+              `flow24h=$${(signal.smartFlow24hUsd / 1000000).toFixed(2)}M, fresh=${signal.freshWalletScore.toFixed(0)}`
+            )
+          }
+        }
+      }
 
-        // Log top 3 scores
-        result.scores.forEach((s, i) => {
-          this.notifier.info(`   ${i + 1}. ${s.pair}: score=${s.score.toFixed(2)}, vol=${s.volatility24h.toFixed(2)}%`)
-        })
+      // 3) Filter and sort by Nansen rotation score (if enabled)
+      const orderedByNansen = this.nansenBias.isEnabled()
+        ? this.nansenBias.getRotationCandidates(candidatePairs)
+        : candidatePairs
+
+      // 4) Check if rotation is needed (compare with current pairs)
+      const currentPairs = this.rotation.getCurrentPairs()
+      
+      // Check for overdue pairs (time-based rotation enforce)
+      const maxHoldMs = this.getMaxRotationHoldMs()
+      const overduePairs = currentPairs.filter(p => this.isRotationOverdue(p))
+      
+      if (overduePairs.length > 0) {
+        this.notifier.warn(
+          `[ROTATION] Overdue pairs detected: ${overduePairs.join(
+            ','
+          )} (maxHoldHours=${(maxHoldMs / 3600000).toFixed(1)})`
+        )
+      }
+      
+      const shouldRotate = 
+        currentPairs.length === 0 ||
+        orderedByNansen.length === 0 ||
+        !orderedByNansen.every(p => currentPairs.includes(p)) ||
+        orderedByNansen[0] !== currentPairs[0] ||
+        overduePairs.length > 0 // Force rotation if any pair is overdue
+
+      if (shouldRotate) {
+        // Target count of active pairs
+        const targetCount = 3
+        
+        // Fresh candidates sorted by rotationScore
+        const freshCandidates = orderedByNansen.slice(0, targetCount * 2) // Get more candidates than needed
+        
+        // Start with current pairs, but remove overdue ones first
+        let nextPairs = [...currentPairs]
+        nextPairs = nextPairs.filter(p => !overduePairs.includes(p))
+        
+        // Add new candidates until we reach targetCount
+        for (const sym of freshCandidates) {
+          if (nextPairs.length >= targetCount) break
+          if (!nextPairs.includes(sym)) {
+            nextPairs.push(sym)
+          }
+        }
+        
+        // If we still have less than targetCount (e.g., not enough candidates),
+        // we can allow one overdue pair back to avoid having too few pairs
+        if (nextPairs.length < targetCount && overduePairs.length > 0) {
+          for (const p of overduePairs) {
+            if (!nextPairs.includes(p)) {
+              nextPairs.push(p)
+              if (nextPairs.length >= targetCount) break
+            }
+          }
+        }
+        
+        // Update rotation state with time-limit aware pairs
+        const newPairs = nextPairs.slice(0, targetCount) // Ensure we don't exceed targetCount
+        
+        this.notifier.info(`✅ Rotated to: ${newPairs.join(', ')}`)
+        this.notifier.info(`   Reason: Nansen-filtered rotation`)
+        
+        // Log top pairs with scores
+        for (let i = 0; i < newPairs.length && i < topPairs.length; i++) {
+          const pair = newPairs[i]
+          const volScore = topPairs.find(s => s.pair === pair)
+          const nansenSignal = this.nansenBias.getSignal(pair)
+          
+          if (volScore) {
+            const nansenInfo = nansenSignal 
+              ? ` | Nansen: ${nansenSignal.riskLevel} (${nansenSignal.rotationScore.toFixed(0)})`
+              : ''
+            this.notifier.info(
+              `   ${i + 1}. ${pair}: vol=${volScore.volatility24h.toFixed(2)}%, score=${volScore.score.toFixed(2)}${nansenInfo}`
+            )
+          }
+        }
+
+        // Update rotation state manually (since we're bypassing rotation.rotate())
+        // We'll need to update the rotation state directly
+        const rotationState = (this.rotation as any).state
+        if (rotationState) {
+          rotationState.currentPairs = newPairs
+          rotationState.lastUpdate = Date.now()
+          ;(this.rotation as any).saveState()
+        }
+        
+        // Mark pairs as entered rotation and clean up removed pairs
+        for (const p of newPairs) {
+          if (!this.rotationSince[p]) {
+            this.markRotationEntered(p)
+          }
+        }
+        
+        // Clean up pairs that were removed from rotation
+        for (const old of Object.keys(this.rotationSince)) {
+          if (!newPairs.includes(old)) {
+            delete this.rotationSince[old]
+          }
+        }
 
         // Set leverage for new pairs (LIVE mode only)
         if (!this.isDryRun && this.trading instanceof LiveTrading) {
           const targetLeverage = Number(process.env.LEVERAGE || 1)
           this.notifier.info(`🔧 Setting ${targetLeverage}x leverage for new pairs...`)
 
-          for (const pair of result.newPairs) {
+          for (const pair of newPairs) {
             try {
               await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
             } catch (error) {
@@ -1895,12 +3285,13 @@ class HyperliquidMMBot {
         }
 
         // Close positions in pairs we're rotating out of
-        await this.closeOldPositions(result.newPairs)
+        await this.closeOldPositions(newPairs)
+        
+        this.lastRotationTime = now
       } else {
-        this.notifier.info(`✓ Current pairs still optimal: ${result.newPairs.join(', ')}`)
+        this.notifier.info(`✓ Current pairs still optimal: ${orderedByNansen.slice(0, 3).join(', ')}`)
+        this.lastRotationTime = now
       }
-
-      this.lastRotationTime = now
 
     } catch (error) {
       this.notifier.error(`Error in rotation: ${error}`)
@@ -1918,7 +3309,17 @@ class HyperliquidMMBot {
 
       // Get current market price to calculate potential PnL
       try {
-        const l2 = await this.infoClient.l2Book({ coin: pair })
+        // Use trading.infoClient if available, otherwise skip
+        const infoClient = (this.trading as any).infoClient
+        if (!infoClient) {
+          console.warn(`No infoClient available for ${pair}, skipping PnL calculation`)
+          continue
+        }
+        const l2 = await infoClient.l2Book({ coin: pair })
+        if (!l2 || !l2.levels) {
+          console.warn(`No L2 data for ${pair}, skipping PnL calculation`)
+          continue
+        }
         const bestBid = parseFloat(l2.levels[1]?.[0]?.px || '0')
         const bestAsk = parseFloat(l2.levels[0]?.[0]?.px || '0')
         const currentPrice = pos.side === 'long' ? bestBid : bestAsk
@@ -1973,13 +3374,21 @@ class HyperliquidMMBot {
    */
   async getAllPositionPairs(): Promise<string[]> {
     try {
-      // Defensive check: ensure API clients are initialized
-      if (!this.api || !this.api.infoClient || typeof this.api.infoClient.clearinghouseState !== 'function') {
-        this.notifier.warn(`API infoClient not initialized`)
+      // Delegate to trading instance to get positions
+      if (!(this.trading instanceof LiveTrading)) {
+        this.notifier.warn(`getAllPositionPairs requires LiveTrading instance`)
         return []
       }
 
-      const userState = await this.api.infoClient.clearinghouseState({ user: this.walletAddress })
+      const infoClient = (this.trading as any).infoClient
+      const walletAddress = (this.trading as any).walletAddress
+
+      if (!infoClient || typeof infoClient.clearinghouseState !== 'function') {
+        this.notifier.warn(`InfoClient not initialized in LiveTrading`)
+        return []
+      }
+
+      const userState = await infoClient.clearinghouseState({ user: walletAddress })
 
       if (!userState || !userState.assetPositions) {
         return []
@@ -1998,6 +3407,220 @@ class HyperliquidMMBot {
     } catch (error) {
       this.notifier.warn(`Failed to get position pairs: ${error}`)
       return []
+    }
+  }
+
+  /**
+   * Check for Nansen strong conflicts and auto-close positions that exceed risk limits
+   */
+  private async checkNansenConflicts(): Promise<void> {
+    try {
+      if (!(this.trading instanceof LiveTrading)) {
+        return
+      }
+
+      const infoClient = (this.trading as any).infoClient
+      const walletAddress = (this.trading as any).walletAddress
+
+      if (!infoClient || typeof infoClient.clearinghouseState !== 'function') {
+        return
+      }
+
+      const userState = await infoClient.clearinghouseState({ user: walletAddress })
+      if (!userState || !userState.assetPositions) {
+        return
+      }
+
+      // Load Nansen bias data
+      const biasPath = path.join(process.cwd(), 'runtime', 'nansen_bias.json')
+      let biases: Record<string, any> = {}
+      try {
+        if (fs.existsSync(biasPath)) {
+          biases = JSON.parse(fs.readFileSync(biasPath, 'utf8'))
+        }
+      } catch (err) {
+        return
+      }
+
+      const now = Date.now()
+
+      // Check each position for strong conflicts
+      for (const assetPos of userState.assetPositions) {
+        const pos = assetPos.position
+        if (!pos) continue
+
+        const size = parseFloat(pos.szi || '0')
+        if (Math.abs(size) < 1e-6) continue
+
+        const pair = pos.coin
+        const posDir = size > 0 ? 'long' : 'short'
+        const unrealizedPnl = parseFloat(pos.unrealizedPnl || '0')
+        const positionValue = parseFloat(pos.positionValue || '0')
+        const notional = Math.abs(positionValue)
+
+        const bias = biases[pair]
+        if (!bias) continue
+
+        const biasDir = (bias.direction || 'neutral').toLowerCase()
+        const biasStrength = bias.biasStrength || 'neutral'
+        const biasBoost = bias.boost || 0
+
+        if (biasStrength !== 'strong') continue
+
+        const isConflict =
+          (posDir === 'long' && biasDir === 'short') ||
+          (posDir === 'short' && biasDir === 'long')
+
+        if (!isConflict) continue
+
+        let shouldClose = false
+        let closeReason = ''
+
+        // Trigger 1: Small position
+        if (notional < this.nansenStrongContraHardCloseUsd) {
+          shouldClose = true
+          closeReason = `notional below hard close threshold ($${notional.toFixed(2)} < $${this.nansenStrongContraHardCloseUsd})`
+        }
+
+        // Trigger 2: Excessive loss
+        if (unrealizedPnl <= -this.nansenStrongContraMaxLossUsd) {
+          shouldClose = true
+          closeReason = `uPnL below max loss limit ($${unrealizedPnl.toFixed(2)} <= -$${this.nansenStrongContraMaxLossUsd})`
+        }
+
+        // Trigger 3: Position age
+        if (bias.updatedAt) {
+          try {
+            const biasTimestamp = new Date(bias.updatedAt).getTime()
+            const ageHours = (now - biasTimestamp) / (1000 * 60 * 60)
+            if (ageHours >= this.nansenStrongContraMaxHours) {
+              shouldClose = true
+              closeReason = `conflict age exceeds max hold time (${ageHours.toFixed(1)}h >= ${this.nansenStrongContraMaxHours}h)`
+            }
+          } catch (err) {
+            // Skip age check
+          }
+        }
+
+        if (shouldClose) {
+          this.notifier.warn(
+            `🛡️  Nansen strong conflict auto-close: ${pair} ${posDir.toUpperCase()} vs bias ${biasDir.toUpperCase()} +${biasBoost.toFixed(2)} | ${closeReason}`
+          )
+
+          if (this.trading instanceof LiveTrading) {
+            await (this.trading as LiveTrading).closePositionForPair(pair, 'nansen_strong_conflict')
+          }
+        }
+      }
+    } catch (error: any) {
+      this.notifier.warn(`Failed to check Nansen conflicts: ${error?.message ?? error}`)
+    }
+  }
+
+  /**
+   * Apply rotation pair limits - ensure we don't exceed MAX_ACTIVE_PAIRS
+   * and close positions for pairs that are no longer in rotation.
+   *
+   * @param rotatedPairs - pairs suggested by rotation engine (Nansen + volatility)
+   */
+  private async applyRotationPairs(rotatedPairs: string[]): Promise<void> {
+    try {
+      // Check for manual rotation mode override
+      const rotationMode = process.env.ROTATION_MODE ?? 'auto'
+      const manualPairs = (process.env.MANUAL_ACTIVE_PAIRS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+      
+      let effectivePairs = rotatedPairs
+      if (rotationMode === 'manual' && manualPairs.length > 0) {
+        this.notifier.info(`[INFO] ROTATION_MODE=manual`)
+        this.notifier.info(`[INFO] Using MANUAL_ACTIVE_PAIRS=${manualPairs.join(',')}`)
+        effectivePairs = manualPairs
+      }
+      
+      // 🔍 DEBUG: Entry point
+      this.notifier.info(
+        `🧭 Rotation input: rotatedPairs=${effectivePairs.join(', ') || '∅'} | max=${MAX_ACTIVE_PAIRS}`
+      )
+
+      // 1. Limit rotation to MAX_ACTIVE_PAIRS
+      const desiredPairs = effectivePairs.slice(0, MAX_ACTIVE_PAIRS)
+
+      // 2. Add sticky pairs (e.g., ZEC, FIL) - always allowed even if not in rotation
+      const allDesired = new Set<string>(desiredPairs)
+
+      if (STICKY_PAIRS.length > 0) {
+        this.notifier.info(
+          `🧲 Sticky pairs: ${STICKY_PAIRS.join(', ')}`
+        )
+      }
+
+      for (const sticky of STICKY_PAIRS) {
+        if (sticky) {
+          allDesired.add(sticky)
+        }
+      }
+
+      const allowedList = Array.from(allDesired)
+      this.notifier.info(
+        `📊 Allowed pairs (rotation + sticky): ${allowedList.join(', ') || '∅'} (count=${allowedList.length}/${MAX_ACTIVE_PAIRS})`
+      )
+
+      // 3. Get current open positions
+      const currentPairs = await this.getAllPositionPairs()
+      this.notifier.info(
+        `📊 Current position pairs: ${currentPairs.join(', ') || '∅'}`
+      )
+
+      // 4. Determine which pairs to close (in current positions BUT NOT in desired list)
+      const pairsToClose: string[] = []
+      for (const pair of currentPairs) {
+        if (!allDesired.has(pair)) {
+          pairsToClose.push(pair)
+        }
+      }
+
+      // 5. Close positions and cancel orders for pairs that dropped out of rotation
+      if (pairsToClose.length === 0) {
+        this.notifier.info(
+          '🧹 Rotation cleanup: no positions to close (all positions within allowed set)'
+        )
+      } else {
+        this.notifier.info(
+          `🧹 Rotation cleanup: closing ${pairsToClose.length} pairs outside rotation: ${pairsToClose.join(', ')}`
+        )
+
+        for (const pair of pairsToClose) {
+          try {
+            this.notifier.info(`   ⏱️  Cleanup ${pair}: cancelling orders...`)
+
+            // Cancel orders first
+            if (this.trading instanceof LiveTrading) {
+              await (this.trading as LiveTrading).cancelPairOrders(pair)
+            }
+
+            this.notifier.info(`   💥 Cleanup ${pair}: closing position...`)
+
+            // Then close position
+            if (this.trading instanceof LiveTrading) {
+              await (this.trading as LiveTrading).closePositionForPair(pair, 'rotation_cleanup')
+            }
+
+            this.notifier.info(`   ✅ Cleanup done for ${pair}`)
+          } catch (err: any) {
+            this.notifier.error(`   ❌ Cleanup error for ${pair}: ${err?.message ?? err}`)
+          }
+        }
+      }
+
+      // Log active pairs summary
+      const activePairsList = Array.from(allDesired).join(', ')
+      this.notifier.info(
+        `📊 Active pairs (allowed set) after cleanup: ${activePairsList} (${allDesired.size}/${MAX_ACTIVE_PAIRS})`
+      )
+    } catch (error: any) {
+      this.notifier.error(`❌ applyRotationPairs failed: ${error?.message ?? error}`)
     }
   }
 
@@ -2029,7 +3652,7 @@ class HyperliquidMMBot {
         const unrealizedPnl = parseFloat(positionData.position.unrealizedPnl || '0')
 
         // Get current market price
-        const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
+        const pairData = assetCtxs.find(ctx => ctx.coin === pair)
         if (!pairData) continue
 
         const midPrice = parseFloat(pairData.midPx || '0')
@@ -2076,7 +3699,6 @@ class HyperliquidMMBot {
    * (Can be used to adjust order sizing or prioritize certain pairs)
    */
   private copyTradingSignalMap: Map<string, CopyTradingSignal> = new Map()
-  private confluenceAnalysis: ConfluenceAnalysis[] = []
 
   private storeCopyTradingSignals(signals: CopyTradingSignal[]) {
     this.copyTradingSignalMap.clear()
@@ -2168,6 +3790,280 @@ class HyperliquidMMBot {
     return { clipUsd, coinStep, coinsRounded, usdRounded }
   }
 
+  /**
+   * Get Nansen directional bias for a trading pair (for risk management)
+   * Returns 'long' for strong bullish signals, 'short' for bearish, 'neutral' otherwise
+   */
+  private getNansenBiasForPair(pair: string): NansenBias {
+    try {
+      const symbol = pair.split(/[-_]/)[0].toUpperCase()
+      const now = Date.now()
+
+      // Reload bias data every 60 seconds
+      if (now - this.nansenBiasCache.lastLoad > 60_000) {
+        const biasPath = path.join(process.cwd(), 'runtime', 'nansen_bias.json')
+        if (fs.existsSync(biasPath)) {
+          const raw = fs.readFileSync(biasPath, 'utf-8')
+          this.nansenBiasCache.data = JSON.parse(raw)
+          this.nansenBiasCache.lastLoad = now
+        }
+      }
+
+      const entry = this.nansenBiasCache.data[symbol]
+      if (!entry) return 'neutral'
+
+      // Only act on strong signals (boost >= 2.0)
+      if (Math.abs(entry.boost) < 2.0) return 'neutral'
+
+      return entry.direction === 'long'
+        ? 'long'
+        : entry.direction === 'short'
+        ? 'short'
+        : 'neutral'
+    } catch (error) {
+      // Fail gracefully - if bias file doesn't exist or has errors, return neutral
+      return 'neutral'
+    }
+  }
+
+  /**
+   * Check if position is heavily against Nansen bias and should be closed early
+   * Returns true if position should be force-closed
+   */
+  /**
+   * Get close cost parameters from env
+   */
+  private getCloseCostParams() {
+    const defaultBps = Number(process.env.NANSEN_CLOSE_COST_DEFAULT_BPS || '20') // 0.20%
+    const spreadMultiplier = Number(process.env.NANSEN_CLOSE_COST_SPREAD_MULTIPLIER || '0.5')
+    return { defaultBps, spreadMultiplier }
+  }
+
+  /**
+   * Estimates close cost (in USD) based on:
+   *  - notionalUsd
+   *  - optionally current spread in bps
+   */
+  private estimateCloseCostUsd(
+    pair: string,
+    notionalUsd: number,
+    currentSpreadBps?: number
+  ): number {
+    const { defaultBps, spreadMultiplier } = this.getCloseCostParams()
+
+    const spreadBps = currentSpreadBps && currentSpreadBps > 0
+      ? currentSpreadBps
+      : defaultBps
+
+    const effectiveBps = Math.max(
+      defaultBps,
+      Math.floor(spreadBps * spreadMultiplier)
+    )
+
+    const cost = notionalUsd * (effectiveBps / 10_000)
+
+    this.notifier.info(
+      `[NANSEN-SL] closeCost | pair=${pair} notional=${notionalUsd.toFixed(
+        2
+      )} spreadBps=${spreadBps} effBps=${effectiveBps} estCost=${cost.toFixed(2)}`
+    )
+
+    return cost
+  }
+
+  /**
+   * Zastosuj profil spreadu (conservative / aggressive) do bazowego spreadu.
+   * Aggressive lekko go ściska (np. 0.8x).
+   */
+  private applySpreadProfile(baseSpreadBps: number): number {
+    if (baseSpreadBps <= 0) return baseSpreadBps
+    
+    if (this.config.spreadProfile !== 'aggressive') {
+      return baseSpreadBps
+    }
+
+    const multEnv = process.env.AGGRESSIVE_SPREAD_MULTIPLIER
+    const mult = multEnv !== undefined ? Number(multEnv) : 0.8
+
+    if (!Number.isFinite(mult) || mult <= 0 || mult > 1) {
+      // safety fallback
+      return baseSpreadBps * 0.8
+    }
+
+    return baseSpreadBps * mult
+  }
+
+  /**
+   * Clamp final per-side spread (in bps) into a safe band.
+   * Zabezpiecza przed zbyt wąskim (prawie 0) i absurdalnie szerokim spreadem.
+   * Używa per-pair limitów jeśli dostępne, w przeciwnym razie globalne.
+   */
+  private clampSpreadBps(pair: string, spreadBps: number): number {
+    const isAggressive = this.config.spreadProfile === 'aggressive'
+    const globalMinDefault = isAggressive ? 6 : 8
+    const globalMaxDefault = isAggressive ? 120 : 140
+
+    const globalMin = Number(process.env.MIN_FINAL_SPREAD_BPS || globalMinDefault)
+    const globalMax = Number(process.env.MAX_FINAL_SPREAD_BPS || globalMaxDefault)
+
+    // Extract base symbol from pair (e.g. "ZEC-PERP" -> "ZEC")
+    const baseSymbol = pair.split(/[-_]/)[0].toUpperCase()
+    const perPair = HyperliquidMMBot.PAIR_SPREAD_LIMITS[baseSymbol] || { min: globalMin, max: globalMax }
+
+    // Per-pair ma pierwszeństwo, ale nie pozwalamy na totalne głupoty
+    const minBps = Math.max(perPair.min, 1)
+    const maxBps = Math.max(Math.min(perPair.max, 500), minBps + 1)
+
+    let clamped = spreadBps
+    if (!Number.isFinite(clamped)) {
+      clamped = minBps
+    }
+
+    clamped = Math.min(Math.max(clamped, minBps), maxBps)
+    return clamped
+  }
+
+  /**
+   * Snapshot log – raz na wywołanie executePairMM
+   * Pokazuje finalne wartości spreadu z breakdown.
+   */
+  private logSpreadSnapshot(params: {
+    pair: string
+    profile: 'conservative' | 'aggressive'
+    baseRaw: number
+    baseProfiled: number
+    bidFinal: number
+    askFinal: number
+    invSkewPct: number
+    mode: 'multi-layer' | 'regular'
+  }): void {
+    const {
+      pair,
+      profile,
+      baseRaw,
+      baseProfiled,
+      bidFinal,
+      askFinal,
+      invSkewPct,
+      mode
+    } = params
+
+    this.notifier.info(
+      `[SNAPSHOT] pair=${pair} profile=${profile} mode=${mode} ` +
+      `invSkew=${invSkewPct.toFixed(1)}% base=${baseRaw.toFixed(1)}bps ` +
+      `profiled=${baseProfiled.toFixed(1)}bps bidFinal=${bidFinal.toFixed(1)}bps askFinal=${askFinal.toFixed(1)}bps`
+    )
+  }
+
+  /**
+   * Mark pair as entered rotation
+   */
+  private markRotationEntered(pair: string) {
+    const now = Date.now()
+    this.rotationSince[pair] = now
+    this.notifier.info(
+      `[ROTATION] Entered rotation | pair=${pair} at=${new Date(now).toISOString()}`
+    )
+  }
+
+  /**
+   * Get rotation age in milliseconds
+   */
+  private getRotationAgeMs(pair: string): number {
+    const since = this.rotationSince[pair]
+    if (!since) return 0
+    return Date.now() - since
+  }
+
+  /**
+   * Get max rotation hold time in milliseconds
+   */
+  private getMaxRotationHoldMs(): number {
+    const hours = Number(process.env.ROTATION_MAX_HOLD_HOURS || '8')
+    return hours * 60 * 60 * 1000
+  }
+
+  /**
+   * Check if pair is overdue (exceeded max hold time)
+   */
+  private isRotationOverdue(pair: string): boolean {
+    const age = this.getRotationAgeMs(pair)
+    const maxMs = this.getMaxRotationHoldMs()
+    return age > 0 && age >= maxMs
+  }
+
+  private async checkNansenConflictStopLoss(
+    pair: string,
+    positionSize: number,
+    positionValueUsd: number,
+    unrealizedPnlUsd: number
+  ): Promise<boolean> {
+    const bias = this.getNansenBiasForPair(pair)
+
+    if (bias === 'neutral') return false
+
+    // Check if we're on the wrong side of a strong bias
+    const isShortAgainstLongBias = bias === 'long' && positionSize < 0
+    const isLongAgainstShortBias = bias === 'short' && positionSize > 0
+
+    if (!isShortAgainstLongBias && !isLongAgainstShortBias) {
+      return false  // Position aligns with bias or is neutral
+    }
+
+    // Early stop-loss threshold: dynamic based on bias strength
+    // Strong bias: -$20, Soft bias: -$50 (to prevent disasters like ZEC -$490)
+    const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    const biasEntry = this.nansenBiasCache.data[symbol]
+    const biasStrength = biasEntry?.biasStrength || 'neutral'
+    const config = BIAS_CONFIGS[biasStrength]
+    const NANSEN_CONFLICT_SL_USD = config.contraPnlLimit
+
+    if (unrealizedPnlUsd < NANSEN_CONFLICT_SL_USD) {
+      // Cost-benefit check with dynamic close cost
+      // Estimate potential risk if we keep the position
+      const biasBoost = Math.abs(biasEntry?.boost || 0)
+      const riskPerBiasPoint = 0.01 // 1% per bias point
+      const potentialRiskUsd = positionValueUsd * biasBoost * riskPerBiasPoint
+      const totalRiskUsd = potentialRiskUsd + Math.abs(Math.min(0, unrealizedPnlUsd))
+
+      // Estimate close cost (spread-aware)
+      // If we have current spread in bps, we could pass it here
+      // For now, we use undefined = fallback to defaultBps
+      const estimatedCloseCostUsd = this.estimateCloseCostUsd(pair, positionValueUsd)
+
+      // Skip close if cost > risk (unless severity is very high)
+      // For now, we use simple threshold check - if cost > risk, skip
+      // In future, we could add severity calculation here
+      const severity = 5 // Default medium severity for this check
+      if (estimatedCloseCostUsd > totalRiskUsd && severity < 8) {
+        this.notifier.info(
+          `[NANSEN-SL] Skip close | pair=${pair} severity=${severity.toFixed(
+            1
+          )} notional=${positionValueUsd.toFixed(
+            2
+          )} cost=${estimatedCloseCostUsd.toFixed(
+            2
+          )} risk=${totalRiskUsd.toFixed(2)}`
+        )
+        return false
+      }
+
+      const direction = positionSize > 0 ? 'LONG' : 'SHORT'
+      const boostStr = biasEntry ? `+${biasEntry.boost.toFixed(2)}` : '?'
+      const strengthLabel = biasStrength === 'strong' ? 'STRONG' : biasStrength === 'soft' ? 'soft' : ''
+
+      this.notifier.warn(
+        `🛑 [NANSEN CONFLICT SL] Closing ${direction} on ${pair} ` +
+        `(PnL: $${unrealizedPnlUsd.toFixed(2)}, threshold: $${NANSEN_CONFLICT_SL_USD}) - ` +
+        `position against Nansen ${bias.toUpperCase()} ${strengthLabel} bias ${boostStr}`
+      )
+
+      return true
+    }
+
+    return false
+  }
+
   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
     const startTime = Date.now()
 
@@ -2183,7 +4079,7 @@ class HyperliquidMMBot {
       const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
       assetCtxs = ctxs
     }
-    const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
+    const pairData = assetCtxs.find(ctx => ctx.coin === pair)
 
     if (!pairData) {
       this.notifier.warn(`⚠️  No data for ${pair}`)
@@ -2200,34 +4096,191 @@ class HyperliquidMMBot {
     const state = this.stateManager.getState()
     const position = state.positions[pair]
 
-    // Get confluence allocation for this pair (if available)
-    const confluence = this.confluenceAnalysis.find(c => c.pair === pair)
-    const capitalPerPair = confluence?.finalAllocation || this.baseOrderUsd
-
-    // Log confluence boost if applicable
-    if (confluence && confluence.sources.length > 1) {
-      this.notifier.info(`⭐ ${pair} confluence boost: ${confluence.confluenceBoost.toFixed(2)}x → $${capitalPerPair.toFixed(0)}`)
-    }
-
     // Calculate inventory skew as percentage of capital
     // position.size is in coins, need to convert to USD value
+    // Use ROTATION_TARGET_PER_PAIR_USD for grid capital allocation
+    const capitalPerPair = Number(process.env.ROTATION_TARGET_PER_PAIR_USD || this.baseOrderUsd * 20) // Default: 20× baseOrderUsd if not set
     let inventorySkew = 0
     if (position) {
-      const positionValueUsd = position.size * midPrice
-      inventorySkew = positionValueUsd / capitalPerPair // -1 to 1 range (negative = short, positive = long)
+      const positionValueUsd = Math.abs(position.size) * midPrice
+      inventorySkew = position.size > 0 
+        ? positionValueUsd / capitalPerPair  // Long: positive skew
+        : -positionValueUsd / capitalPerPair // Short: negative skew
+      // Clamp to [-1, 1] range
+      inventorySkew = Math.max(-1, Math.min(1, inventorySkew))
     }
 
-    // Generate grid orders
+    // 🛡️ Nansen Conflict Stop-Loss: Close positions against strong bias early
+    if (position) {
+      const positionValueUsd = position.size * midPrice
+      // Calculate unrealized PnL based on current price vs entry price
+      const unrealizedPnlUsd = position.side === 'long'
+        ? (midPrice - position.entryPrice) * position.size
+        : (position.entryPrice - midPrice) * position.size
+
+      const shouldForceClose = await this.checkNansenConflictStopLoss(
+        pair,
+        position.size,
+        positionValueUsd,
+        unrealizedPnlUsd
+      )
+
+      if (shouldForceClose) {
+        // Force close the position immediately
+        this.notifier.warn(`🛑 Force closing ${pair} due to Nansen conflict (position against strong bias)`)
+
+        // Place market order to close position
+        await this.trading.placeOrder(
+          pair,
+          position.side === 'long' ? 'sell' : 'buy',
+          midPrice,
+          position.size,
+          'market'
+        )
+
+        return  // Skip MM for this cycle
+      }
+    }
+
+    // 🔥 Get Nansen directional bias for risk management
+    const nansenBias = this.getNansenBiasForPair(pair)
+    const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    const biasEntry = this.nansenBiasCache.data[symbol]
+    const biasStrength = biasEntry?.biasStrength || 'neutral'
+
+    // Get config for this bias strength
+    const config = BIAS_CONFIGS[biasStrength]
+
+    if (nansenBias !== 'neutral' && biasEntry) {
+      const boostStr = `+${biasEntry.boost.toFixed(2)}`
+      const strengthLabel = biasStrength === 'strong' ? 'STRONG' : biasStrength === 'soft' ? 'soft' : ''
+      this.notifier.info(
+        `🧭 ${pair} Nansen bias: ${nansenBias.toUpperCase()} ${boostStr} (${strengthLabel} signal)`
+      )
+    }
+
+    // 🛡️ Bias Lock: Use dynamic parameters based on bias strength
+    const MAX_CONTRA_SKEW = config.maxContraSkew
+    const BIAS_BOOST = config.boostAmount
+
+    if (nansenBias === 'long') {
+      // Strong bullish bias
+      const originalSkew = inventorySkew
+
+      // 1. Actively push toward long positions (deepening)
+      inventorySkew = Math.min(1, inventorySkew + BIAS_BOOST)
+
+      // 2. But prevent excessive short positions (safety)
+      if (inventorySkew < -MAX_CONTRA_SKEW) {
+        inventorySkew = -MAX_CONTRA_SKEW
+      }
+
+      if (originalSkew !== inventorySkew) {
+        this.notifier.info(
+          `🧭 Bias boost: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
+          `(Nansen LONG bias +${BIAS_BOOST * 100}% boost${inventorySkew === -MAX_CONTRA_SKEW ? ', clamped at -25%' : ''})`
+        )
+      }
+    }
+
+    if (nansenBias === 'short') {
+      // Strong bearish bias
+      const originalSkew = inventorySkew
+
+      // 1. Actively push toward short positions (deepening)
+      inventorySkew = Math.max(-1, inventorySkew - BIAS_BOOST)
+
+      // 2. But prevent excessive long positions (safety)
+      if (inventorySkew > MAX_CONTRA_SKEW) {
+        inventorySkew = MAX_CONTRA_SKEW
+      }
+
+      if (originalSkew !== inventorySkew) {
+        this.notifier.info(
+          `🧭 Bias boost: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
+          `(Nansen SHORT bias -${BIAS_BOOST * 100}% boost${inventorySkew === MAX_CONTRA_SKEW ? ', clamped at +25%' : ''})`
+        )
+      }
+    }
+
+    // 📊 Calculate L1 spread breakdown BEFORE generating orders (for detailed logging)
+    const baseL1OffsetBps = 20 // L1 base offset from GridManager
+    
+    // 0) Bazowy spread z profilu (conservative / aggressive)
+    const rawBaseSpreadBps = this.makerSpreadBps
+    const baseSpreadBps = this.applySpreadProfile(rawBaseSpreadBps)
+    
+    // Użyj baseSpreadBps zamiast baseL1OffsetBps dla obliczeń (lub połącz oba)
+    // Dla L1 używamy baseL1OffsetBps jako bazowy offset, ale możemy też zastosować profil
+    const baseL1OffsetWithProfile = this.applySpreadProfile(baseL1OffsetBps)
+    
+    const skewAdjBidBps = this.gridManager!.getInventoryAdjustment(inventorySkew, 'bid')
+    const skewAdjAskBps = this.gridManager!.getInventoryAdjustment(inventorySkew, 'ask')
+    
+    // Nansen factors
+    const nansenBidFactor = nansenBias === 'long' ? config.tightenFactor : nansenBias === 'short' ? config.widenFactor : 1.0
+    const nansenAskFactor = nansenBias === 'long' ? config.widenFactor : nansenBias === 'short' ? config.tightenFactor : 1.0
+    
+    // Behavioural risk factor (will be applied later, but we calculate it here for logging)
+    // For now, we'll use 1.0 as default (will be updated after applyBehaviouralRiskToLayers)
+    let behaviouralBidFactor = 1.0
+    let behaviouralAskFactor = 1.0
+    
+    // Chase/volatility adjustments (if chase mode enabled)
+    let chaseBidTicks = 0
+    let chaseAskTicks = 0
+    const tickBps = 1 // Approximate: 1 tick ≈ 1 bps (will be refined if needed)
+    
+    // 1) Inventory skew adjustment
+    let bidSpreadBps = baseL1OffsetWithProfile + skewAdjBidBps
+    let askSpreadBps = baseL1OffsetWithProfile + skewAdjAskBps
+    
+    // 2) Nansen bias – asymetria
+    bidSpreadBps *= nansenBidFactor
+    askSpreadBps *= nansenAskFactor
+    
+    // 3) Behavioural risk (FOMO / knife) – tylko BUY side
+    bidSpreadBps *= behaviouralBidFactor
+    
+    // 4) Chase / volatility – dodatkowe ticks
+    bidSpreadBps += chaseBidTicks * tickBps
+    askSpreadBps += chaseAskTicks * tickBps
+    
+    // 5) Ostateczny clamp na sensowny zakres (z per-pair limitami)
+    const unclampedBid = bidSpreadBps
+    const unclampedAsk = askSpreadBps
+    const finalBidSpreadBps = this.clampSpreadBps(pair, bidSpreadBps)
+    const finalAskSpreadBps = this.clampSpreadBps(pair, askSpreadBps)
+
+    // Snapshot log – multi-layer
+    const invSkewPct = inventorySkew * 100
+    this.logSpreadSnapshot({
+      pair,
+      profile: this.config.spreadProfile,
+      baseRaw: baseL1OffsetBps,
+      baseProfiled: baseL1OffsetWithProfile,
+      bidFinal: finalBidSpreadBps,
+      askFinal: finalAskSpreadBps,
+      invSkewPct,
+      mode: 'multi-layer'
+    })
+
+    // Generate grid orders with Nansen bias awareness
+    // Note: GridManager will apply its own clamp internally, but we log our calculation here
     let gridOrders = this.gridManager!.generateGridOrders(
       pair,
       midPrice,
       capitalPerPair,
       0.001,
-      inventorySkew
+      inventorySkew,
+      nansenBias,  // 🔥 Pass bias to grid manager for asymmetric order placement
+      config.tightenFactor,  // 🔥 Dynamic spread adjustment (0.7 strong, 0.9 soft, 1.0 neutral)
+      config.widenFactor     // 🔥 Dynamic spread adjustment (1.3 strong, 1.1 soft, 1.0 neutral)
     )
 
     const MIN_NOTIONAL = Number(process.env.MIN_NOTIONAL_USD ?? 10)
-    const GLOBAL_CLIP = Number(process.env.CLIP_USD ?? 15)
+    // Ensure child orders meet min notional (especially for UNI which was getting ~$7 orders)
+    const GLOBAL_CLIP = Math.max(Number(process.env.CLIP_USD ?? 15), MIN_NOTIONAL + 2) // At least $2 above min notional
 
     // Get instrument specs for proper rounding
     const specs = getInstrumentSpecs(pair)
@@ -2260,6 +4313,133 @@ class HyperliquidMMBot {
       `Skew: ${(inventorySkew * 100).toFixed(1)}% | Rebucket: ${totalBefore.toFixed(2)}→${totalAfter.toFixed(2)} USD | ` +
       `child≥${clipUsd}`
     )
+
+    // 🔍 Apply behavioural risk (anti-FOMO / anti-knife)
+    const buyLayers = gridOrders.filter((o: GridOrder) => o.side === 'bid')
+    const sellLayers = gridOrders.filter((o: GridOrder) => o.side === 'ask')
+
+    // Calculate recent returns from price history (if available)
+    // For now, we'll use a simple fallback - you can enhance this with actual price history tracking
+    const recentReturns = {
+      // TODO: Implement actual price history tracking for ret1m, ret5m, ret15m
+      // For now, these will be undefined and behavioural risk will only trigger on orderbook stats
+    }
+
+    // Calculate orderbook stats (bid depth)
+    // TODO: Enhance with actual orderbook depth tracking
+    const orderbookStats = {
+      // TODO: Implement actual orderbook depth tracking
+      // For now, these will be undefined
+    }
+
+    const adjusted = applyBehaviouralRiskToLayers({
+      mode: this.behaviouralRiskMode,
+      pair,
+      midPrice,
+      buyLayers,
+      sellLayers,
+      recentReturns,
+      orderbookStats,
+    })
+
+    // Update behavioural factors for logging (if FOMO was detected)
+    if (adjusted.reason && adjusted.reason.includes('fomo')) {
+      // Extract spreadBoost from reason or use default
+      const spreadBoostMatch = adjusted.reason.match(/spreadBoost=([\d.]+)/)
+      if (spreadBoostMatch) {
+        behaviouralBidFactor = parseFloat(spreadBoostMatch[1])
+      }
+    }
+
+    if (adjusted.suspendBuys) {
+      this.notifier.warn(
+        `🧠 BehaviouralRisk: suspending BUY quoting for ${pair} (${adjusted.reason || 'FOMO/knife'})`
+      )
+    } else if (adjusted.reason) {
+      this.notifier.info(
+        `🧠 BehaviouralRisk: ${pair} ${adjusted.reason}`
+      )
+    }
+
+    // Recombine adjusted layers back into gridOrders
+    gridOrders = [...adjusted.buyLayers, ...adjusted.sellLayers]
+
+    // 📊 Log final spread with complete breakdown (after behavioural risk)
+    // Recalculate for logging with updated behavioural factor
+    const finalRawBidSpreadBps = baseL1OffsetWithProfile + skewAdjBidBps
+    const finalRawBidAfterNansen = finalRawBidSpreadBps * nansenBidFactor
+    const finalRawBidAfterBehavioural = finalRawBidAfterNansen * behaviouralBidFactor
+    const finalRawBidAfterChase = finalRawBidAfterBehavioural + (chaseBidTicks * tickBps)
+    const finalClampedBidSpreadBps = this.clampSpreadBps(pair, finalRawBidAfterChase)
+    
+    const finalRawAskSpreadBps = baseL1OffsetWithProfile + skewAdjAskBps
+    const finalRawAskAfterNansen = finalRawAskSpreadBps * nansenAskFactor
+    const finalRawAskAfterBehavioural = finalRawAskAfterNansen * behaviouralAskFactor
+    const finalRawAskAfterChase = finalRawAskAfterBehavioural + (chaseAskTicks * tickBps)
+    const finalClampedAskSpreadBps = this.clampSpreadBps(pair, finalRawAskAfterChase)
+    
+    this.notifier.info(
+      `[SPREAD] ${pair} profile=${this.config.spreadProfile} ` +
+      `L1 bid=${finalClampedBidSpreadBps.toFixed(1)}bps (raw=${finalRawBidAfterChase.toFixed(1)}bps) ` +
+      `ask=${finalClampedAskSpreadBps.toFixed(1)}bps (raw=${finalRawAskAfterChase.toFixed(1)}bps) ` +
+      `baseRaw=${baseL1OffsetBps}bps baseProfiled=${baseL1OffsetWithProfile.toFixed(1)}bps ` +
+      `skewAdjBid=${skewAdjBidBps.toFixed(1)}bps skewAdjAsk=${skewAdjAskBps.toFixed(1)}bps ` +
+      `nansenBid=${nansenBidFactor.toFixed(2)} nansenAsk=${nansenAskFactor.toFixed(2)} ` +
+      `behaviouralBid=${behaviouralBidFactor.toFixed(2)} ` +
+      `chaseTicksBid=${chaseBidTicks} chaseTicksAsk=${chaseAskTicks}`
+    )
+
+    // 🔍 Debug: pokaż aktualny multi-layer grid dla tej pary (max raz na 5 minut)
+    const now = Date.now()
+    const last = this.lastGridDebugAt[pair] || 0
+
+    if (!last || now - last > 5 * 60 * 1000) {
+      this.lastGridDebugAt[pair] = now
+
+      try {
+        // Zakładamy, że gridOrders mają pola: side ('bid'/'ask'), price, sizeUsd
+        const buys = gridOrders.filter((o: GridOrder) => o.side === 'bid')
+        const sells = gridOrders.filter((o: GridOrder) => o.side === 'ask')
+
+        const buyPrices = buys.map((o: GridOrder) => o.price).filter((x: number) => Number.isFinite(x))
+        const sellPrices = sells.map((o: GridOrder) => o.price).filter((x: number) => Number.isFinite(x))
+
+        const bestBid = buyPrices.length ? Math.max(...buyPrices) : NaN
+        const bestAsk = sellPrices.length ? Math.min(...sellPrices) : NaN
+
+        let midApprox: number | null = null
+        if (Number.isFinite(bestBid) && Number.isFinite(bestAsk)) {
+          midApprox = (bestBid + bestAsk) / 2
+        } else if (Number.isFinite(midPrice)) {
+          midApprox = midPrice
+        }
+
+        const buyNotional = buys.reduce((acc: number, o: GridOrder) => acc + (o.sizeUsd || 0), 0)
+        const sellNotional = sells.reduce((acc: number, o: GridOrder) => acc + (o.sizeUsd || 0), 0)
+
+        const buySpan =
+          buyPrices.length
+            ? `${Math.min(...buyPrices).toFixed(4)}→${Math.max(...buyPrices).toFixed(4)}`
+            : 'n/a'
+
+        const sellSpan =
+          sellPrices.length
+            ? `${Math.min(...sellPrices).toFixed(4)}→${Math.max(...sellPrices).toFixed(4)}`
+            : 'n/a'
+
+        const midStr = midApprox !== null ? midApprox.toFixed(4) : 'n/a'
+
+        this.notifier.info(
+          `📊 [ML-GRID] pair=${pair} mid≈${midStr} ` +
+          `buyLevels=${buys.length} sellLevels=${sells.length} ` +
+          `buyPx=${buySpan} sellPx=${sellSpan} ` +
+          `buyNotional≈$${buyNotional.toFixed(2)} sellNotional≈$${sellNotional.toFixed(2)}`
+        )
+      } catch (e) {
+        // Nie zabijaj bota, jeśli debug log się wywali
+        console.warn(`[ML-GRID] debug log failed for ${pair}:`, e)
+      }
+    }
 
     // Cancel existing orders
     if (this.trading instanceof LiveTrading) {
@@ -2295,7 +4475,7 @@ class HyperliquidMMBot {
 
   async executePairMM(pair: string, assetCtxs?: any[]) {
     // Route to multi-layer grid if enabled
-    if (this.gridManager) {
+    if (this.config.enableMultiLayer && this.gridManager) {
       return await this.executeMultiLayerMM(pair, assetCtxs)
     }
 
@@ -2311,7 +4491,7 @@ class HyperliquidMMBot {
       const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
       assetCtxs = ctxs
     }
-    const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
+    const pairData = assetCtxs.find(ctx => ctx.coin === pair)
 
     if (!pairData) {
       this.notifier.warn(`⚠️  No data for ${pair}`)
@@ -2330,12 +4510,19 @@ class HyperliquidMMBot {
     const state = this.stateManager.getState()
     const position = state.positions[pair]
 
-    // Get confluence allocation for this pair (if available)
-    const confluence = this.confluenceAnalysis.find(c => c.pair === pair)
-    const baseAllocation = confluence?.finalAllocation || this.baseOrderUsd
+    // 🛡️ SOFT SL enforcement (per-pair risk limits)
+    if (position) {
+      const positionValueUsd = position.size * midPrice
+      const unrealizedPnlUsd = position.side === 'long'
+        ? (midPrice - position.entryPrice) * position.size
+        : (position.entryPrice - midPrice) * position.size
+
+      const perPairOk = await this.enforcePerPairRisk(pair, unrealizedPnlUsd)
+      if (!perPairOk) return // SL hit, position closed, skip this tick
+    }
 
     // Calculate order size with tuning
-    const adjustedOrderUsd = baseAllocation * this.tuning.orderUsdFactor
+    const adjustedOrderUsd = this.baseOrderUsd * this.tuning.orderUsdFactor
 
     // Use Kelly Criterion for position sizing (simplified)
     const kellySize = positionSizeUSD({
@@ -2345,18 +4532,27 @@ class HyperliquidMMBot {
     })
     const orderSize = Math.min(adjustedOrderUsd, kellySize)
 
-    // Log confluence boost if applicable
-    if (confluence && confluence.sources.length > 1) {
-      this.notifier.info(`⭐ ${pair} confluence boost: ${confluence.confluenceBoost.toFixed(2)}x → $${baseAllocation.toFixed(0)}`)
-    }
-
     // Calculate spread with tuning
     const adjustedSpread = this.makerSpreadBps * this.tuning.makerSpreadFactor
-    const spreadFactor = adjustedSpread / 10000
+    
+    // 🛡️ Safety: Clamp to min/max bounds (same as multi-layer)
+    const MIN_SPREAD_BPS = Number(process.env.MIN_FINAL_SPREAD_BPS ?? 8)
+    const MAX_SPREAD_BPS = Number(process.env.MAX_FINAL_SPREAD_BPS ?? 140)
+    const clampedSpread = Math.max(MIN_SPREAD_BPS, Math.min(MAX_SPREAD_BPS, adjustedSpread))
+    
+    const spreadFactor = clampedSpread / 10000
 
     // Calculate bid/ask prices
     const bidPrice = midPrice * (1 - spreadFactor)
     const askPrice = midPrice * (1 + spreadFactor)
+    
+    // 📊 Log final spread for Regular MM (only if clamped)
+    if (clampedSpread !== adjustedSpread) {
+      this.notifier.info(
+        `[SPREAD] ${pair} Regular MM: clamped ${adjustedSpread.toFixed(1)}bps → ${clampedSpread.toFixed(1)}bps ` +
+        `(base=${this.makerSpreadBps}bps tuning=${(this.tuning.makerSpreadFactor * 100).toFixed(0)}%)`
+      )
+    }
 
     // ══════════════════════════════════════════════════════════════
     // PROPER MARKET MAKING - Place passive orders and let them fill
@@ -2441,21 +4637,13 @@ class HyperliquidMMBot {
     // DUAL-SIDED MARKET MAKING - Place BOTH bid and ask simultaneously
     // ═══════════════════════════════════════════════════════════════════
 
-    // Calculate current position exposure in USD (not coins!)
-    const currentPositionSizeCoins = position ? Math.abs(position.size) : 0
-    const currentPositionValueUsd = currentPositionSizeCoins * midPrice
-
-    // Get max allocation from config (with fallback to confluence allocation)
-    const maxAllocUsd = Number(process.env.MAX_ALLOC_USD || 1200)
-    const maxPositionSizeUsd = Math.max(maxAllocUsd, baseAllocation * 2.0)  // Use MAX_ALLOC_USD or 2x confluence allocation
+    // Calculate current position exposure
+    const currentPositionValue = position ? Math.abs(position.size) : 0
+    const maxPositionSizeUsd = orderSize * 4  // Allow up to 4x base order size (MAX_POSITION_MULTIPLIER)
 
     // Determine if we can place each side based on position limits
-    // For LONG positions: only place more BIDs if we haven't hit the limit
-    // For SHORT positions: only place more ASKs if we haven't hit the limit
-    const positionAtLimit = currentPositionValueUsd >= maxPositionSizeUsd
-
-    const canPlaceBid = !hasBidOrder && (!position || position.side === 'short' || !positionAtLimit)
-    const canPlaceAsk = !hasAskOrder && (!position || position.side === 'long' || !positionAtLimit)
+    const canPlaceBid = !hasBidOrder && (!position || position.side !== 'short' || currentPositionValue < maxPositionSizeUsd)
+    const canPlaceAsk = !hasAskOrder && (!position || position.side !== 'long' || currentPositionValue < maxPositionSizeUsd)
 
     // PLACE BID ORDER (buy side)
     if (canPlaceBid) {
@@ -2469,7 +4657,7 @@ class HyperliquidMMBot {
         'limit'
       )
     } else if (!hasBidOrder) {
-      this.notifier.info(`   ⏸️  BID skipped: Position limit reached ($${currentPositionValueUsd.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
+      this.notifier.info(`   ⏸️  BID skipped: Position limit reached ($${currentPositionValue.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
     }
 
     // PLACE ASK ORDER (sell side)
@@ -2492,7 +4680,7 @@ class HyperliquidMMBot {
         'limit'
       )
     } else if (!hasAskOrder) {
-      this.notifier.info(`   ⏸️  ASK skipped: Position limit reached ($${currentPositionValueUsd.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
+      this.notifier.info(`   ⏸️  ASK skipped: Position limit reached ($${currentPositionValue.toFixed(0)} / $${maxPositionSizeUsd.toFixed(0)})`)
     }
 
     // Positions are updated ONLY via syncPnLFromHyperliquid() in main loop
@@ -2525,7 +4713,7 @@ class HyperliquidMMBot {
 
       // Get current market price
       const [meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
-      const pairData = assetCtxs.find(ctx => String(ctx.coin).toLowerCase() === String(pair).toLowerCase())
+      const pairData = assetCtxs.find(ctx => ctx.coin === pair)
 
       if (!pairData) {
         this.notifier.warn(`   No data for ${pair}`)
@@ -2596,6 +4784,85 @@ class HyperliquidMMBot {
   }
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Per-Pair Risk Management (Soft SL)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Get per-pair max loss from environment variables
+   */
+  private getPerPairMaxLossUsd(pair: string): number | null {
+    const upper = pair.toUpperCase()
+    const envKey = `${upper}_MAX_LOSS_PER_SIDE_USD`
+    const value = process.env[envKey]
+    if (value) {
+      return Number(value)
+    }
+    // Fallback to default if not set
+    return Number(process.env.DEFAULT_MAX_LOSS_PER_SIDE_USD || 100)
+  }
+
+  /**
+   * Enforce per-pair risk limits (soft stop loss)
+   * Returns false if position was closed due to SL hit
+   */
+  private async enforcePerPairRisk(pair: string, unrealizedPnlUsd: number): Promise<boolean> {
+    const upper = pair.toUpperCase()
+    let maxLoss = this.getPerPairMaxLossUsd(pair)
+
+    if (!maxLoss || maxLoss <= 0) {
+      return true // No limit set, allow trading
+    }
+
+    // 🧠 Nansen hook: adjust soft SL based on risk level
+    if (this.nansenBias && this.nansenBias.isEnabled()) {
+      const signal = this.nansenBias.getSignal(upper)
+      if (signal) {
+        if (signal.riskLevel === 'avoid') {
+          maxLoss = maxLoss * 0.6  // 60% dla avoid (ostrzejsze)
+          this.notifier.warn(
+            `🧠 [NANSEN] ${upper} marked as AVOID → tightening soft SL to 60% (maxLoss=${maxLoss.toFixed(2)})`
+          )
+        } else if (signal.riskLevel === 'caution') {
+          maxLoss = maxLoss * 0.8  // 80% dla caution
+          this.notifier.info(
+            `🧠 [NANSEN] ${upper} marked as CAUTION → tightening soft SL to 80% (maxLoss=${maxLoss.toFixed(2)})`
+          )
+        }
+        // 'ok' → pełny limit (bez zmian)
+      }
+    }
+
+    // Check if unrealized PnL exceeds limit
+    if (unrealizedPnlUsd < -maxLoss) {
+      this.notifier.warn(
+        `[RISK] ❌ SOFT SL HIT on ${upper}: uPnL $${unrealizedPnlUsd.toFixed(2)} < -$${maxLoss.toFixed(2)}`
+      )
+
+      // Cancel all open orders for this pair
+      if (this.trading instanceof LiveTrading) {
+        try {
+          await this.trading.cancelPairOrders(upper)
+        } catch (err) {
+          this.notifier.warn(`Failed to cancel orders for ${upper}: ${err}`)
+        }
+      }
+
+      // Close position
+      try {
+        if (this.trading instanceof LiveTrading) {
+          await (this.trading as LiveTrading).closePositionForPair(upper, 'soft_sl')
+        }
+      } catch (err) {
+        this.notifier.error(`Failed to close position for ${upper}: ${err}`)
+      }
+
+      return false // Position closed
+    }
+
+    return true // OK, continue trading
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Utilities
   // ───────────────────────────────────────────────────────────────────────────
 
@@ -2630,7 +4897,22 @@ async function main() {
 }
 
 // Run
-main().catch(error => {
-  console.error('Fatal error:', error)
+main().catch(async (error) => {
+  console.error('[FATAL] Unhandled error in main():', {
+    timestamp: new Date().toISOString(),
+    error: error instanceof Error ? (error.stack || error.message) : String(error)
+  })
+
+  try {
+    await sendSystemAlert(
+      `💥 MM-Bot fatal error in main loop\n` +
+      `Error: ${error instanceof Error ? error.message : String(error)}\n` +
+      `Stack: ${error instanceof Error && error.stack ? error.stack.split('\n').slice(0, 3).join('\n') : 'N/A'}\n` +
+      `Timestamp: ${new Date().toISOString()}`
+    )
+  } catch (e) {
+    console.error('[FATAL] Failed to send system alert', e)
+  }
+
   process.exit(1)
 })

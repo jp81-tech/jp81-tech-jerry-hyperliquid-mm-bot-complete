@@ -1,0 +1,72 @@
+═══════════════════════════════════════════════════════════════════
+🚀 MM BOT MONITORING - QUICK START
+═══════════════════════════════════════════════════════════════════
+
+Choose your setup:
+
+────────────────────────────────────────────────────────────────────
+Option 1: MANUAL MONITORING (No Slack required)
+────────────────────────────────────────────────────────────────────
+
+Use when you want to manually check bot status:
+
+  cd /root/hyperliquid-mm-bot-complete
+  ./collect_crash.sh "bot stopped responding"
+
+That's it! Review crash data:
+  tail -80 crash_timeline.txt
+
+────────────────────────────────────────────────────────────────────
+Option 2: AUTOMATED MONITORING (with Slack alerts)
+────────────────────────────────────────────────────────────────────
+
+Get alerts when bot dies/hangs (recommended for production):
+
+1. Get Slack webhook URL:
+   https://api.slack.com/messaging/webhooks
+   
+   Example: https://hooks.slack.com/services/T00/B00/XXXX
+
+2. Set webhook URL:
+   export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+   echo 'export SLACK_WEBHOOK_URL="...">>' ~/.bashrc
+
+3. Setup automated monitoring:
+   /tmp/setup_monitoring_cron.sh
+
+4. Test it works:
+   cd /root/hyperliquid-mm-bot-complete
+   ./scripts/slack_alert.sh
+
+5. Monitor logs:
+   tail -f /var/log/mm_bot_monitor.log
+
+Done! You'll get Slack alerts every 5 min if bot is down.
+
+────────────────────────────────────────────────────────────────────
+Quick Commands
+────────────────────────────────────────────────────────────────────
+
+Manual crash collection:
+  ./collect_crash.sh "description"
+
+Check bot health:
+  ./scripts/check_bot_alive.sh
+
+Force Slack alert test:
+  ./scripts/slack_alert.sh
+
+View monitoring logs:
+  tail -f /var/log/mm_bot_monitor.log
+
+View crash history:
+  tail -100 crash_timeline.txt
+
+Disable monitoring:
+  crontab -e  # delete slack_alert.sh line
+
+────────────────────────────────────────────────────────────────────
+
+Full documentation: MONITORING_SETUP.md
+
+═══════════════════════════════════════════════════════════════════

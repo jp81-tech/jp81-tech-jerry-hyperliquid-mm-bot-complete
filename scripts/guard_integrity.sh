@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-base="/root/hyperliquid-mm-bot-complete"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+base="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Check LEVERAGE setting
 if ! grep -q '^LEVERAGE=' "$base/.env"; then

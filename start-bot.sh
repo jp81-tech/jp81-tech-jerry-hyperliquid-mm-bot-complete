@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-/root/hyperliquid-mm-bot-complete/scripts/guard_integrity.sh || { echo "❌ Guard failed"; exit 1; }
 set -euo pipefail
 
-# integrity guard
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+"$SCRIPT_DIR/scripts/guard_integrity.sh" || { echo "❌ Guard failed"; exit 1; }
 
-cd "$(dirname "$0")"
+cd "$SCRIPT_DIR"
 set -a
 . ./.env
 set +a

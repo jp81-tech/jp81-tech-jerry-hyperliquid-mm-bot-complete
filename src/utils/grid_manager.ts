@@ -53,9 +53,12 @@ export class GridManager {
       }
     }
 
-    // Set active layers based on ACTIVE_LAYERS environment variable
-    for (let i = 0; i < 5; i++) {
-      this.layers[i].isActive = (i < this.config.activeLayers)
+    // Set active layers based on ACTIVE_LAYERS and NUM_LAYERS environment variables
+    const maxLayers = Math.min(this.config.numLayers, this.layers.length)
+    const activeLayers = Math.min(this.config.activeLayers, maxLayers)
+
+    for (let i = 0; i < this.layers.length; i++) {
+      this.layers[i].isActive = i < activeLayers
     }
   }
 
@@ -75,7 +78,7 @@ export class GridManager {
 
     const orders: GridOrder[] = []
 
-    for (const layer of this.layers) {
+    for (const layer of this.layers.slice(0, this.config.numLayers)) {
       // Skip parking layers if not activated
       if (!layer.isActive && !this.shouldActivateParkingLayer(inventorySkew)) {
         continue
@@ -140,7 +143,7 @@ export class GridManager {
   /**
    * Calculate inventory skew adjustment (±10 bps per 15% skew)
    */
-  private getInventoryAdjustment(skew: number, side: 'bid' | 'ask'): number {
+  getInventoryAdjustment(skew: number, side: 'bid' | 'ask'): number {
     const skewThreshold = 0.15 // 15% skew
 
     if (Math.abs(skew) < skewThreshold) {

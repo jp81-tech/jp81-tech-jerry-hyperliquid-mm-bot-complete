@@ -1,0 +1,152 @@
+═══════════════════════════════════════════════════════════════
+ZEC/UNI MONITOR - SETUP COMPLETE ✅
+═══════════════════════════════════════════════════════════════
+
+Data: 2025-11-13 09:00 UTC
+Cel: Monitorowanie TYLKO ZEC i UNI co 15 minut na Slack
+Status: AKTYWNY
+
+═══════════════════════════════════════════════════════════════
+CO ZOSTAŁO SKONFIGUROWANE
+═══════════════════════════════════════════════════════════════
+
+📊 Monitor wysyła co 15 minut raport zawierający:
+   • Pozycje ZEC i UNI (side, size, uPnL)
+   • Submity z ostatnich 15 min (ZEC i UNI osobno)
+   • ANTI-FOMO blokady (ZEC i UNI osobno)
+   • Błędy margin (ZEC i UNI osobno)
+   • Synced fills (wszystkie pary)
+
+═══════════════════════════════════════════════════════════════
+PLIKI UTWORZONE
+═══════════════════════════════════════════════════════════════
+
+1️⃣ /root/hyperliquid-mm-bot-complete/scripts/zec_uni_monitor.sh
+   - Główny skrypt monitorujący
+   - Analizuje journalctl z ostatnich 15 minut
+   - Sprawdza pozycje tylko dla ZEC + UNI
+   - Wysyła raport na Slack
+
+2️⃣ /etc/systemd/system/mm-zec-uni-monitor.service
+   - Definicja service dla systemd
+   - Type=oneshot (jednorazowe uruchomienie)
+   - Ładuje .env z webhookiem
+
+3️⃣ /etc/systemd/system/mm-zec-uni-monitor.timer
+   - Timer uruchamiający co 15 minut
+   - OnBootSec=3min (pierwsze uruchomienie 3min po starcie)
+   - OnUnitActiveSec=15min (kolejne co 15 min)
+
+═══════════════════════════════════════════════════════════════
+KONFIGURACJA
+═══════════════════════════════════════════════════════════════
+
+W .env dodano:
+SLACK_ZEC_UNI_MONITOR_WEBHOOK=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+═══════════════════════════════════════════════════════════════
+ZARZĄDZANIE
+═══════════════════════════════════════════════════════════════
+
+Sprawdź status timera:
+systemctl list-timers | grep zec-uni
+
+Ręczne uruchomienie testu:
+cd /root/hyperliquid-mm-bot-complete
+bash scripts/zec_uni_monitor.sh
+
+Zatrzymaj monitor:
+systemctl stop mm-zec-uni-monitor.timer
+
+Uruchom monitor:
+systemctl start mm-zec-uni-monitor.timer
+
+Wyłącz na stałe:
+systemctl disable mm-zec-uni-monitor.timer
+
+Zobacz logi z ostatniego uruchomienia:
+journalctl -u mm-zec-uni-monitor.service -n 50
+
+═══════════════════════════════════════════════════════════════
+PRZYKŁADOWY RAPORT NA SLACKU
+═══════════════════════════════════════════════════════════════
+
+🔍 ZEC / UNI Monitor — last 15m
+UTC window: 2025-11-13 08:45:00 → 2025-11-13 09:00:00
+
+Positions:
+```
+ZEC      | SHORT |  2.11 | 508.78 | ... | uPnL +9.64
+UNI      | SHORT | 34.80 |   7.99 | ... | uPnL +2.06
+TOTAL    | ...
+```
+
+Activity (last 15m):
+• ZEC: submits=123, anti_fomo=4, margin_errors=0
+• UNI: submits=98,  anti_fomo=1, margin_errors=0
+• Synced fills (all pairs): 7
+
+═══════════════════════════════════════════════════════════════
+CO MONITOR ŚLEDZI
+═══════════════════════════════════════════════════════════════
+
+✅ ZEC submits - ile zleceń wysłano dla ZEC
+✅ UNI submits - ile zleceń wysłano dla UNI
+✅ ANTI-FOMO blocks - ile razy guard zablokował BUY
+✅ Margin errors - czy były błędy insufficient margin
+✅ Synced fills - ile fills zostało zsynchronizowanych
+
+═══════════════════════════════════════════════════════════════
+HARMONOGRAM
+═══════════════════════════════════════════════════════════════
+
+Pierwsze uruchomienie: 3 minuty po starcie systemu
+Kolejne: Co 15 minut
+Przykład: 09:00, 09:15, 09:30, 09:45, 10:00, ...
+
+═══════════════════════════════════════════════════════════════
+MOŻLIWE ROZSZERZENIA (na przyszłość)
+═══════════════════════════════════════════════════════════════
+
+💡 Możemy dodać:
+   1. Alert gdy submits > 50 ale fills = 0 (zero fill sentry)
+   2. Alert gdy margin_errors > 0 dla ZEC/UNI
+   3. Alert gdy anti_fomo > 10 (zbyt dużo bloków)
+   4. Tracking spread compression/expansion
+   5. Porównanie z poprzednim oknem 15min
+
+═══════════════════════════════════════════════════════════════
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════
+
+Brak wiadomości na Slacku:
+1. Sprawdź czy webhook w .env jest poprawny
+2. Uruchom ręcznie: bash scripts/zec_uni_monitor.sh
+3. Zobacz logi: journalctl -u mm-zec-uni-monitor.service -n 20
+
+Monitor nie działa:
+1. systemctl status mm-zec-uni-monitor.timer
+2. systemctl status mm-zec-uni-monitor.service
+3. journalctl -u mm-zec-uni-monitor.service --no-pager
+
+Zmiana intervalu (np. co 10 minut):
+1. Edytuj: /etc/systemd/system/mm-zec-uni-monitor.timer
+2. Zmień: OnUnitActiveSec=10min
+3. Przeładuj: systemctl daemon-reload
+4. Restart: systemctl restart mm-zec-uni-monitor.timer
+
+═══════════════════════════════════════════════════════════════
+PODSUMOWANIE
+═══════════════════════════════════════════════════════════════
+
+✅ Monitor ZEC/UNI aktywny
+✅ Raport co 15 minut na Slack
+✅ Tylko relevantne dane (ZEC + UNI)
+✅ Brak spam-u od nieaktywnych par
+✅ Systemd timer (automatyczny restart po reboot)
+✅ Używa journalctl (nie legacy log files)
+
+═══════════════════════════════════════════════════════════════
+Ostatnia aktualizacja: 2025-11-13 09:00 UTC
+Status: ✅ AKTYWNY - Pierwszy raport już wysłany!
+═══════════════════════════════════════════════════════════════
