@@ -1,0 +1,16 @@
+[Unit]
+Description=Backup sshd_config into repo and push to Git
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+ExecStart=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/scripts/backup_sshd_config.sh
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,19 @@
+[Unit]
+Description=Stream bot.log and send high-severity lines to Slack
+After=network-online.target mm-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jerry
+Group=jerry
+WorkingDirectory=/home/jerry/hyperliquid-mm-bot-complete
+EnvironmentFile=-/home/jerry/hyperliquid-mm-bot-complete/.env
+ExecStart=/usr/bin/env bash /home/jerry/hyperliquid-mm-bot-complete/scripts/bot_log_monitor.sh
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
+

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly backup of sshd_config (03:15 CET)
+
+[Timer]
+OnCalendar=*-*-* 02:15:00 UTC
+RandomizedDelaySec=300
+Unit=ssh-config-backup.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

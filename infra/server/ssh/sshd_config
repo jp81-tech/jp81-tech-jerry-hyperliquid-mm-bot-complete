@@ -1,0 +1,25 @@
+# --- SECURITY HARDENED SSH CONFIG ---
+
+Port 22
+Protocol 2
+
+PubkeyAuthentication yes
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+
+PermitRootLogin prohibit-password
+
+UsePAM yes
+X11Forwarding no
+AllowTcpForwarding no
+ClientAliveInterval 120
+ClientAliveCountMax 2
+LoginGraceTime 20
+
+MaxAuthTries 3
+MaxSessions 3
+
+# Limit who can log in
+AllowUsers jerry
+
+Subsystem sftp /usr/lib/openssh/sftp-server
