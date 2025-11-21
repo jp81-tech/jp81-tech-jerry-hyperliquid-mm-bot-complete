@@ -103,6 +103,12 @@ function envNumber(key: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
+function envBool(key: string, fallback: boolean): boolean {
+  const raw = process.env[key]
+  if (raw === undefined) return fallback
+  return raw === "true" || raw === "1"
+}
+
 const MAX_INVENTORY_COINS: Record<string, number> = {
   ZEC: envNumber("ZEC_INVENTORY_CAP_COINS", 4),
   UNI: envNumber("UNI_INVENTORY_CAP_COINS", 120),
@@ -175,6 +181,34 @@ function getDailyNotionalCapUsd(symbol: string): number {
 function getCETHour(now: Date = new Date()): number {
   const utcHour = now.getUTCHours()
   return (utcHour + 1 + 24) % 24
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ZEC DEFENSIVE MODE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getZecDownMovePct(): number {
+  return envNumber("ZEC_DOWN_MOVE_PCT", 3)
+}
+
+function getZecDownWindowSec(): number {
+  return envNumber("ZEC_DOWN_WINDOW_SEC", 1800)
+}
+
+function getZecDefensiveMaxPosUsd(): number {
+  return envNumber("ZEC_DEFENSIVE_MAX_POSITION_USD", 1500)
+}
+
+function isZecDefensiveUnwindOnly(): boolean {
+  return envBool("ZEC_DEFENSIVE_UNWIND_ONLY", true)
+}
+
+function getZecNightMaxPosUsd(): number {
+  return envNumber("ZEC_NIGHT_MAX_POSITION_USD", 1200)
+}
+
+function isZecNightUnwindOnly(): boolean {
+  return envBool("ZEC_NIGHT_UNWIND_ONLY", true)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -836,6 +870,8 @@ class LiveTrading implements TradingInterface {
   private throttleTracker: ThrottleTracker = new ThrottleTracker()
   private lastFillPrice: Map<string, number> = new Map()  // Track last fill for price bands
 
+  private zecPriceHistory: Array<{ t: number; mid: number }> = []
+
   // WebSocket & Rate Limit
   private websocket: HyperliquidWebSocket | null = null
   private rateLimitReserver: RateLimitReserver | null = null
@@ -1340,9 +1376,11 @@ class LiveTrading implements TradingInterface {
     try {
       const now = new Date()
       let reduceOnlyLocal = reduceOnly
+      let cetHourZec: number | null = null
 
       if (pair === 'ZEC') {
         const cetHour = getCETHour(now)
+        cetHourZec = cetHour
         const offStart = Number(process.env.ZEC_OFF_HOUR_START ?? '0')
         const offEnd = Number(process.env.ZEC_OFF_HOUR_END ?? '7')
 
@@ -1488,6 +1526,20 @@ class LiveTrading implements TradingInterface {
         const currentPosition = await this.getPosition(pair)
         const currentPosSz = currentPosition?.size ?? 0  // dodatnie = long, ujemne = short
         const maxInv = MAX_INVENTORY_COINS[pair]
+
+        if (pair === 'ZEC') {
+          const cetHour = cetHourZec ?? getCETHour(now)
+          const allowed = this.applyZecDefensiveGuards({
+            side,
+            roundedPrice,
+            currentPosSz,
+            cetHour,
+            nowMs: now.getTime()
+          })
+          if (!allowed) {
+            return { success: false }
+          }
+        }
 
         // Reduce-only if unwind is active for this coin
         if (maxInv && shouldUnwindCoin(pair, currentPosSz, maxInv)) {
@@ -4091,6 +4143,9 @@ class HyperliquidMMBot {
       this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
       return
     }
+    if (pair === 'ZEC') {
+      this.recordMidPriceSample(pair, midPrice)
+    }
 
     // Get position and calculate inventory skew
     const state = this.stateManager.getState()
@@ -4503,6 +4558,9 @@ class HyperliquidMMBot {
       this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
       return
     }
+    if (pair === 'ZEC') {
+      this.recordMidPriceSample(pair, midPrice)
+    }
 
     // ══════════════════════════════════════════════════════════════
     // Get REAL position from Hyperliquid (synced via fills)
@@ -4725,6 +4783,9 @@ class HyperliquidMMBot {
         this.notifier.warn(`   Invalid mid price for ${pair}`)
         return
       }
+    if (pair === 'ZEC') {
+      this.recordMidPriceSample(pair, midPrice)
+    }
 
       // Place a taker order (market order with IOC)
       // Alternate between buy and sell to stay balanced
@@ -4751,6 +4812,110 @@ class HyperliquidMMBot {
     } catch (error) {
       this.notifier.error(`   Error executing taker order: ${error}`)
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ZEC DEFENSIVE MODE HELPERS
+  // ───────────────────────────────────────────────────────────────────────────
+
+  private recordMidPriceSample(pair: string, midPrice: number): void {
+    if (pair !== 'ZEC') return
+    if (!Number.isFinite(midPrice) || midPrice <= 0) return
+
+    const now = Date.now()
+    this.zecPriceHistory.push({ t: now, mid: midPrice })
+
+    const retentionMs = getZecDownWindowSec() * 1000 * 2
+    const cutoff = now - retentionMs
+    while (this.zecPriceHistory.length && this.zecPriceHistory[0].t < cutoff) {
+      this.zecPriceHistory.shift()
+    }
+  }
+
+  private isZecDowntrendActive(nowMs: number = Date.now()): boolean {
+    if (this.zecPriceHistory.length < 2) {
+      return false
+    }
+
+    const windowMs = getZecDownWindowSec() * 1000
+    const cutoff = nowMs - windowMs
+
+    while (this.zecPriceHistory.length && this.zecPriceHistory[0].t < cutoff) {
+      this.zecPriceHistory.shift()
+    }
+
+    if (this.zecPriceHistory.length < 2) {
+      return false
+    }
+
+    const first = this.zecPriceHistory[0]
+    const last = this.zecPriceHistory[this.zecPriceHistory.length - 1]
+    if (!first || !last || first.mid <= 0) {
+      return false
+    }
+
+    const movePct = ((last.mid - first.mid) / first.mid) * 100
+    return Number.isFinite(movePct) && movePct <= -getZecDownMovePct()
+  }
+
+  private applyZecDefensiveGuards(params: {
+    side: 'buy' | 'sell'
+    roundedPrice: number
+    currentPosSz: number
+    cetHour: number
+    nowMs: number
+  }): boolean {
+    const { side, roundedPrice, currentPosSz, cetHour, nowMs } = params
+
+    if (side !== 'buy') {
+      return true
+    }
+
+    const curPosSz = currentPosSz
+    if (curPosSz <= 0) {
+      return true
+    }
+
+    const curPosUsd = Math.abs(curPosSz) * Math.max(roundedPrice, 0)
+
+    // Night defensive window (CET 0–7)
+    const inNightWindow = cetHour >= 0 && cetHour < 7
+    if (inNightWindow) {
+      if (isZecNightUnwindOnly()) {
+        console.warn(
+          `[ZEC_DEFENSIVE] Night unwind-only: blocking BUY. curPosUsd=${curPosUsd.toFixed(2)} hour=${cetHour}`
+        )
+        return false
+      }
+
+      const nightMaxUsd = getZecNightMaxPosUsd()
+      if (curPosUsd > nightMaxUsd) {
+        console.warn(
+          `[ZEC_DEFENSIVE] Night max exceeded: blocking BUY. curPosUsd=${curPosUsd.toFixed(2)} max=${nightMaxUsd.toFixed(2)} hour=${cetHour}`
+        )
+        return false
+      }
+    }
+
+    // Downtrend defensive window
+    if (this.isZecDowntrendActive(nowMs)) {
+      if (isZecDefensiveUnwindOnly()) {
+        console.warn(
+          `[ZEC_DEFENSIVE] Downtrend unwind-only: blocking BUY. curPosUsd=${curPosUsd.toFixed(2)} moveThreshold=${getZecDownMovePct()}%`
+        )
+        return false
+      }
+
+      const defensiveMaxUsd = getZecDefensiveMaxPosUsd()
+      if (curPosUsd > defensiveMaxUsd) {
+        console.warn(
+          `[ZEC_DEFENSIVE] Downtrend cap reached: blocking BUY. curPosUsd=${curPosUsd.toFixed(2)} max=${defensiveMaxUsd.toFixed(2)}`
+        )
+        return false
+      }
+    }
+
+    return true
   }
 
   // ───────────────────────────────────────────────────────────────────────────
