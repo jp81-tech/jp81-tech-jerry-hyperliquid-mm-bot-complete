@@ -8,7 +8,7 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string }> =
   'VIRTUAL': { chain: 'base', address: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b' },
   'ZEC': { chain: 'solana', address: 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS' },
   'HYPE': { chain: 'hyperevm', address: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' },
-  'MONO': { chain: 'bnb', address: '0xD4099A517f2Fbe8a730d2ECaad1D0824B75e084a' }
+  'MONO': { chain: 'bsc', address: '0xD4099A517f2Fbe8a730d2ECaad1D0824B75e084a' }
 };
 
 export type MarketRegime = 'bull' | 'bear' | 'sideways' | 'volatile';
