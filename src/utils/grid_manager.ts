@@ -70,7 +70,10 @@ export class GridManager {
     midPrice: number,
     capitalPerPair: number,
     minOrderSize: number = 0.001,
-    inventorySkew: number = 0 // -1 to 1 (negative = net short, positive = net long)
+    inventorySkew: number = 0, // Combined Skew (Position + Vision)
+    permissions: { allowLongs: boolean, allowShorts: boolean, reason?: string } = { allowLongs: true, allowShorts: true },
+    actualSkew: number = 0, // Real Inventory Skew (without Vision)
+    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 }
   ): GridOrder[] {
     if (!this.config.enableMultiLayer) {
       return [] // Fallback to legacy single-layer
@@ -88,43 +91,80 @@ export class GridManager {
       const layerCapital = (capitalPerPair * layer.capitalPct) / 100
       const orderSizeUsd = layerCapital / (layer.ordersPerSide * 2) // Divide by 2 for bid/ask
 
-      // Apply inventory skew adjustment
-      const bidOffsetBps = layer.offsetBps + this.getInventoryAdjustment(inventorySkew, 'bid')
-      const askOffsetBps = layer.offsetBps + this.getInventoryAdjustment(inventorySkew, 'ask')
+      // Apply inventory skew adjustment AND external spread multipliers
+      // Multipliers scale the base layer offset (e.g. Vision/Trend adjustments)
+      // Inventory skew is added on top (additive) or we can rely on AutoSpread logic if passed via multipliers
+      let bidOffsetBps = (layer.offsetBps * spreadMultipliers.bid) + this.getInventoryAdjustment(inventorySkew, 'bid')
+      let askOffsetBps = (layer.offsetBps * spreadMultipliers.ask) + this.getInventoryAdjustment(inventorySkew, 'ask')
+
+      // Safety clamp: Ensure we don't cross the spread (keep at least 2bps width)
+      // This prevents "taking" liquidity with maker orders when skew is strong
+      bidOffsetBps = Math.max(2, bidOffsetBps);
+      askOffsetBps = Math.max(2, askOffsetBps);
+
+      // BIAS LOCK & REGIME GATING: Prevent trading against strong skew OR Institutional Rules
+
+      // 1. Skew Based Lock (With Real Position Safety Check)
+      // If combined skew says "Stop Buying" (>0.15), we respect it UNLESS we are actually Short (< -0.05).
+      // If we are Short, we MUST be allowed to buy back (Take Profit).
+      let skewSkipBids = inventorySkew > 0.15 && actualSkew > -0.05;
+
+      // Similarly for Shorts: If skew says "Stop Selling" (<-0.15), respect UNLESS we are actually Long (> 0.05).
+      let skewSkipAsks = inventorySkew < -0.15 && actualSkew < 0.05;
+
+      // SPECIAL OVERRIDE: If MarketVision signals a "Golden Ticket" (override),
+      // we ignore the Skew Lock to allow the counter-trend entry.
+      if (permissions.reason && permissions.reason.includes('override')) {
+          if (permissions.allowLongs) skewSkipBids = false;
+          if (permissions.allowShorts) skewSkipAsks = false;
+      }
+
+      // 2. Institutional Permissions (Market Vision)
+      // If MarketVision says NO LONGS, we respect it UNLESS we are actually Short.
+      // If Short, we must allow closing bids.
+      const permissionSkipBids = !permissions.allowLongs && actualSkew > -0.05;
+      const permissionSkipAsks = !permissions.allowShorts && actualSkew < 0.05;
+
+      const skipBids = skewSkipBids || permissionSkipBids;
+      const skipAsks = skewSkipAsks || permissionSkipAsks;
 
       // Generate bid orders (stagger prices to avoid duplicates)
-      for (let i = 0; i < layer.ordersPerSide; i++) {
-        // Stagger by 2 bps per order to ensure different ticks after rounding (e.g., 20, 22, 24 bps)
-        const staggerBps = i * 2
-        const bidPrice = midPrice * (1 - (bidOffsetBps + staggerBps) / 10000)
-        const units = orderSizeUsd / bidPrice
+      if (!skipBids) {
+        for (let i = 0; i < layer.ordersPerSide; i++) {
+          // Stagger by 2 bps per order to ensure different ticks after rounding (e.g., 20, 22, 24 bps)
+          const staggerBps = i * 2
+          const bidPrice = midPrice * (1 - (bidOffsetBps + staggerBps) / 10000)
+          const units = orderSizeUsd / bidPrice
 
-        if (units * bidPrice >= minOrderSize) {
-          orders.push({
-            layer: layer.level,
-            side: 'bid',
-            price: bidPrice,
-            sizeUsd: orderSizeUsd,
-            units: units
-          })
+          if (units * bidPrice >= minOrderSize) {
+            orders.push({
+              layer: layer.level,
+              side: 'bid',
+              price: bidPrice,
+              sizeUsd: orderSizeUsd,
+              units: units
+            })
+          }
         }
       }
 
       // Generate ask orders (stagger prices to avoid duplicates)
-      for (let i = 0; i < layer.ordersPerSide; i++) {
-        // Stagger by 2 bps per order to ensure different ticks after rounding
-        const staggerBps = i * 2
-        const askPrice = midPrice * (1 + (askOffsetBps + staggerBps) / 10000)
-        const units = orderSizeUsd / askPrice
+      if (!skipAsks) {
+        for (let i = 0; i < layer.ordersPerSide; i++) {
+          // Stagger by 2 bps per order to ensure different ticks after rounding
+          const staggerBps = i * 2
+          const askPrice = midPrice * (1 + (askOffsetBps + staggerBps) / 10000)
+          const units = orderSizeUsd / askPrice
 
-        if (units * askPrice >= minOrderSize) {
-          orders.push({
-            layer: layer.level,
-            side: 'ask',
-            price: askPrice,
-            sizeUsd: orderSizeUsd,
-            units: units
-          })
+          if (units * askPrice >= minOrderSize) {
+            orders.push({
+              layer: layer.level,
+              side: 'ask',
+              price: askPrice,
+              sizeUsd: orderSizeUsd,
+              units: units
+            })
+          }
         }
       }
     }

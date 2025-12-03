@@ -6,6 +6,10 @@
  * 2. Smart Money Netflow Tracking (5000 top wallets)
  * 3. Token Risk Analysis (Holder concentration)
  * 4. Flow Intelligence (Multi-source aggregation)
+ * 5. Token God Mode (DEX Trades, Transfers, Holders)
+ * 6. Smart Money Activities (DEX Trades, Holdings)
+ * 7. Hyperliquid Specific (Perp Positions, SM Perp Trades)
+ * 8. Whale & Entity Tracking (Wintermute, Jump, etc.)
  */
 
 import axios, { AxiosInstance } from 'axios'
@@ -52,6 +56,8 @@ export interface NansenTokenHolder {
   balance: number
   percentage: number
   value_usd: number
+  balance_change_usd_24h?: number
+  label?: string
 }
 
 export interface NansenFlowIntelligence {
@@ -72,6 +78,29 @@ export interface CopyTradingSignal {
   avg_entry_price: number
   total_position_usd: number
   reason: string
+}
+
+export interface NansenDexTrade {
+  tx_hash: string
+  block_time: string
+  side: 'buy' | 'sell'
+  value_usd: number
+  amount_token: number
+  price_usd: number
+  address: string
+  label?: string
+  token_symbol: string
+}
+
+export interface NansenPerpPositionTgm {
+  address: string
+  token_symbol: string
+  side: 'long' | 'short'
+  position_value_usd: number
+  leverage: number
+  entry_price: number
+  liquidation_price: number
+  unrealized_pnl: number
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -135,7 +164,6 @@ export class NansenProAPI {
     if (cached) return cached
 
     try {
-      // Using perp-screener to get active tokens
       const now = new Date()
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
 
@@ -153,7 +181,6 @@ export class NansenProAPI {
       const traders: NansenPerpTrader[] = response.data.data || []
       this.setCache(cacheKey, traders)
 
-      console.log(`[Nansen Pro] Loaded ${traders.length} top traders`)
       return traders
     } catch (error: any) {
       console.error(`[Nansen Pro] Perp leaderboard failed:`, error.message)
@@ -163,7 +190,6 @@ export class NansenProAPI {
 
   /**
    * Get top traders for specific token using PnL leaderboard
-   * Endpoint: /tgm/perp-pnl-leaderboard
    */
   async getTopTradersForToken(tokenSymbol: string, limit: number = 20): Promise<any[]> {
     if (!this.isEnabled()) return []
@@ -181,9 +207,7 @@ export class NansenProAPI {
         pagination: { page: 1, per_page: limit }
       })
 
-      const traders = response.data.data || []
-      console.log(`[Nansen Pro] Found ${traders.length} top traders for ${tokenSymbol}`)
-      return traders
+      return response.data.data || []
     } catch (error: any) {
       console.error(`[Nansen Pro] PnL leaderboard for ${tokenSymbol} failed:`, error.message)
       return []
@@ -192,7 +216,6 @@ export class NansenProAPI {
 
   /**
    * Get actual positions for a specific wallet address
-   * Endpoint: /profiler/perp-positions (WORKING!)
    */
   async getWalletPositions(walletAddress: string): Promise<any> {
     if (!this.isEnabled()) return null
@@ -211,7 +234,6 @@ export class NansenProAPI {
 
   /**
    * Get current positions of top traders
-   * Uses real wallet positions via /profiler/perp-positions
    */
   async getTopTraderPositions(walletAddresses: string[]): Promise<NansenPerpPosition[]> {
     if (!this.isEnabled() || walletAddresses.length === 0) return []
@@ -219,7 +241,6 @@ export class NansenProAPI {
     try {
       const allPositions: NansenPerpPosition[] = []
 
-      // Fetch positions for each wallet (with rate limiting)
       for (let i = 0; i < Math.min(walletAddresses.length, 10); i++) {
         const wallet = walletAddresses[i]
 
@@ -240,7 +261,7 @@ export class NansenProAPI {
                 side: parseFloat(pos.size) > 0 ? 'LONG' : 'SHORT',
                 size: size,
                 entry_price: parseFloat(pos.entry_price_usd),
-                current_price: parseFloat(pos.entry_price_usd), // Approximate
+                current_price: parseFloat(pos.entry_price_usd),
                 unrealized_pnl_usd: 0,
                 leverage: pos.leverage_value || 1,
                 timestamp: Date.now()
@@ -248,7 +269,6 @@ export class NansenProAPI {
             }
           }
 
-          // Rate limit: 200ms between requests
           if (i < walletAddresses.length - 1) {
             await new Promise(resolve => setTimeout(resolve, 200))
           }
@@ -257,7 +277,6 @@ export class NansenProAPI {
         }
       }
 
-      console.log(`[Nansen Pro] Loaded ${allPositions.length} real positions from ${Math.min(walletAddresses.length, 10)} traders`)
       return allPositions
     } catch (error: any) {
       console.error(`[Nansen Pro] Positions fetch failed:`, error.message)
@@ -267,41 +286,32 @@ export class NansenProAPI {
 
   /**
    * Generate copy-trading signals from top trader positions
-   * Uses real PnL leaderboard data from top tokens
    */
   async getCopyTradingSignals(minConfidence: number = 60, minTraders: number = 3): Promise<CopyTradingSignal[]> {
     if (!this.isEnabled()) return []
 
     try {
-      // Get top tokens from perp screener
       const topTokens = await this.getPerpLeaderboard(10)
       if (topTokens.length === 0) return []
 
       const signals: CopyTradingSignal[] = []
 
-      // For each top token, get the top traders
-      for (const token of topTokens.slice(0, 5)) {  // Limit to top 5 tokens to avoid rate limits
+      for (const token of topTokens.slice(0, 5)) {
         const tokenSymbol = (token as any).token_symbol
         if (!tokenSymbol) continue
 
         try {
-          // Get top traders for this specific token using PnL leaderboard
           const traders = await this.getTopTradersForToken(tokenSymbol, 10)
           if (traders.length < minTraders) continue
 
-          // Get their wallet addresses
           const topWallets = traders.slice(0, 10).map((t: any) => t.trader_address).filter(Boolean)
           if (topWallets.length === 0) continue
 
-          // Get their current positions using profiler endpoint
           const positions = await this.getTopTraderPositions(topWallets)
-
-          // Filter positions for this specific token
           const tokenPositions = positions.filter(p => p.token_symbol === tokenSymbol)
 
           if (tokenPositions.length < minTraders) continue
 
-          // Separate into longs and shorts
           const longs = tokenPositions.filter(p => p.side === 'LONG')
           const shorts = tokenPositions.filter(p => p.side === 'SHORT')
 
@@ -309,16 +319,12 @@ export class NansenProAPI {
           const longCount = longs.length
           const shortCount = shorts.length
 
-          // Determine consensus
           const consensus = longCount > shortCount ? 'LONG' : 'SHORT'
           const majorityCount = Math.max(longCount, shortCount)
-
-          // Calculate confidence (% of traders on same side)
           const confidence = (majorityCount / totalTraders) * 100
 
           if (confidence < minConfidence) continue
 
-          // Calculate average entry and total size
           const relevantPositions = consensus === 'LONG' ? longs : shorts
           const avgEntry = relevantPositions.reduce((sum, p) => sum + p.entry_price, 0) / relevantPositions.length
           const totalSize = relevantPositions.reduce((sum, p) => sum + p.size, 0)
@@ -329,11 +335,10 @@ export class NansenProAPI {
             confidence: Math.round(confidence),
             trader_count: majorityCount,
             avg_entry_price: avgEntry,
-            total_position_usd: totalSize * avgEntry,  // Size * price for USD value
+            total_position_usd: totalSize * avgEntry,
             reason: `${majorityCount}/${totalTraders} top traders ${consensus}`
           })
 
-          // Rate limit between tokens
           await new Promise(resolve => setTimeout(resolve, 300))
 
         } catch (tokenError: any) {
@@ -342,14 +347,7 @@ export class NansenProAPI {
         }
       }
 
-      // Sort by confidence
       signals.sort((a, b) => b.confidence - a.confidence)
-
-      console.log(`[Nansen Pro] Generated ${signals.length} copy-trading signals`)
-      for (const sig of signals.slice(0, 5)) {
-        console.log(`  ${sig.token_symbol}: ${sig.side} @ $${sig.avg_entry_price.toFixed(2)} | ${sig.confidence}% confidence (${sig.trader_count} traders)`)
-      }
-
       return signals
     } catch (error: any) {
       console.error(`[Nansen Pro] Copy-trading signals failed:`, error.message)
@@ -361,9 +359,6 @@ export class NansenProAPI {
   // 2. SMART MONEY NETFLOW TRACKING
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Get smart money netflows (top 5000 wallets)
-   */
   async getSmartMoneyNetflows(tokens: string[], chain: string = 'ethereum'): Promise<NansenSmartMoneyNetflow[]> {
     if (!this.isEnabled() || tokens.length === 0) return []
 
@@ -379,18 +374,11 @@ export class NansenProAPI {
         tokens: tokens,
         chain: chain,
         date: { from: yesterday, to: now },
-        wallet_category: 'smart_money' // top 5000 performers
+        wallet_category: 'smart_money'
       })
 
       const netflows: NansenSmartMoneyNetflow[] = response.data.netflows || []
       this.setCache(cacheKey, netflows)
-
-      console.log(`[Nansen Pro] Smart Money netflows for ${tokens.length} tokens:`)
-      for (const nf of netflows.slice(0, 5)) {
-        const flow = nf.netflow_usd > 0 ? '🟢 IN' : '🔴 OUT'
-        console.log(`  ${nf.token_symbol}: ${flow} $${(Math.abs(nf.netflow_usd) / 1000000).toFixed(2)}M | ${nf.wallet_count} wallets`)
-      }
-
       return netflows
     } catch (error: any) {
       console.error(`[Nansen Pro] Smart money netflows failed:`, error.message)
@@ -399,12 +387,9 @@ export class NansenProAPI {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 3. TOKEN RISK ANALYSIS
+  // 3. TOKEN RISK & HOLDERS
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Analyze token holder concentration (manipulation risk)
-   */
   async analyzeTokenRisk(token: string, chain: string = 'ethereum'): Promise<{
     top10Concentration: number
     smartMoneyHolders: number
@@ -416,24 +401,16 @@ export class NansenProAPI {
     }
 
     try {
-      const response = await this.client.post('/tgm/holders', {
-        token: token,
-        chain: chain,
-        limit: 100
-      })
+      const holders = await this.getHolders(token, chain)
+      if (!holders || holders.length === 0) throw new Error("No holders data")
 
-      const holders: NansenTokenHolder[] = response.data.holders || []
-
-      // Calculate top 10 concentration
       const top10 = holders.slice(0, 10)
       const top10Concentration = top10.reduce((sum, h) => sum + h.percentage, 0)
 
-      // Count smart money holders
       const smartMoneyHolders = holders.filter(h =>
         h.category === 'fund' || h.category === 'smart_lp'
       ).length
 
-      // Determine risk
       const maxTop10 = parseFloat(process.env.MAX_TOP10_CONCENTRATION || '50')
       const minSmartMoney = parseInt(process.env.MIN_SMART_MONEY_HOLDERS || '10')
 
@@ -462,9 +439,6 @@ export class NansenProAPI {
   // 4. FLOW INTELLIGENCE (Multi-source)
   // ═══════════════════════════════════════════════════════════════
 
-  /**
-   * Get comprehensive flow intelligence (exchanges + whales + smart money)
-   */
   async getFlowIntelligence(tokens: string[], chain: string = 'ethereum'): Promise<NansenFlowIntelligence[]> {
     if (!this.isEnabled() || tokens.length === 0) return []
 
@@ -478,18 +452,256 @@ export class NansenProAPI {
         date: { from: yesterday, to: now }
       })
 
-      const flows: NansenFlowIntelligence[] = response.data.flows || []
-
-      console.log(`[Nansen Pro] Flow Intelligence for ${tokens.length} tokens:`)
-      for (const flow of flows.slice(0, 5)) {
-        const direction = flow.flow_direction === 'IN' ? '📈 INFLOW' : flow.flow_direction === 'OUT' ? '📉 OUTFLOW' : '➡️ NEUTRAL'
-        console.log(`  ${flow.token_symbol}: ${direction} | Exchange: $${(flow.exchange_flow_usd / 1000000).toFixed(2)}M | Confidence: ${flow.confidence}%`)
-      }
-
-      return flows
+      return response.data.flows || []
     } catch (error: any) {
       console.error(`[Nansen Pro] Flow intelligence failed:`, error.message)
       return []
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 5. TOKEN GOD MODE & SPECIFIC ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Get DEX trades for a token
+   */
+  async getDexTrades(tokenAddress: string, chain: string, minUsd: number = 10000, mode: string = 'spot'): Promise<NansenDexTrade[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const now = new Date()
+      const hourAgo = new Date(now.getTime() - 3600 * 1000)
+
+      let payload: any;
+
+      if (mode === 'perps') {
+         // Structure for Perps TGM
+         payload = {
+            parameters: {
+                mode: "perps",
+                tokenAddress: tokenAddress,
+                dateRange: { from: hourAgo.toISOString(), to: now.toISOString() }
+            },
+            filters: {
+                valueUsd: { min: minUsd }
+            },
+            order_by: "block_timestamp",
+            order_by_direction: "desc",
+            page: 1
+         };
+      } else {
+         // Standard Spot TGM
+         payload = {
+            chain,
+            token_address: tokenAddress,
+            date_range: { from: hourAgo.toISOString(), to: now.toISOString() },
+            filters: { value_usd: { min: minUsd } },
+            order_by: [{ field: 'block_time', direction: 'DESC' }],
+            pagination: { page: 1, per_page: 20 }
+         };
+      }
+
+      const response = await this.client.post('/tgm/dex-trades', payload)
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] DEX Trades (${mode}) failed for ${tokenAddress}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get Holders
+   */
+  async getHolders(tokenAddress: string, chain: string): Promise<NansenTokenHolder[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const response = await this.client.post('/tgm/holders', {
+        chain,
+        token_address: tokenAddress,
+        label_type: 'smart_money',
+        filters: { value_usd: { min: 50000 } },
+        order_by: [{ field: 'balance_change_usd_24h', direction: 'DESC' }],
+        pagination: { page: 1, per_page: 25 }
+      })
+
+      return response.data.holders || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Holders failed for ${tokenAddress}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get Who Bought/Sold
+   */
+  async getWhoBoughtSold(tokenAddress: string, chain: string): Promise<any[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const now = new Date()
+      const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000)
+
+      const response = await this.client.post('/tgm/who-bought-sold', {
+        chain,
+        token_address: tokenAddress,
+        date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+        filters: {
+          include_smart_money_labels: ["Fund", "30D Smart Trader"],
+          value_usd: { min: 50000 }
+        },
+        order_by: [{ field: 'value_usd', direction: 'DESC' }]
+      })
+
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Who Bought/Sold failed:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get Perp Positions (TGM) - specific for Hyperliquid Perps
+   */
+  async getTgmPerpPositions(token: string, chain: string = 'hyperliquid', minUsd: number = 100000): Promise<NansenPerpPositionTgm[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      // Structure based on provided Python script for Perps mode
+      const payload = {
+        parameters: {
+          mode: "perps",
+          tokenAddress: token,
+          labelType: "smart_money"
+        },
+        filters: {
+           positionValueUsd: { from: minUsd }
+        },
+        order_by: "position_value_usd",
+        order_by_direction: "desc",
+        page: 1
+      };
+
+      const response = await this.client.post('/tgm/perp-positions', payload)
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] TGM Perp Positions failed for ${token}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get Smart Money Perp Trades
+   */
+  async getSmartMoneyPerpTrades(symbol: string, chain: string = 'hyperliquid'): Promise<any[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const now = new Date()
+      const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000)
+
+      const response = await this.client.post('/smart-money/perp-trades', {
+        chain,
+        symbol,
+        date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+        filters: { value_usd: { min: 50000 } },
+        order_by: [{ field: 'block_time', direction: 'DESC' }]
+      })
+
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] SM Perp Trades failed for ${symbol}:`, error.message)
+      return []
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 6. WHALE & ENTITY TRACKING
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Get entity activity (counterparties)
+   */
+  async getEntityCounterparties(entityId: string, chain: string = 'all'): Promise<any[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const response = await this.client.post('/profiler/entity/counterparties', {
+        entity_id: entityId,
+        chain: chain,
+        date_range: { from: '1D_AGO', to: 'NOW' },
+        order_by: [{ field: 'volume_out_usd', direction: 'DESC' }],
+        pagination: { page: 1, per_page: 50 }
+      })
+
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Entity counterparties failed for ${entityId}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get address transactions
+   */
+  async getAddressTransactions(address: string, chain: string = 'ethereum'): Promise<any[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const response = await this.client.post('/profiler/address/transactions', {
+        address: address,
+        chain: chain,
+        date_range: { from: '1H_AGO', to: 'NOW' },
+        pagination: { page: 1, per_page: 20 }
+      })
+
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Address txs failed for ${address}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get large token transfers
+   */
+  async getTokenTransfers(tokenAddress: string, chain: string, minUsd: number = 50000): Promise<any[]> {
+    if (!this.isEnabled()) return []
+
+    try {
+      const response = await this.client.post('/tgm/transfers', {
+        chain: chain,
+        token_address: tokenAddress,
+        date_range: { from: '1H_AGO', to: 'NOW' },
+        filters: { value_usd: { min: minUsd } },
+        order_by: [{ field: 'block_timestamp', direction: 'DESC' }],
+        pagination: { page: 1, per_page: 50 }
+      })
+
+      return response.data.data || []
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Token transfers failed for ${tokenAddress}:`, error.message)
+      return []
+    }
+  }
+
+  /**
+   * Get Token Overview (Liquidity, FDV, Price)
+   */
+  async getTokenOverview(tokenAddress: string, chain: string): Promise<any> {
+    if (!this.isEnabled()) return null
+
+    try {
+      const response = await this.client.post('/tgm/token-overview', {
+        chain,
+        token_address: tokenAddress
+      })
+
+      return response.data.data || null
+    } catch (error: any) {
+      console.error(`[Nansen Pro] Token Overview failed for ${tokenAddress}:`, error.message)
+      return null
     }
   }
 
