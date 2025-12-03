@@ -324,7 +324,7 @@ export class MarketVisionService {
 
                     if (nansenRiskScore >= 7) {
                         nansenScore -= (nansenRiskScore - 5) * 2; // High risk -> negative bias
-                        // console.log(`⚠️  [NANSEN RISK] ${pair} High Risk: ${nansenRiskScore} (${nansenRiskReason})`);
+                        console.log(`🧊 [NANSEN RISK] ${pair} High Risk: ${nansenRiskScore.toFixed(1)} (${nansenRiskReason})`);
                     } else if (nansenRiskScore <= 3) {
                         nansenScore += (5 - nansenRiskScore) * 1.5; // Low risk -> positive bias
                     }
