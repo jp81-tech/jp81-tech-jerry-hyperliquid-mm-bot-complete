@@ -1,0 +1,6 @@
+2025-12-02T20:00:00.000000,risk,MON,pancakeswap,bnb,safe,120000.0,0.15,-1.0,-2.0,-5.0
+2025-12-02T20:10:00.000000,risk,MON,pancakeswap,bnb,risky,60000.0,0.04,-45.0,-48.0,-50.0
+2025-12-02T20:15:01.000000,risk,MON,pancakeswap,bnb,RUG_DETECTED,5000.0,0.005,-90.0,-95.0,-98.0
+2025-12-02T20:15:01.000000,unlock,VIRTUAL,uniswap,base,LiquidityRisk.RISKY,,,,,
+
+2025-12-02T21:00:00.000000,risk,MON,pancakeswap,bnb,RUG_DETECTED,5000.0,0.005,-90.0,-95.0,-98.0

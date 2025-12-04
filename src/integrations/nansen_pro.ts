@@ -103,6 +103,23 @@ export interface NansenPerpPositionTgm {
   unrealized_pnl: number
 }
 
+export interface TokenFlowSignals {
+  tokenAddress: string
+  chain: string
+  smartMoneyNet: number
+  whaleNet: number
+  exchangeNet: number
+  freshWalletNet: number
+  topPnlNet: number
+  trades1h: number
+  buyCount: number
+  sellCount: number
+  confidence: number      // 0..1
+  dataSource: 'full' | 'flows_fallback' | 'partial'
+  dataQuality: 'full' | 'partial' | 'minimal' | 'dead'
+  warnings: string[]
+}
+
 // ═══════════════════════════════════════════════════════════════
 // NANSEN PRO API CLIENT
 // ═══════════════════════════════════════════════════════════════
@@ -111,7 +128,12 @@ export class NansenProAPI {
   private client: AxiosInstance
   private apiKey: string
   private cache: Map<string, { data: any; timestamp: number }> = new Map()
+  private riskCache: Map<string, { score: number; components: any; timestamp: number }> = new Map()
   private cacheTtlMs = 300000 // 5 minutes for most endpoints
+  // Simple circuit breaker per endpoint+chain
+  private circuit: Map<string, { state: 'CLOSED' | 'OPEN'; failures: number; lastFailure: number }> = new Map()
+  private failureThreshold = 3
+  private cooldownMs = 60_000
 
   constructor(apiKey?: string) {
     this.apiKey = apiKey || process.env.NANSEN_API_KEY || ''
@@ -132,6 +154,112 @@ export class NansenProAPI {
 
   isEnabled(): boolean {
     return this.apiKey.length > 0 && process.env.NANSEN_ENABLED === 'true'
+  }
+
+  // ── Helpers: error handling & chain guard ─────────────────────
+  private key(endpoint: string, chain: string) {
+    return `${endpoint}:${chain}`
+  }
+
+  private circuitAvailable(endpoint: string, chain: string): boolean {
+    const k = this.key(endpoint, chain)
+    const info = this.circuit.get(k)
+    if (!info || info.state === 'CLOSED') return true
+    const elapsed = Date.now() - info.lastFailure
+    if (elapsed > this.cooldownMs) {
+      this.circuit.set(k, { state: 'CLOSED', failures: 0, lastFailure: 0 })
+      return true
+    }
+    return false
+  }
+
+  private recordFailure(endpoint: string, chain: string) {
+    const k = this.key(endpoint, chain)
+    const info = this.circuit.get(k) || { state: 'CLOSED', failures: 0, lastFailure: 0 }
+    info.failures += 1
+    info.lastFailure = Date.now()
+    if (info.failures >= this.failureThreshold) {
+      info.state = 'OPEN'
+      console.debug(`[Nansen Pro] Circuit OPEN for ${k}`)
+    }
+    this.circuit.set(k, info)
+  }
+
+  private recordSuccess(endpoint: string, chain: string) {
+    const k = this.key(endpoint, chain)
+    this.circuit.set(k, { state: 'CLOSED', failures: 0, lastFailure: 0 })
+  }
+
+  // ── Helpers: error handling & chain guard ─────────────────────
+  private logError(error: any, context: string) {
+    const code = error?.response?.status
+    // Cicho dla znanych błędów na nieobsługiwanych tokenach/łańcuchach
+    if (code === 404 || code === 422) {
+      console.debug(`[Nansen Pro] ${context} skipped (status=${code})`)
+      return
+    }
+    console.error(`[Nansen Pro] ${context}:`, error?.message || error)
+  }
+
+  private isChainUnsupported(chain: string): boolean {
+    // HL-native / BTC / inne niestandardowe nie mają sensownych danych TGM
+    const unsupported = ['hyperliquid', 'bitcoin']
+    return unsupported.includes(chain.toLowerCase())
+  }
+
+  private async sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  /**
+   * Resilient POST with basic retry/fallback and circuit breaker.
+   * Returns response.data or null on failure.
+   */
+  private async postWithResilience(
+    endpoint: string,
+    payload: any,
+    chain: string,
+    fallbackEndpoints: string[] = []
+  ): Promise<any | null> {
+    const targets = [endpoint, ...fallbackEndpoints]
+
+    for (const ep of targets) {
+      if (!this.circuitAvailable(ep, chain)) {
+        console.debug(`[Nansen Pro] Circuit open, skip ${ep} chain=${chain}`)
+        continue
+      }
+
+      try {
+        const res = await this.client.post(ep, payload)
+        this.recordSuccess(ep, chain)
+        return res.data
+      } catch (error: any) {
+        const code = error?.response?.status
+
+        // Retry on 429 / timeout once with backoff
+        if (code === 429) {
+          await this.sleep(5000)
+          continue
+        }
+        if (code === 408) {
+          await this.sleep(2000)
+          continue
+        }
+
+        // 404 / 422: try next fallback quietly
+        if (code === 404 || code === 422) {
+          this.recordFailure(ep, chain)
+          console.debug(`[Nansen Pro] ${ep} skipped (status=${code})`)
+          continue
+        }
+
+        // Other errors
+        this.recordFailure(ep, chain)
+        this.logError(error, `POST ${ep}`)
+      }
+    }
+
+    return null
   }
 
   private getCached<T>(key: string, ttlMs?: number): T | null {
@@ -361,6 +489,10 @@ export class NansenProAPI {
 
   async getSmartMoneyNetflows(tokens: string[], chain: string = 'ethereum'): Promise<NansenSmartMoneyNetflow[]> {
     if (!this.isEnabled() || tokens.length === 0) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] Smart money netflows skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     const cacheKey = `sm_netflow_${tokens.join(',')}_${chain}`
     const cached = this.getCached<NansenSmartMoneyNetflow[]>(cacheKey)
@@ -370,18 +502,23 @@ export class NansenProAPI {
       const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
       const now = new Date().toISOString()
 
-      const response = await this.client.post('/smart-money/netflows', {
-        tokens: tokens,
-        chain: chain,
-        date: { from: yesterday, to: now },
-        wallet_category: 'smart_money'
-      })
+      const data = await this.postWithResilience(
+        '/smart-money/netflows',
+        {
+          tokens: tokens,
+          chain: chain,
+          date: { from: yesterday, to: now },
+          wallet_category: 'smart_money'
+        },
+        chain,
+        ['/tgm/token_flows', '/tgm/top_holders'] // fallback idea; non-critical
+      )
 
-      const netflows: NansenSmartMoneyNetflow[] = response.data.netflows || []
+      const netflows: NansenSmartMoneyNetflow[] = data?.netflows || []
       this.setCache(cacheKey, netflows)
       return netflows
     } catch (error: any) {
-      console.error(`[Nansen Pro] Smart money netflows failed:`, error.message)
+      this.logError(error, 'Smart money netflows failed')
       return []
     }
   }
@@ -435,26 +572,242 @@ export class NansenProAPI {
     }
   }
 
+  /**
+   * Aggregate Nansen risk into a single score 0–10 for a given token.
+   *
+   * Components:
+   * - Holder concentration / smart money presence  (analyzeTokenRisk)
+   * - Flow intelligence (exchange / whale / smart money flows)
+   *
+   * 0  = ultra low risk (blue chip, healthy flows)
+   * 5  = neutral / unknown
+   * 10 = very high risk (concentrated, heavy sell / exchange inflows)
+   */
+  async getTokenRiskScore(tokenAddress: string, chain: string = 'ethereum'): Promise<{
+    score: number
+    components: {
+      top10Concentration: number
+      smartMoneyHolders: number
+      holderRiskLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+      exchangeFlowUsd: number
+      whaleFlowUsd: number
+      smartMoneyFlowUsd: number
+      flowDirection: 'IN' | 'OUT' | 'NEUTRAL' | 'UNKNOWN'
+      reason: string
+    }
+  }> {
+    // Baseline: neutral risk
+    let score = 5
+    let reasonParts: string[] = []
+
+    if (!this.isEnabled()) {
+      return {
+        score,
+        components: {
+          top10Concentration: 0,
+          smartMoneyHolders: 0,
+          holderRiskLevel: 'MEDIUM',
+          exchangeFlowUsd: 0,
+          whaleFlowUsd: 0,
+          smartMoneyFlowUsd: 0,
+          flowDirection: 'UNKNOWN',
+          reason: 'Nansen disabled'
+        }
+      }
+    }
+
+    if (this.isChainUnsupported(chain)) {
+      return {
+        score,
+        components: {
+          top10Concentration: 0,
+          smartMoneyHolders: 0,
+          holderRiskLevel: 'MEDIUM',
+          exchangeFlowUsd: 0,
+          whaleFlowUsd: 0,
+          smartMoneyFlowUsd: 0,
+          flowDirection: 'UNKNOWN',
+          reason: `Unsupported chain=${chain}`
+        }
+      }
+    }
+
+    try {
+      // 1) Holder / concentration risk
+      const holderRisk = await this.analyzeTokenRisk(tokenAddress, chain)
+      const { top10Concentration, smartMoneyHolders, riskLevel, reason: holderReason } = holderRisk
+
+      // Map holder risk level to score adjustment
+      if (riskLevel === 'HIGH') {
+        score += 2 // concentrated / weak distribution
+        reasonParts.push(`Holder risk HIGH: ${holderReason}`)
+      } else if (riskLevel === 'LOW') {
+        score -= 1 // healthy distribution slightly reduces risk
+        reasonParts.push(`Holder risk LOW: ${holderReason}`)
+      } else {
+        reasonParts.push(`Holder risk MEDIUM: ${holderReason}`)
+      }
+
+      // 2) Flow intelligence (exchange / whale / smart money)
+      const flowsArr = await this.getFlowIntelligence([tokenAddress], chain)
+      let exchangeFlowUsd = 0
+      let whaleFlowUsd = 0
+      let smartMoneyFlowUsd = 0
+      let flowDirection: 'IN' | 'OUT' | 'NEUTRAL' | 'UNKNOWN' = 'UNKNOWN'
+
+      if (flowsArr && flowsArr.length > 0) {
+        const f = flowsArr[0]
+        exchangeFlowUsd = f.exchange_flow_usd || 0
+        whaleFlowUsd = f.whale_flow_usd || 0
+        smartMoneyFlowUsd = f.smart_money_flow_usd || 0
+        flowDirection = f.flow_direction || 'NEUTRAL'
+
+        // Exchange inflows (tokens moving TO exchanges) -> selling pressure
+        if (exchangeFlowUsd > 500_000) {
+          score += 2
+          reasonParts.push(`High exchange inflows ${exchangeFlowUsd.toFixed(0)} USD`)
+        } else if (exchangeFlowUsd > 100_000) {
+          score += 1
+          reasonParts.push(`Moderate exchange inflows ${exchangeFlowUsd.toFixed(0)} USD`)
+        }
+
+        // Smart money exiting
+        if (smartMoneyFlowUsd < -100_000) {
+          score += 2
+          reasonParts.push(`Smart money net outflow ${smartMoneyFlowUsd.toFixed(0)} USD`)
+        }
+
+        // Whale dumps
+        if (whaleFlowUsd < -250_000) {
+          score += 2
+          reasonParts.push(`Whale net outflow ${whaleFlowUsd.toFixed(0)} USD`)
+        }
+
+        // If flow direction is clearly OUT and total flow is big, add a bit more
+        if (flowDirection === 'OUT' && Math.abs(f.total_flow_usd || 0) > 500_000) {
+          score += 1
+          reasonParts.push(`Overall flow direction OUT with size ${Math.abs((f.total_flow_usd || 0)).toFixed(0)} USD`)
+        }
+      } else {
+        reasonParts.push('No flow intelligence data')
+      }
+
+      // Clamp score to [0, 10]
+      if (score < 0) score = 0
+      if (score > 10) score = 10
+
+      const reasonText = reasonParts.join('; ') || 'Neutral'
+      console.info(
+        `[Nansen Pro] RISK ${tokenAddress} chain=${chain} score=${score}/10 – ${reasonText}`
+      )
+
+      return {
+        score,
+        components: {
+          top10Concentration,
+          smartMoneyHolders,
+          holderRiskLevel: riskLevel,
+          exchangeFlowUsd,
+          whaleFlowUsd,
+          smartMoneyFlowUsd,
+          flowDirection,
+          reason: reasonText
+        }
+      }
+    } catch (error: any) {
+      this.logError(error, `Token risk score failed for ${tokenAddress}`)
+      return {
+        score,
+        components: {
+          top10Concentration: 0,
+          smartMoneyHolders: 0,
+          holderRiskLevel: 'MEDIUM',
+          exchangeFlowUsd: 0,
+          whaleFlowUsd: 0,
+          smartMoneyFlowUsd: 0,
+          flowDirection: 'UNKNOWN',
+          reason: 'Risk score calculation failed'
+        }
+      }
+    }
+  }
+
+  /**
+   * Throttled wrapper around getTokenRiskScore with in-memory cache.
+   * - Caches result per (token, chain) for ttlMs (default 15 minutes).
+   * - Logs REFRESH on fresh fetch and cache HIT on reuse.
+   */
+  async getThrottledTokenRiskScore(
+    tokenAddress: string,
+    chain: string = 'ethereum',
+    ttlMs: number = 15 * 60 * 1000
+  ): Promise<{
+    score: number
+    components: {
+      top10Concentration: number
+      smartMoneyHolders: number
+      holderRiskLevel: 'LOW' | 'MEDIUM' | 'HIGH'
+      exchangeFlowUsd: number
+      whaleFlowUsd: number
+      smartMoneyFlowUsd: number
+      flowDirection: 'IN' | 'OUT' | 'NEUTRAL' | 'UNKNOWN'
+      reason: string
+    }
+  }> {
+    const key = `${tokenAddress.toLowerCase()}:${chain.toLowerCase()}`
+    const cached = this.riskCache.get(key)
+    const now = Date.now()
+
+    if (cached && now - cached.timestamp < ttlMs) {
+      console.info(
+        `[Nansen Pro] RISK cache HIT ${tokenAddress} chain=${chain} score=${cached.score}/10 – ${cached.components.reason}`
+      )
+      return { score: cached.score, components: cached.components }
+    }
+
+    const result = await this.getTokenRiskScore(tokenAddress, chain)
+
+    this.riskCache.set(key, {
+      score: result.score,
+      components: result.components,
+      timestamp: now
+    })
+
+    console.info(
+      `[Nansen Pro] RISK REFRESH ${tokenAddress} chain=${chain} score=${result.score}/10 – ${result.components.reason}`
+    )
+
+    return result
+  }
+
   // ═══════════════════════════════════════════════════════════════
   // 4. FLOW INTELLIGENCE (Multi-source)
   // ═══════════════════════════════════════════════════════════════
 
   async getFlowIntelligence(tokens: string[], chain: string = 'ethereum'): Promise<NansenFlowIntelligence[]> {
     if (!this.isEnabled() || tokens.length === 0) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] Flow intelligence skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
       const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
       const now = new Date().toISOString()
 
-      const response = await this.client.post('/tgm/flow-intelligence', {
-        tokens: tokens,
-        chain: chain,
-        date: { from: yesterday, to: now }
-      })
+      const data = await this.postWithResilience(
+        '/tgm/flow-intelligence',
+        {
+          tokens: tokens,
+          chain: chain,
+          date: { from: yesterday, to: now }
+        },
+        chain
+      )
 
-      return response.data.flows || []
+      return data?.flows || []
     } catch (error: any) {
-      console.error(`[Nansen Pro] Flow intelligence failed:`, error.message)
+      this.logError(error, 'Flow intelligence failed')
       return []
     }
   }
@@ -468,6 +821,10 @@ export class NansenProAPI {
    */
   async getDexTrades(tokenAddress: string, chain: string, minUsd: number = 10000, mode: string = 'spot'): Promise<NansenDexTrade[]> {
     if (!this.isEnabled()) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] DEX trades skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
       const now = new Date()
@@ -476,36 +833,40 @@ export class NansenProAPI {
       let payload: any;
 
       if (mode === 'perps') {
-         // Structure for Perps TGM
-         payload = {
-            parameters: {
-                mode: "perps",
-                tokenAddress: tokenAddress,
-                dateRange: { from: hourAgo.toISOString(), to: now.toISOString() }
-            },
-            filters: {
-                valueUsd: { min: minUsd }
-            },
-            order_by: "block_timestamp",
-            order_by_direction: "desc",
-            page: 1
-         };
+        // Structure for Perps TGM
+        payload = {
+          parameters: {
+            mode: "perps",
+            tokenAddress: tokenAddress,
+            dateRange: { from: hourAgo.toISOString(), to: now.toISOString() }
+          },
+          filters: {
+            valueUsd: { min: minUsd }
+          },
+          order_by: "block_timestamp",
+          order_by_direction: "desc",
+          page: 1
+        };
       } else {
-         // Standard Spot TGM
-         payload = {
-            chain,
-            token_address: tokenAddress,
-            date_range: { from: hourAgo.toISOString(), to: now.toISOString() },
-            filters: { value_usd: { min: minUsd } },
-            order_by: [{ field: 'block_time', direction: 'DESC' }],
-            pagination: { page: 1, per_page: 20 }
-         };
+        // Standard Spot TGM
+        payload = {
+          chain,
+          token_address: tokenAddress,
+          date_range: { from: hourAgo.toISOString(), to: now.toISOString() },
+          filters: { value_usd: { min: minUsd } },
+          order_by: [{ field: 'block_time', direction: 'DESC' }],
+          pagination: { page: 1, per_page: 20 }
+        };
       }
 
-      const response = await this.client.post('/tgm/dex-trades', payload)
-      return response.data.data || []
+      const data = await this.postWithResilience(
+        '/tgm/dex-trades',
+        payload,
+        chain
+      )
+      return data?.data || []
     } catch (error: any) {
-      console.error(`[Nansen Pro] DEX Trades (${mode}) failed for ${tokenAddress}:`, error.message)
+      this.logError(error, `DEX Trades (${mode}) failed for ${tokenAddress}`)
       return []
     }
   }
@@ -515,20 +876,28 @@ export class NansenProAPI {
    */
   async getHolders(tokenAddress: string, chain: string): Promise<NansenTokenHolder[]> {
     if (!this.isEnabled()) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] Holders skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
-      const response = await this.client.post('/tgm/holders', {
-        chain,
-        token_address: tokenAddress,
-        label_type: 'smart_money',
-        filters: { value_usd: { min: 50000 } },
-        order_by: [{ field: 'balance_change_usd_24h', direction: 'DESC' }],
-        pagination: { page: 1, per_page: 25 }
-      })
+      const data = await this.postWithResilience(
+        '/tgm/holders',
+        {
+          chain,
+          token_address: tokenAddress,
+          label_type: 'smart_money',
+          filters: { value_usd: { min: 50000 } },
+          order_by: [{ field: 'balance_change_usd_24h', direction: 'DESC' }],
+          pagination: { page: 1, per_page: 25 }
+        },
+        chain
+      )
 
-      return response.data.holders || []
+      return data?.holders || []
     } catch (error: any) {
-      console.error(`[Nansen Pro] Holders failed for ${tokenAddress}:`, error.message)
+      this.logError(error, `Holders failed for ${tokenAddress}`)
       return []
     }
   }
@@ -538,25 +907,33 @@ export class NansenProAPI {
    */
   async getWhoBoughtSold(tokenAddress: string, chain: string): Promise<any[]> {
     if (!this.isEnabled()) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] WhoBoughtSold skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
       const now = new Date()
       const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000)
 
-      const response = await this.client.post('/tgm/who-bought-sold', {
-        chain,
-        token_address: tokenAddress,
-        date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
-        filters: {
-          include_smart_money_labels: ["Fund", "30D Smart Trader"],
-          value_usd: { min: 50000 }
+      const data = await this.postWithResilience(
+        '/tgm/who-bought-sold',
+        {
+          chain,
+          token_address: tokenAddress,
+          date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+          filters: {
+            include_smart_money_labels: ["Fund", "30D Smart Trader"],
+            value_usd: { min: 50000 }
+          },
+          order_by: [{ field: 'value_usd', direction: 'DESC' }]
         },
-        order_by: [{ field: 'value_usd', direction: 'DESC' }]
-      })
+        chain
+      )
 
-      return response.data.data || []
+      return data?.data || []
     } catch (error: any) {
-      console.error(`[Nansen Pro] Who Bought/Sold failed:`, error.message)
+      this.logError(error, 'Who Bought/Sold failed')
       return []
     }
   }
@@ -566,6 +943,10 @@ export class NansenProAPI {
    */
   async getTgmPerpPositions(token: string, chain: string = 'hyperliquid', minUsd: number = 100000): Promise<NansenPerpPositionTgm[]> {
     if (!this.isEnabled()) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] TGM Perp Positions skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
       // Structure based on provided Python script for Perps mode
@@ -576,17 +957,21 @@ export class NansenProAPI {
           labelType: "smart_money"
         },
         filters: {
-           positionValueUsd: { from: minUsd }
+          positionValueUsd: { from: minUsd }
         },
         order_by: "position_value_usd",
         order_by_direction: "desc",
         page: 1
       };
 
-      const response = await this.client.post('/tgm/perp-positions', payload)
-      return response.data.data || []
+      const data = await this.postWithResilience(
+        '/tgm/perp-positions',
+        payload,
+        chain
+      )
+      return data?.data || []
     } catch (error: any) {
-      console.error(`[Nansen Pro] TGM Perp Positions failed for ${token}:`, error.message)
+      this.logError(error, `TGM Perp Positions failed for ${token}`)
       return []
     }
   }
@@ -596,6 +981,10 @@ export class NansenProAPI {
    */
   async getSmartMoneyPerpTrades(symbol: string, chain: string = 'hyperliquid'): Promise<any[]> {
     if (!this.isEnabled()) return []
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] SM Perp Trades skipped for unsupported chain=${chain}`)
+      return []
+    }
 
     try {
       const now = new Date()
@@ -691,18 +1080,325 @@ export class NansenProAPI {
    */
   async getTokenOverview(tokenAddress: string, chain: string): Promise<any> {
     if (!this.isEnabled()) return null
-
-    try {
-      const response = await this.client.post('/tgm/token-overview', {
-        chain,
-        token_address: tokenAddress
-      })
-
-      return response.data.data || null
-    } catch (error: any) {
-      console.error(`[Nansen Pro] Token Overview failed for ${tokenAddress}:`, error.message)
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] Token overview skipped for unsupported chain=${chain}`)
       return null
     }
+
+    try {
+      const data = await this.postWithResilience(
+        '/tgm/token-overview',
+        {
+          chain,
+          token_address: tokenAddress
+        },
+        chain,
+        [
+          '/tgm/token-recent-flows-summary',
+          '/tgm/dex-trades',
+          '/tgm/holders'
+        ]
+      )
+
+      return data?.data || null
+    } catch (error: any) {
+      this.logError(error, `Token Overview failed for ${tokenAddress}`)
+      return null
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // 7. TOKEN SPECIFIC ADAPTERS (ZEC, VIRTUAL, ETC.)
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Generic Token Flow Signals (flows + holders + dex-trades) with fallbacks.
+   * Designed to mirror the Python-style adapter from Nansen AI.
+   */
+  async getTokenFlowSignals(tokenAddress: string, chain: string): Promise<TokenFlowSignals | null> {
+    if (!this.isEnabled()) return null
+    if (this.isChainUnsupported(chain)) {
+      console.debug(`[Nansen Pro] TokenFlowSignals skipped for unsupported chain=${chain}`)
+      return null
+    }
+
+    const signals: TokenFlowSignals = {
+      tokenAddress,
+      chain,
+      smartMoneyNet: 0,
+      whaleNet: 0,
+      exchangeNet: 0,
+      freshWalletNet: 0,
+      topPnlNet: 0,
+      trades1h: 0,
+      buyCount: 0,
+      sellCount: 0,
+      confidence: 1.0,
+      dataSource: 'full',
+      dataQuality: 'full',
+      warnings: []
+    }
+
+    // ── 1) FLOWS (recent flows summary) ─────────────────────────
+    try {
+      // Use flow-intelligence as proxy for "flows summary"
+      const flowsArr = await this.getFlowIntelligence([tokenAddress], chain)
+      const f = flowsArr && flowsArr[0]
+
+      if (f) {
+        // Interpretation:
+        // exchange_flow_usd ~ exchange_net_flow_usd
+        // whale_flow_usd   ~ whale_net_flow_usd
+        // smart_money_flow_usd ~ smart_money_net_flow_usd
+        signals.whaleNet = f.whale_flow_usd || 0
+        signals.exchangeNet = f.exchange_flow_usd || 0
+        signals.smartMoneyNet = f.smart_money_flow_usd || 0
+        // Use total_flow_usd as proxy for top_pnl_net if needed, or just keep as separate metric
+        signals.topPnlNet = f.total_flow_usd || 0
+      } else {
+        signals.confidence *= 0.7
+        signals.dataSource = 'partial'
+      }
+    } catch (e: any) {
+      this.logError(e, `TokenFlowSignals: flows failed for ${tokenAddress}`)
+      signals.confidence *= 0.5
+      signals.dataSource = 'partial'
+      signals.warnings.push('flows failed')
+    }
+
+    // ── 2) HOLDERS (smart money) – weak on ZEC/SOL ─────
+    try {
+      const holders = await this.getHolders(tokenAddress, chain)
+      const activeSm = holders.filter(h => (h.balance || 0) > 0)
+
+      if (activeSm.length >= 5) {
+        // Future: calculate net change from holders
+      } else {
+        // Fallback: use topPnlNet/smartMoneyNet from flows if holders are empty/insufficient
+        if (signals.smartMoneyNet === 0 && signals.topPnlNet !== 0) {
+          signals.smartMoneyNet = signals.topPnlNet
+          signals.confidence *= 0.8
+          signals.dataSource = 'flows_fallback'
+        }
+      }
+    } catch (e: any) {
+      this.logError(e, `TokenFlowSignals: holders failed for ${tokenAddress}`)
+      // If holders fail, stick to flows
+      if (signals.smartMoneyNet === 0 && signals.topPnlNet !== 0) {
+        signals.smartMoneyNet = signals.topPnlNet
+      }
+      signals.confidence *= 0.8
+      signals.warnings.push('holders failed')
+    }
+
+    // ── 3) DEX TRADES (Activity) ────────────────────────────────
+    try {
+      const trades = await this.getDexTrades(tokenAddress, chain, 10_000 /* minUsd */)
+      if (trades && trades.length > 0) {
+        signals.trades1h = trades.length
+        signals.buyCount = trades.filter(t => t.side === 'buy').length
+        signals.sellCount = trades.filter(t => t.side === 'sell').length
+      }
+    } catch (e: any) {
+      this.logError(e, `TokenFlowSignals: dex trades failed for ${tokenAddress}`)
+      signals.trades1h = 0
+      signals.warnings.push('dex trades failed')
+    }
+
+    // Derive dataQuality based on available info
+    if (
+      signals.trades1h === 0 &&
+      signals.whaleNet === 0 &&
+      signals.exchangeNet === 0 &&
+      signals.smartMoneyNet === 0
+    ) {
+      signals.dataQuality = 'dead'
+    } else if (signals.dataSource === 'full') {
+      signals.dataQuality = 'full'
+    } else if (signals.dataSource === 'flows_fallback') {
+      signals.dataQuality = 'partial'
+    } else {
+      signals.dataQuality = 'minimal'
+    }
+
+    return signals
+  }
+
+  /**
+   * Generic spread multiplier based on TokenFlowSignals.
+   * Can be reused for any token, clamped to [min, max].
+   */
+  private computeSpreadMultiplierForSignals(
+    signals: TokenFlowSignals,
+    min: number = 0.8,
+    max: number = 2.0
+  ): number {
+    let mult = 1.0
+
+    const whale = Math.abs(signals.whaleNet)
+    if (whale > 100_000) mult += 0.3
+    if (whale > 500_000) mult += 0.5
+
+    const exch = signals.exchangeNet
+    if (exch > 100_000) mult += 0.4
+    if (exch > 500_000) mult += 0.6
+
+    if (Math.abs(signals.smartMoneyNet) > 50_000) {
+      mult += 0.2
+    }
+
+    if (signals.dataQuality === 'partial') {
+      mult += 0.15
+    } else if (signals.dataQuality === 'minimal') {
+      mult += 0.3
+    } else if (signals.dataQuality === 'dead') {
+      mult += 1.0
+    }
+
+    if (signals.confidence < 0.7) {
+      mult += 0.2
+    }
+
+    if (mult < min) mult = min
+    if (mult > max) mult = max
+    return mult
+  }
+
+  /**
+   * Generic kill-switch based on TokenFlowSignals.
+   */
+  private computeKillSwitchForSignals(
+    signals: TokenFlowSignals,
+    label: string
+  ): { pause: boolean; reason?: string } {
+    if (signals.dataQuality === 'dead') {
+      return { pause: true, reason: `💀 ${label}: token appears dead (no flows/activity)` }
+    }
+
+    // Minimal data + zero activity -> pause until market wakes up
+    if (
+      signals.dataQuality === 'minimal' &&
+      signals.trades1h === 0 &&
+      Math.abs(signals.whaleNet) +
+      Math.abs(signals.exchangeNet) +
+      Math.abs(signals.smartMoneyNet) <
+      10_000
+    ) {
+      return {
+        pause: true,
+        reason: `⚠️ ${label}: low data quality & no activity – paused until Nansen signals improve`
+      }
+    }
+
+    if (signals.whaleNet < -500_000) {
+      return { pause: true, reason: `🐳 ${label}: whale dump ${signals.whaleNet.toFixed(0)} USD` }
+    }
+
+    if (signals.exchangeNet > 1_000_000) {
+      return { pause: true, reason: `📥 ${label}: massive exchange inflow ${signals.exchangeNet.toFixed(0)} USD` }
+    }
+
+    if (signals.confidence < 0.5) {
+      return {
+        pause: true,
+        reason: `⚠️ ${label}: low Nansen data confidence (${Math.round(
+          signals.confidence * 100
+        )}%) – paused until confidence recovers`
+      }
+    }
+
+    return { pause: false }
+  }
+
+  /**
+   * Helper for ZEC on Solana
+   */
+  async getZecSolSignals(): Promise<TokenFlowSignals | null> {
+    const ZEC_SOL = 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS'
+    return this.getTokenFlowSignals(ZEC_SOL, 'solana')
+  }
+
+  /**
+   * Spread multiplier specifically tuned for ZEC on Solana.
+   */
+  async getZecSolSpreadMultiplier(): Promise<number> {
+    const s = await this.getZecSolSignals()
+    if (!s) return 1.0
+    // ZEC: conservative cap
+    return this.computeSpreadMultiplierForSignals(s, 0.9, 1.4)
+  }
+
+  /**
+   * Kill-switch for ZEC on Solana.
+   */
+  async getZecSolKillSwitch(): Promise<{ pause: boolean; reason?: string }> {
+    const s = await this.getZecSolSignals()
+    if (!s) return { pause: false }
+    return this.computeKillSwitchForSignals(s, 'ZEC/SOL')
+  }
+
+  /**
+   * Helper for VIRTUAL on Base
+   */
+  async getVirtualBaseSignals(): Promise<TokenFlowSignals | null> {
+    const VIRTUAL_BASE = '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b'
+    return this.getTokenFlowSignals(VIRTUAL_BASE, 'base')
+  }
+
+  async getVirtualBaseSpreadMultiplier(): Promise<number> {
+    const s = await this.getVirtualBaseSignals()
+    if (!s) return 1.0
+    // VIRTUAL: allow wider spreads
+    return this.computeSpreadMultiplierForSignals(s, 0.8, 2.0)
+  }
+
+  async getVirtualBaseKillSwitch(): Promise<{ pause: boolean; reason?: string }> {
+    const s = await this.getVirtualBaseSignals()
+    if (!s) return { pause: false }
+    return this.computeKillSwitchForSignals(s, 'VIRTUAL/BASE')
+  }
+
+  /**
+   * Helper for HYPE/WHYPE on HyperEVM
+   * Uses WHYPE address as primary signal source (better DEX coverage).
+   */
+  async getHypeHyperevmSignals(): Promise<TokenFlowSignals | null> {
+    const WHYPE_HYPEREVM = '0x5555555555555555555555555555555555555555'
+    return this.getTokenFlowSignals(WHYPE_HYPEREVM, 'hyperevm')
+  }
+
+  async getHypeHyperevmSpreadMultiplier(): Promise<number> {
+    const s = await this.getHypeHyperevmSignals()
+    if (!s) return 1.0
+    // HYPE: partially observable chain -> tighter cap
+    return this.computeSpreadMultiplierForSignals(s, 0.9, 1.3)
+  }
+
+  async getHypeHyperevmKillSwitch(): Promise<{ pause: boolean; reason?: string }> {
+    const s = await this.getHypeHyperevmSignals()
+    if (!s) return { pause: false }
+    return this.computeKillSwitchForSignals(s, 'HYPE/HYPEREVM')
+  }
+
+  /**
+   * Helper for MONO on BNB
+   */
+  async getMonoBnbSignals(): Promise<TokenFlowSignals | null> {
+    const MONO_BNB = '0xd4099A517f2Fbe8a730d2ECaad1D0824B75e084a'
+    return this.getTokenFlowSignals(MONO_BNB, 'bnb')
+  }
+
+  async getMonoBnbSpreadMultiplier(): Promise<number> {
+    const s = await this.getMonoBnbSignals()
+    if (!s) return 1.0
+    // MONO: if alive, quote very wide
+    return this.computeSpreadMultiplierForSignals(s, 1.0, 3.0)
+  }
+
+  async getMonoBnbKillSwitch(): Promise<{ pause: boolean; reason?: string }> {
+    const s = await this.getMonoBnbSignals()
+    if (!s) return { pause: false }
+    return this.computeKillSwitchForSignals(s, 'MONO/BNB')
   }
 
   // ═══════════════════════════════════════════════════════════════

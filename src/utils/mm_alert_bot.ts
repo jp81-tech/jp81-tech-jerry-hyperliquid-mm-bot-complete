@@ -107,6 +107,7 @@ export class MMAlertBot {
 
   // Safe no-op for large transfers (stub – implement when needed)
   private async checkLargeTransfers(_token: { symbol: string; address: string; chain: string }) {
+    // Stub to be implemented; noop by design
     return;
   }
 
@@ -118,7 +119,10 @@ export class MMAlertBot {
 
     // 1. Check On-Chain Transfers (Original Logic)
     for (const token of tokens) {
-      await this.checkLargeTransfers(token);
+      // Safeguard: avoid crashing if method is missing in legacy builds
+      if (typeof (this as any).checkLargeTransfers === 'function') {
+        await (this as any).checkLargeTransfers(token);
+      }
     }
 
     // 2. Check Perp Trades & Positions (New Logic)

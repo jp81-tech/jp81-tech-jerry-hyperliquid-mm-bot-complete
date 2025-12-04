@@ -39,3 +39,4 @@ coverage/
 secrets/
 *.key
 *.pem
+.env1

@@ -2841,10 +2841,10 @@ class LiveTrading implements TradingInterface {
 type NansenBias = 'long' | 'short' | 'neutral'
 
 // ===== Rotation & pair management =====
-const MAX_ACTIVE_PAIRS = Number(process.env.MAX_ACTIVE_PAIRS ?? 6)
+const MAX_ACTIVE_PAIRS = Number(process.env.MAX_ACTIVE_PAIRS ?? 3)
 
 // Pary, które mogą zostać nawet jeśli na chwilę wypadną z rotacji
-const STICKY_PAIRS = (process.env.STICKY_PAIRS ?? 'ZEC,FIL')
+const STICKY_PAIRS = (process.env.STICKY_PAIRS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter((s) => s.length > 0)
@@ -3310,6 +3310,14 @@ class HyperliquidMMBot {
         // Apply rotation pair limits: close positions outside MAX_ACTIVE_PAIRS
         await this.applyRotationPairs(activePairs)
 
+        // Enforce MAX_ACTIVE_PAIRS for execution as well
+        if (activePairs.length > MAX_ACTIVE_PAIRS) {
+          this.notifier.warn(
+            `⚠️  Truncating active pairs from ${activePairs.length} to MAX_ACTIVE_PAIRS=${MAX_ACTIVE_PAIRS}`
+          )
+          activePairs = activePairs.slice(0, MAX_ACTIVE_PAIRS)
+        }
+
         // Now trade ONLY on active pairs (zombie positions have been cleaned)
         if (activePairs.length > 0) {
           // Subscribe to L2 books for real-time data (WebSocket)
@@ -3427,8 +3435,14 @@ class HyperliquidMMBot {
         ? this.nansenBias.getRotationCandidates(candidatePairs)
         : candidatePairs
 
-      // 4) Check if rotation is needed (compare with current pairs)
+      // 4) Target size and check if rotation is needed (compare with current pairs)
+      const targetCount = Math.min(
+        MAX_ACTIVE_PAIRS,
+        Number(process.env.ROTATION_TARGET_COUNT || 3)
+      )
+
       const currentPairs = this.rotation.getCurrentPairs()
+      const hasOverflow = currentPairs.length > targetCount
 
       // Check for overdue pairs (time-based rotation enforce)
       const maxHoldMs = this.getMaxRotationHoldMs()
@@ -3447,12 +3461,16 @@ class HyperliquidMMBot {
         orderedByNansen.length === 0 ||
         !orderedByNansen.every((p: string) => currentPairs.includes(p)) ||
         orderedByNansen[0] !== currentPairs[0] ||
-        overduePairs.length > 0 // Force rotation if any pair is overdue
+        overduePairs.length > 0 ||
+        hasOverflow // Force rotation if any pair is overdue or we exceed max
+
+      if (hasOverflow) {
+        this.notifier.warn(
+          `[ROTATION] Active pairs=${currentPairs.length} exceed target=${targetCount} – forcing trim`
+        )
+      }
 
       if (shouldRotate) {
-        // Target count of active pairs
-        const targetCount = 3
-
         // Fresh candidates sorted by rotationScore
         const freshCandidates = orderedByNansen.slice(0, targetCount * 2) // Get more candidates than needed
 
@@ -3806,28 +3824,37 @@ class HyperliquidMMBot {
         `🧭 Rotation input: rotatedPairs=${effectivePairs.join(', ') || '∅'} | max=${MAX_ACTIVE_PAIRS}`
       )
 
-      // 1. Limit rotation to MAX_ACTIVE_PAIRS
+      // 1. Limit rotation list to MAX_ACTIVE_PAIRS and merge stickies with cap respected
       const desiredPairs = effectivePairs.slice(0, MAX_ACTIVE_PAIRS)
 
-      // 2. Add sticky pairs (e.g., ZEC, FIL) - always allowed even if not in rotation
-      const allDesired = new Set<string>(desiredPairs)
+      const stickyPairs = STICKY_PAIRS.filter(Boolean)
+      if (stickyPairs.length > 0) {
+        this.notifier.info(`🧲 Sticky pairs: ${stickyPairs.join(', ')}`)
+      }
 
-      if (STICKY_PAIRS.length > 0) {
-        this.notifier.info(
-          `🧲 Sticky pairs: ${STICKY_PAIRS.join(', ')}`
+      // Prioritize sticky pairs, then rotation candidates, then cap to MAX_ACTIVE_PAIRS
+      const merged: string[] = []
+      for (const p of stickyPairs) {
+        if (!merged.includes(p)) merged.push(p)
+      }
+      for (const p of desiredPairs) {
+        if (!merged.includes(p)) merged.push(p)
+      }
+
+      let allowedList = merged
+      if (merged.length > MAX_ACTIVE_PAIRS) {
+        const dropped = merged.slice(MAX_ACTIVE_PAIRS)
+        allowedList = merged.slice(0, MAX_ACTIVE_PAIRS)
+        this.notifier.warn(
+          `📉 Active pairs capped to MAX_ACTIVE_PAIRS=${MAX_ACTIVE_PAIRS}; dropped: ${dropped.join(', ')}`
         )
       }
 
-      for (const sticky of STICKY_PAIRS) {
-        if (sticky) {
-          allDesired.add(sticky)
-        }
-      }
-
-      const allowedList = Array.from(allDesired)
       this.notifier.info(
         `📊 Allowed pairs (rotation + sticky): ${allowedList.join(', ') || '∅'} (count=${allowedList.length}/${MAX_ACTIVE_PAIRS})`
       )
+
+      const allowedSet = new Set<string>(allowedList)
 
       // 3. Get current open positions
       const currentPairs = await this.getAllPositionPairs()
@@ -3838,7 +3865,7 @@ class HyperliquidMMBot {
       // 4. Determine which pairs to close (in current positions BUT NOT in desired list)
       const pairsToClose: string[] = []
       for (const pair of currentPairs) {
-        if (!allDesired.has(pair)) {
+        if (!allowedSet.has(pair)) {
           pairsToClose.push(pair)
         }
       }
@@ -3877,9 +3904,9 @@ class HyperliquidMMBot {
       }
 
       // Log active pairs summary
-      const activePairsList = Array.from(allDesired).join(', ')
+      const activePairsList = Array.from(allowedSet).join(', ')
       this.notifier.info(
-        `📊 Active pairs (allowed set) after cleanup: ${activePairsList} (${allDesired.size}/${MAX_ACTIVE_PAIRS})`
+        `📊 Active pairs (allowed set) after cleanup: ${activePairsList} (${allowedSet.size}/${MAX_ACTIVE_PAIRS})`
       )
     } catch (error: any) {
       this.notifier.error(`❌ applyRotationPairs failed: ${error?.message ?? error}`)
@@ -4326,6 +4353,115 @@ class HyperliquidMMBot {
     return false
   }
 
+  /**
+   * Nansen-based spread multiplier + kill switch per pair.
+   * Mapuje Hyperliquid pair → konkretny adapter z nansen_pro.ts
+   */
+  private async getNansenGuardsForPair(
+    pair: string
+  ): Promise<{ spreadMult: number; pause: boolean; reason?: string }> {
+    if (!this.nansen || !this.nansen.isEnabled || !this.nansen.isEnabled()) {
+      return { spreadMult: 1.0, pause: false }
+    }
+
+    const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    let spreadMult = 1.0
+    let pause = false
+    let reason: string | undefined
+
+    try {
+      if (symbol === 'ZEC') {
+        const ks = await this.nansen.getZecSolKillSwitch()
+        if (ks.pause) {
+          pause = true
+          reason = ks.reason || 'ZEC/SOL kill-switch from Nansen'
+          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] ZEC: ${reason}`)
+          return { spreadMult: 1.0, pause, reason }
+        }
+        spreadMult = await this.nansen.getZecSolSpreadMultiplier()
+      } else if (symbol === 'VIRTUAL') {
+        const ks = await this.nansen.getVirtualBaseKillSwitch()
+        if (ks.pause) {
+          pause = true
+          reason = ks.reason || 'VIRTUAL/BASE kill-switch from Nansen'
+          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] VIRTUAL: ${reason}`)
+          return { spreadMult: 1.0, pause, reason }
+        }
+        spreadMult = await this.nansen.getVirtualBaseSpreadMultiplier()
+      } else if (symbol === 'HYPE') {
+        const ks = await this.nansen.getHypeHyperevmKillSwitch()
+        if (ks.pause) {
+          pause = true
+          reason = ks.reason || 'HYPE/HYPEREVM kill-switch from Nansen'
+          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] HYPE: ${reason}`)
+          return { spreadMult: 1.0, pause, reason }
+        }
+        spreadMult = await this.nansen.getHypeHyperevmSpreadMultiplier()
+      } else if (symbol === 'MON') {
+        const ks = await this.nansen.getMonoBnbKillSwitch()
+        if (ks.pause) {
+          pause = true
+          reason = ks.reason || 'MON/BNB kill-switch from Nansen'
+          this.notifier.warn(`💀 [NANSEN KILL SWITCH] MON: ${reason}`)
+          return { spreadMult: 1.0, pause, reason }
+        }
+        spreadMult = await this.nansen.getMonoBnbSpreadMultiplier()
+      } else {
+        return { spreadMult: 1.0, pause: false }
+      }
+
+      if (symbol === 'ZEC') {
+        try {
+          const risk = await this.nansen.getThrottledTokenRiskScore(
+            'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS',
+            'solana'
+          )
+
+          if (risk.score >= 8) {
+            spreadMult *= 1.4
+            const msg = `core panic spread (risk=${risk.score}/10)`
+            reason = reason ? `${reason} + ${msg}` : msg
+            this.notifier.info(
+              `🛡️ [NANSEN PANIC SPREAD CORE] ZEC/SOL risk=${risk.score}/10 → spreadMult×1.40`
+            )
+          } else if (risk.score >= 6) {
+            spreadMult *= 1.2
+            const msg = `core elevated risk (risk=${risk.score}/10)`
+            reason = reason ? `${reason} + ${msg}` : msg
+            this.notifier.info(
+              `🛡️ [NANSEN RISK CORE] ZEC/SOL risk=${risk.score}/10 → spreadMult×1.20`
+            )
+          }
+        } catch (e: any) {
+          this.notifier.warn(
+            `⚠️ [NANSEN RISK CORE] ZEC/SOL risk lookup failed: ${e?.message || e}`
+          )
+        }
+      }
+
+      if (spreadMult < 0.8) spreadMult = 0.8
+      if (spreadMult > 3.0) spreadMult = 3.0
+
+      const baseLabel =
+        symbol === 'MON'
+          ? '💀 [NANSEN RISK CORE]'
+          : '🧠 [NANSEN RISK CORE]'
+
+      this.notifier.info(
+        `${baseLabel} ${pair} spreadMult=${spreadMult.toFixed(
+          2
+        )} pause=${pause ? 'YES' : 'no'} (${reason || 'ok'})`
+      )
+
+      return { spreadMult, pause, reason }
+    } catch (e: any) {
+      this.notifier.warn(
+        `⚠️ [NANSEN GUARD CORE] ${pair} exception: ${e?.message || e}`
+      )
+      return { spreadMult: 1.0, pause: false }
+    }
+  }
+
   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
     // 🔍 LIQUIDITY CHECK (Anti-Rug Pull)
     const liqFlags = loadLiquidityFlags();
@@ -4571,6 +4707,40 @@ class HyperliquidMMBot {
     const visionSpreadMult = this.marketVision.getSpreadMultiplier(pair);
     if (visionSpreadMult !== 1.0) currentBaseSpread *= visionSpreadMult;
 
+    // 0b) Nansen Pro: spread multiplier + kill switch per token
+    let nansenSpreadMult = 1.0
+    let nansenPause = false
+    let nansenReason: string | undefined
+
+    try {
+      const guards = await this.getNansenGuardsForPair(pair)
+      nansenSpreadMult = guards.spreadMult
+      nansenPause = guards.pause
+      nansenReason = guards.reason
+    } catch (e: any) {
+      this.notifier.warn(
+        `⚠️ [NANSEN GUARD] ${pair} exception: ${e?.message || e}`
+      )
+    }
+
+    // Kill switch – jeśli Nansen mówi STOP, nie kwotujemy tej pary
+    if (nansenPause) {
+      this.notifier.warn(
+        `⏸️ [NANSEN KILL SWITCH] ${pair} paused: ${nansenReason ?? 'No reason'}`
+      )
+      return // wyjście z executeMultiLayerMM dla tej pary
+    }
+
+    // Doklejamy Nansen multiplier do globalnej bazy spreadu
+    if (nansenSpreadMult !== 1.0) {
+      currentBaseSpread *= nansenSpreadMult
+      this.notifier.info(
+        `🧠 [NANSEN SPREAD] ${pair} ×${nansenSpreadMult.toFixed(2)} (base=${baseL1OffsetWithProfile.toFixed(
+          1
+        )}bps → ${currentBaseSpread.toFixed(1)}bps)`
+      )
+    }
+
     // 1) Auto Spread Per Side (Inventory + Trend + Flash)
     let inventoryRatio = 0;
     if (capitalPerPair > 0) {
@@ -4580,13 +4750,91 @@ class HyperliquidMMBot {
     }
 
     const analysis = this.marketVision.getPairAnalysis(pair);
+    const trend4h = analysis?.trend4h;
+    const trend15m = analysis?.trend15m;
     const visual = analysis?.visualAnalysis;
+    const regime = (analysis as any)?.regime ?? 'n/a';
+
+    // 👁️ Vision diagnostics for ZEC (Solana)
+    if (pair === 'ZEC') {
+      if (!visual) {
+        this.notifier.info(
+          `⚠️ [VISION ZEC] No visualAnalysis available – falling back to Nansen + quant only`
+        );
+      } else {
+        const vScore =
+          typeof visual.visualScore === 'number'
+            ? visual.visualScore.toFixed(1)
+            : 'n/a';
+        const rScore =
+          typeof (visual as any).riskScore === 'number'
+            ? (visual as any).riskScore.toFixed(1)
+            : 'n/a';
+        this.notifier.info(
+          `👁️ [VISION ZEC] regime=${regime} trend4h=${trend4h ?? 'n/a'} trend15m=${trend15m ?? 'n/a'} vScore=${vScore} risk=${rScore} squeeze=${(visual as any)?.squeezeRisk ?? 'n/a'}`
+        );
+      }
+    }
+
+    // Precompute current position in USD for trend-stop logic
+    let zecPosUsd = 0;
+    if (pair === 'ZEC') {
+      try {
+        const state = this.stateManager.getState();
+        const pos = state?.positions?.[pair];
+        if (pos && typeof (pos as any).positionValue === 'string') {
+          zecPosUsd = parseFloat((pos as any).positionValue || '0');
+        }
+      } catch {
+        zecPosUsd = 0;
+      }
+    }
+
+    // Flag for trend-stop (used later to disable asks)
+    let zecTrendStopShort = false;
+    if (
+      pair === 'ZEC' &&
+      zecPosUsd < 0 &&
+      trend4h === 'bull' &&
+      trend15m === 'bull'
+    ) {
+      zecTrendStopShort = true;
+      this.notifier.info(
+        `🛑 [TREND STOP] ZEC/SOL strong uptrend (4h+15m) with short inventory ${zecPosUsd.toFixed(
+          0
+        )} USD → disabling new asks (reduce-only mode)`
+      );
+    }
+
+    // Throttled Nansen risk score for ZEC (Solana) – cached for 15 minutes
+    let zecNansenRiskScore: number | null = null;
+    if (pair === 'ZEC') {
+      try {
+        const risk = await this.nansen.getThrottledTokenRiskScore(
+          'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS',
+          'solana'
+        );
+        zecNansenRiskScore = risk.score;
+        this.notifier.info(
+          `🛡️ [NANSEN RISK] ZEC/SOL score=${risk.score}/10 holder=${risk.components.holderRiskLevel} exch=${risk.components.exchangeFlowUsd.toFixed(
+            0
+          )} whale=${risk.components.whaleFlowUsd.toFixed(
+            0
+          )} sm=${risk.components.smartMoneyFlowUsd.toFixed(0)}`
+        );
+      } catch (e: any) {
+        console.error(
+          '[NANSEN RISK] ZEC/SOL lookup failed:',
+          e?.message || e
+        );
+      }
+    }
 
     const sideSpreads = computeSideAutoSpread({
       baseSpreadBps: currentBaseSpread,
       inventoryRatio,
-      trend4h: analysis?.trend4h,
-      trend15m: analysis?.trend15m,
+      trend4h,
+      trend15m,
       isFlashCrash: analysis?.isFlashCrash,
       visualTrend: visual?.visualTrend,
       visualScore: visual?.visualScore,
@@ -4606,6 +4854,55 @@ class HyperliquidMMBot {
 
     let bidSpreadBps = sideSpreads.bidSpreadBps;
     let askSpreadBps = sideSpreads.askSpreadBps;
+
+    // 🛡️ Nansen panic spread widen for ZEC
+    if (pair === 'ZEC' && typeof zecNansenRiskScore === 'number') {
+      if (zecNansenRiskScore >= 8) {
+        bidSpreadBps *= 1.4;
+        askSpreadBps *= 1.4;
+        this.notifier.info(
+          `🛡️ [NANSEN PANIC SPREAD] ZEC/SOL risk=${zecNansenRiskScore}/10 → spreads ×1.4`
+        );
+      } else if (zecNansenRiskScore >= 6) {
+        bidSpreadBps *= 1.2;
+        askSpreadBps *= 1.2;
+        this.notifier.info(
+          `🛡️ [NANSEN RISK] ZEC/SOL risk=${zecNansenRiskScore}/10 → spreads ×1.2`
+        );
+      }
+    }
+
+    // 🧨 Squeeze protection using Vision (only if visualAnalysis is present)
+    if (pair === 'ZEC' && visual && (visual as any).squeezeRisk === 'high') {
+      bidSpreadBps *= 1.3;
+      askSpreadBps *= 1.3;
+      this.notifier.info(
+        `🧨 [SQUEEZE PROTECT] ZEC/SOL squeezeRisk=high → spreads ×1.3`
+      );
+    }
+
+    // 🎯 Solana/ZEC bias upgrade – directional tilt based on trend
+    if (pair === 'ZEC') {
+      let biasShiftBps = 0;
+
+      if (trend4h === 'bull' && trend15m === 'bull') {
+        // Bullish – lekkie przybliżenie ask i odsunięcie bid
+        biasShiftBps = -3;
+      } else if (trend4h === 'bear' && trend15m === 'bear') {
+        // Bearish – lekkie przybliżenie bid i odsunięcie ask
+        biasShiftBps = 3;
+      }
+
+      if (biasShiftBps !== 0) {
+        bidSpreadBps += biasShiftBps;
+        askSpreadBps -= biasShiftBps;
+        this.notifier.info(
+          `🎯 [SOLANA BIAS] ZEC/SOL trend4h=${trend4h ?? 'n/a'} trend15m=${trend15m ?? 'n/a'} → biasShift=${biasShiftBps.toFixed(
+            1
+          )}bps`
+        );
+      }
+    }
 
     // Calculate Multipliers for GridManager (so deep layers follow the asymmetry)
     const gridBidMult = currentBaseSpread > 1e-9 ? bidSpreadBps / currentBaseSpread : 1.0;
@@ -4675,6 +4972,17 @@ class HyperliquidMMBot {
       actualSkew,
       { bid: gridBidMult, ask: gridAskMult }
     )
+
+    // 🛑 Apply ZEC trend-stop: in strong uptrend with short inventory, do not place new asks
+    if (pair === 'ZEC' && zecTrendStopShort && Array.isArray(gridOrders)) {
+      const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
+      if (originalAsks > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+        this.notifier.info(
+          `🛑 [TREND STOP APPLY] ZEC/SOL removed ${originalAsks} asks – bids only (reduce-short mode)`
+        )
+      }
+    }
 
     const MIN_NOTIONAL = Number(process.env.MIN_NOTIONAL_USD ?? 10)
     // Ensure child orders meet min notional (especially for UNI which was getting ~$7 orders)

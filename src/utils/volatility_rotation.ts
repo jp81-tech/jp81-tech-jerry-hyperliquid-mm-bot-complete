@@ -2,6 +2,7 @@ import fs from 'fs'
 import { enforceAllowed } from "../selection/allowed.js";
 import path from 'path'
 import { HyperliquidAPI, VolatilityScore } from '../api/hyperliquid.js'
+import { mmAlertBot } from './mm_alert_bot.js';
 
 export type RotationState = {
   lastUpdate: number
@@ -48,9 +49,9 @@ export class VolatilityRotation {
 
   async getTop3Pairs(): Promise<VolatilityScore[]> {
     const scores = await this.api.calculateVolatilityScores()
-    
+
     // Filter: min volatility + exclude stablecoins
-    const filtered = scores.filter(s => 
+    const filtered = scores.filter(s =>
       s.volatility24h >= this.minVolatility &&
       !['USDC', 'USDT', 'DAI', 'BUSD'].includes(s.pair)
     )
@@ -78,11 +79,11 @@ export class VolatilityRotation {
       // Find lowest current pair score vs new pair score
       const currentScores = top3.filter(s => currentPairNames.includes(s.pair))
       const newScores = top3.filter(s => newPairs.includes(s.pair))
-      
+
       if (newScores.length > 0 && currentScores.length > 0) {
         const lowestCurrent = Math.min(...currentScores.map(s => s.score))
         const highestNew = Math.max(...newScores.map(s => s.score))
-        
+
         if (highestNew > lowestCurrent * this.rotationThreshold) {
           return { rotate: true, reason: `Better pairs available: ${newPairs.join(', ')}` }
         }
@@ -99,12 +100,16 @@ export class VolatilityRotation {
     if (decision.rotate) {
       this.state.currentPairs = top3.map(s => s.pair)
       this.state.lastUpdate = Date.now()
+
+      // SEND ALERT
+      await mmAlertBot.onRotation(this.state.currentPairs, decision.reason);
+
       this.state.history.push({
         ts: Date.now(),
         pairs: this.state.currentPairs,
         reason: decision.reason
       })
-      
+
       // Keep last 100 history entries
       if (this.state.history.length > 100) {
         this.state.history = this.state.history.slice(-100)

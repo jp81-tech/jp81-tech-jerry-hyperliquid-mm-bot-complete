@@ -8,7 +8,7 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string }> =
   'VIRTUAL': { chain: 'base', address: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b' },
   'ZEC': { chain: 'solana', address: 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS' },
   'HYPE': { chain: 'hyperevm', address: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' },
-  'MONO': { chain: 'bsc', address: '0xD4099A517f2Fbe8a730d2ECaad1D0824B75e084a' }
+  'MONO': { chain: 'bnb', address: '0xD4099A517f2Fbe8a730d2ECaad1D0824B75e084a' }
 };
 
 export type MarketRegime = 'bull' | 'bear' | 'sideways' | 'volatile';
@@ -42,8 +42,6 @@ export type PairAnalysis = {
   biasScore: number; // -100 to +100
   nansenPressure: number; // Net Buy/Sell Pressure in USD
   nansenScore: number; // Contribution to bias
-  nansenRiskScore?: number; // 0-10 (High is bad)
-  nansenRiskReason?: string;
 };
 
 export class MarketVisionService {
@@ -311,24 +309,10 @@ export class MarketVisionService {
             }
 
             // --- NANSEN GOD MODE DEEP DIVE ---
-            let nansenRiskScore: number | undefined = undefined;
-            let nansenRiskReason: string | undefined = undefined;
-
+            // Analiza on-chain dla VIRTUAL, ZEC, HYPE
             const godModeConfig = NANSEN_TOKENS[pair];
             if (godModeConfig && this.nansenPro.isEnabled()) {
                 try {
-                    // NEW: Nansen Risk Score
-                    const risk = await this.nansenPro.getTokenRiskScore(godModeConfig.address, godModeConfig.chain);
-                    nansenRiskScore = risk.score;
-                    nansenRiskReason = risk.components.reason;
-
-                    if (nansenRiskScore >= 7) {
-                        nansenScore -= (nansenRiskScore - 5) * 2; // High risk -> negative bias
-                        console.log(`🧊 [NANSEN RISK] ${pair} High Risk: ${nansenRiskScore.toFixed(1)} (${nansenRiskReason})`);
-                    } else if (nansenRiskScore <= 3) {
-                        nansenScore += (5 - nansenRiskScore) * 1.5; // Low risk -> positive bias
-                    }
-
                     // 1. Flow Intelligence (Smart Money & Whale Flows)
                     const flows = await this.nansenPro.getFlowIntelligence([godModeConfig.address], godModeConfig.chain);
                     if (flows && flows.length > 0) {
@@ -454,8 +438,6 @@ export class MarketVisionService {
                 visualAnalysis,
                 nansenPressure,
                 nansenScore,
-                nansenRiskScore,
-                nansenRiskReason,
                 biasScore: Math.max(-100, Math.min(100, score))
             };
 
@@ -546,23 +528,6 @@ export class MarketVisionService {
         if (v.exhaustion) {
             mult *= 1.2; // ruch zmęczony => niepewność, wolimy szerzej
         }
-    }
-
-    // --- NANSEN RISK IMPACT ---
-    if (analysis.nansenRiskScore != null) {
-      const r = analysis.nansenRiskScore; // 0–10
-
-      // 6–8 → +10% do spreadu, 8–10 → do +25%
-      if (r > 6) {
-        const over = (r - 6) / 4; // 0..1 dla 6..10
-        const extra = 0.25 * over;
-        mult *= (1 + extra);      // max x1.25
-      }
-
-      // Bardzo niskie ryzyko → minimalne zawężenie
-      if (r < 3) {
-        mult *= 0.95; // -5%
-      }
     }
 
     // 4) Końcowy clamp
