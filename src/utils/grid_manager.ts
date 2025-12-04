@@ -130,40 +130,40 @@ export class GridManager {
 
       // Generate bid orders (stagger prices to avoid duplicates)
       if (!skipBids) {
-        for (let i = 0; i < layer.ordersPerSide; i++) {
-          // Stagger by 2 bps per order to ensure different ticks after rounding (e.g., 20, 22, 24 bps)
-          const staggerBps = i * 2
-          const bidPrice = midPrice * (1 - (bidOffsetBps + staggerBps) / 10000)
-          const units = orderSizeUsd / bidPrice
+      for (let i = 0; i < layer.ordersPerSide; i++) {
+        // Stagger by 2 bps per order to ensure different ticks after rounding (e.g., 20, 22, 24 bps)
+        const staggerBps = i * 2
+        const bidPrice = midPrice * (1 - (bidOffsetBps + staggerBps) / 10000)
+        const units = orderSizeUsd / bidPrice
 
-          if (units * bidPrice >= minOrderSize) {
-            orders.push({
-              layer: layer.level,
-              side: 'bid',
-              price: bidPrice,
-              sizeUsd: orderSizeUsd,
-              units: units
-            })
+        if (units * bidPrice >= minOrderSize) {
+          orders.push({
+            layer: layer.level,
+            side: 'bid',
+            price: bidPrice,
+            sizeUsd: orderSizeUsd,
+            units: units
+          })
           }
         }
       }
 
       // Generate ask orders (stagger prices to avoid duplicates)
       if (!skipAsks) {
-        for (let i = 0; i < layer.ordersPerSide; i++) {
-          // Stagger by 2 bps per order to ensure different ticks after rounding
-          const staggerBps = i * 2
-          const askPrice = midPrice * (1 + (askOffsetBps + staggerBps) / 10000)
-          const units = orderSizeUsd / askPrice
+      for (let i = 0; i < layer.ordersPerSide; i++) {
+        // Stagger by 2 bps per order to ensure different ticks after rounding
+        const staggerBps = i * 2
+        const askPrice = midPrice * (1 + (askOffsetBps + staggerBps) / 10000)
+        const units = orderSizeUsd / askPrice
 
-          if (units * askPrice >= minOrderSize) {
-            orders.push({
-              layer: layer.level,
-              side: 'ask',
-              price: askPrice,
-              sizeUsd: orderSizeUsd,
-              units: units
-            })
+        if (units * askPrice >= minOrderSize) {
+          orders.push({
+            layer: layer.level,
+            side: 'ask',
+            price: askPrice,
+            sizeUsd: orderSizeUsd,
+            units: units
+          })
           }
         }
       }

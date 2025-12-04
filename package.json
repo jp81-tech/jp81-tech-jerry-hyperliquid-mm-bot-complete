@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "TS_NODE_TRANSPILE_ONLY=1 node --loader ts-node/esm src/mm_hl.ts",
+    "deploy": "./deploy.sh",
     "sim": "TS_NODE_TRANSPILE_ONLY=1 node --loader ts-node/esm src/utils/paper_sim.ts",
     "kelly": "TS_NODE_TRANSPILE_ONLY=1 node --loader ts-node/esm -e \"import('./src/utils/position_sizing.ts').then(m=>console.log(m.positionSizeUSD({winProb:0.55,winRatio:1.4,bankrollUsd:10000})))\"",
     "kill:on": "TS_NODE_TRANSPILE_ONLY=1 node --loader ts-node/esm src/utils/kill_switch.ts on",

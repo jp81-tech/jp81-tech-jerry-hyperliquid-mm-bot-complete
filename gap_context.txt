@@ -1,0 +1,72 @@
+[INFO] 🧲 Sticky pairs: ZEC, HYPE, VIRTUAL
+[INFO] 📊 Allowed pairs (rotation + sticky): ZEC, HYPE, VIRTUAL (count=3/3)
+[WARN] Failed to get position pairs: HttpRequestError: Unknown error while making an HTTP request: TypeError: fetch failed
+[INFO] 📊 Current position pairs: ∅
+[INFO] 🧹 Rotation cleanup: no positions to close (all positions within allowed set)
+[INFO] 📊 Active pairs (allowed set) after cleanup: ZEC, HYPE, VIRTUAL (3/3)
+[ERROR] Error in main loop: TypeError: fetch failed
+[PNL SYNC] rawDaily=$43.70 anchor=$-45.90 effective=$89.61 newFills=67
+[INFO] ✅ Synced 67 new fills | rawDaily=$43.70 | effectiveDaily=$89.61 | PnL Δ: $-5.57
+[INFO] [INFO] ROTATION_MODE=manual
+[INFO] [INFO] Using MANUAL_ACTIVE_PAIRS=ZEC,HYPE,VIRTUAL
+[INFO] [INFO] ROTATION_MODE=manual
+[INFO] [INFO] Using MANUAL_ACTIVE_PAIRS=ZEC,HYPE,VIRTUAL
+[INFO] 🧭 Rotation input: rotatedPairs=ZEC, HYPE, VIRTUAL | max=3
+[INFO] 🧲 Sticky pairs: ZEC, HYPE, VIRTUAL
+[INFO] 📊 Allowed pairs (rotation + sticky): ZEC, HYPE, VIRTUAL (count=3/3)
+[INFO] 📊 Current position pairs: HYPE, VIRTUAL, ZEC
+[INFO] 🧹 Rotation cleanup: no positions to close (all positions within allowed set)
+[INFO] 📊 Active pairs (allowed set) after cleanup: ZEC, HYPE, VIRTUAL (3/3)
+[INFO] 👁️ [VISION] ZEC skew: 0.0% → 68.0% (Skew: 68.0% | 4h=bear | 15m=bear | RSI15m=48.2)
+[INFO] [SNAPSHOT] pair=ZEC profile=aggressive mode=multi-layer invSkew=68.0% base=20.0bps profiled=16.0bps bidFinal=85.9bps askFinal=35.0bps
+🛡️  [REGIME] ZEC: trend4h_bear_no_knife_catching (Longs: false, Shorts: true)
+[DEBUG CLIP] ZEC: px=318.15, szDec=2, coinStep=0.01, raw=0.0691coin, ceil=0.07coin, clipUsd=23
+[INFO] 🏛️  ZEC Multi-Layer: 8 orders | Mid: $318.1500 | Skew: 68.0% | Rebucket: 4500.00→176.00 USD | child≥23
+[INFO] [SPREAD] ZEC profile=aggressive L1 bid=61.3bps (raw=61.3bps) ask=35.0bps (raw=-29.3bps) baseRaw=20bps baseProfiled=16.0bps skewAdjBid=45.3bps skewAdjAsk=-45.3bps nansenBid=1.00 nansenAsk=1.00 behaviouralBid=1.00 chaseTicksBid=0 chaseTicksAsk=0
+[INFO] 📊 [ML-GRID] pair=ZEC mid≈318.1500 buyLevels=0 sellLevels=8 buyPx=n/a sellPx=318.2136→320.0483 buyNotional≈$0.00 sellNotional≈$176.00
+[INFO] 👁️ [VISION] HYPE skew: 0.0% → 16.0% (Skew: 16.0% | 4h=bear | 15m=bull | RSI15m=60.6)
+[INFO] [SNAPSHOT] pair=HYPE profile=aggressive mode=multi-layer invSkew=16.0% base=20.0bps profiled=16.0bps bidFinal=34.7bps askFinal=15.0bps
+🛡️  [REGIME] HYPE: bear_4h_but_bull_15m_override (Longs: true, Shorts: true)
+[DEBUG CLIP] HYPE: px=31.38, szDec=3, coinStep=0.1, raw=0.7011coin, ceil=0.8coin, clipUsd=26
+[INFO] 🏛️  HYPE Multi-Layer: 16 orders | Mid: $31.3775 | Skew: 16.0% | Rebucket: 9000.00→352.00 USD | child≥26
+[INFO] [SPREAD] HYPE profile=aggressive L1 bid=26.7bps (raw=26.7bps) ask=15.0bps (raw=5.3bps) baseRaw=20bps baseProfiled=16.0bps skewAdjBid=10.7bps skewAdjAsk=-10.7bps nansenBid=1.00 nansenAsk=1.00 behaviouralBid=1.00 chaseTicksBid=0 chaseTicksAsk=0
+[INFO] 📊 [ML-GRID] pair=HYPE mid≈31.3440 buyLevels=8 sellLevels=8 buyPx=31.0146→31.2750 sellPx=31.4131→31.6735 buyNotional≈$176.00 sellNotional≈$176.00
+[INFO] 👁️ [VISION] VIRTUAL skew: 0.0% → 68.0% (Skew: 68.0% | 4h=bear | 15m=bear | RSI15m=46.7)
+[INFO] [SNAPSHOT] pair=VIRTUAL profile=aggressive mode=multi-layer invSkew=68.0% base=20.0bps profiled=16.0bps bidFinal=61.3bps askFinal=18.0bps
+🛡️  [REGIME] VIRTUAL: trend4h_bear_no_knife_catching (Longs: false, Shorts: true)
+[DEBUG CLIP] VIRTUAL: px=0.84, szDec=4, coinStep=1, raw=26.2790coin, ceil=27coin, clipUsd=24
+[INFO] 🏛️  VIRTUAL Multi-Layer: 8 orders | Mid: $0.8372 | Skew: 68.0% | Rebucket: 4500.00→176.00 USD | child≥24
+[INFO] [SPREAD] VIRTUAL profile=aggressive L1 bid=61.3bps (raw=61.3bps) ask=18.0bps (raw=-29.3bps) baseRaw=20bps baseProfiled=16.0bps skewAdjBid=45.3bps skewAdjAsk=-45.3bps nansenBid=1.00 nansenAsk=1.00 behaviouralBid=1.00 chaseTicksBid=0 chaseTicksAsk=0
+[INFO] 📊 [ML-GRID] pair=VIRTUAL mid≈0.8372 buyLevels=0 sellLevels=8 buyPx=n/a sellPx=0.8373→0.8422 buyNotional≈$0.00 sellNotional≈$176.00
+[INFO]    L1 BUY: $31.2750 × 27.34 ($22)
+🔍 DEBUG submit: pair=HYPE size=0.7(7steps) step=0.1 price=31.275(31275ticks) side=buy notional=21.89
+quant_evt=attempt ts=2025-12-02T09:08:40.933Z tms=1764666520933 seq=1014 pair=HYPE side=buy tif=Gtc ro=0 cloid=0x0000019ade5235650000019adbd7c264 pxDec=3 stepDec=1 priceInt=31275 sizeInt=7 ticks=31275 steps=7 try=1
+[SDK DEBUG] Placing order: pair=HYPE p=31.275 s=0.7
+[INFO]    L1 SELL: $318.2136 × 2.69 ($22)
+🔍 DEBUG submit: pair=ZEC size=0.06(6steps) step=0.01 price=318.21(31821ticks) side=sell notional=19.09
+quant_evt=attempt ts=2025-12-02T09:08:42.500Z tms=1764666522500 seq=1015 pair=ZEC side=sell tif=Gtc ro=0 cloid=0x0000019ade523b840000019adbd7c265 pxDec=2 stepDec=2 priceInt=31821 sizeInt=6 ticks=31821 steps=6 try=1
+[SDK DEBUG] Placing order: pair=ZEC p=318.21 s=0.06
+quant_evt=submit ts=2025-12-02T09:08:43.476Z tms=1764666523476 seq=1014 cloid=0x0000019ade5235650000019adbd7c264 pair=HYPE side=buy tif=Gtc ro=0 ticks=31275 stepInt=7 szInt=7 ok=1 err=none
+[INFO]    L1 BUY: $31.2687 × 27.34 ($22)
+🔍 DEBUG submit: pair=HYPE size=0.7(7steps) step=0.1 price=31.269(31269ticks) side=buy notional=21.89
+quant_evt=attempt ts=2025-12-02T09:08:44.230Z tms=1764666524230 seq=1016 pair=HYPE side=buy tif=Gtc ro=0 cloid=0x0000019ade5242460000019adbd7c266 pxDec=3 stepDec=1 priceInt=31269 sizeInt=7 ticks=31269 steps=7 try=1
+[SDK DEBUG] Placing order: pair=HYPE p=31.269 s=0.7
+quant_evt=submit ts=2025-12-02T09:08:45.290Z tms=1764666525290 seq=1015 cloid=0x0000019ade523b840000019adbd7c265 pair=ZEC side=sell tif=Gtc ro=0 ticks=31821 stepInt=6 szInt=6 ok=1 err=none
+[INFO]    L1 SELL: $318.2773 × 2.69 ($22)
+🔍 DEBUG submit: pair=ZEC size=0.06(6steps) step=0.01 price=318.28(31828ticks) side=sell notional=19.10
+quant_evt=attempt ts=2025-12-02T09:08:45.585Z tms=1764666525585 seq=1017 pair=ZEC side=sell tif=Gtc ro=0 cloid=0x0000019ade5247910000019adbd7c267 pxDec=2 stepDec=2 priceInt=31828 sizeInt=6 ticks=31828 steps=6 try=1
+[SDK DEBUG] Placing order: pair=ZEC p=318.28 s=0.06
+quant_evt=submit ts=2025-12-02T09:08:46.839Z tms=1764666526839 seq=1016 cloid=0x0000019ade5242460000019adbd7c266 pair=HYPE side=buy tif=Gtc ro=0 ticks=31269 stepInt=7 szInt=7 ok=1 err=none
+[INFO]    L2 BUY: $31.2248 × 19.46 ($22)
+🔍 DEBUG submit: pair=HYPE size=0.7(7steps) step=0.1 price=31.225(31225ticks) side=buy notional=21.86
+quant_evt=attempt ts=2025-12-02T09:08:47.113Z tms=1764666527113 seq=1018 pair=HYPE side=buy tif=Gtc ro=0 cloid=0x0000019ade524d890000019adbd7c268 pxDec=3 stepDec=1 priceInt=31225 sizeInt=7 ticks=31225 steps=7 try=1
+[SDK DEBUG] Placing order: pair=HYPE p=31.225 s=0.7
+quant_evt=submit ts=2025-12-02T09:08:47.957Z tms=1764666527957 seq=1017 cloid=0x0000019ade5247910000019adbd7c267 pair=ZEC side=sell tif=Gtc ro=0 ticks=31828 stepInt=6 szInt=6 ok=1 err=none
+[INFO]    L2 SELL: $318.2136 × 1.91 ($22)
+🔍 DEBUG submit: pair=ZEC size=0.06(6steps) step=0.01 price=318.21(31821ticks) side=sell notional=19.09
+quant_evt=attempt ts=2025-12-02T09:08:48.253Z tms=1764666528253 seq=1019 pair=ZEC side=sell tif=Gtc ro=0 cloid=0x0000019ade5251fd0000019adbd7c269 pxDec=2 stepDec=2 priceInt=31821 sizeInt=6 ticks=31821 steps=6 try=1
+[SDK DEBUG] Placing order: pair=ZEC p=318.21 s=0.06
+quant_evt=submit ts=2025-12-02T09:08:50.294Z tms=1764666530294 seq=1018 cloid=0x0000019ade524d890000019adbd7c268 pair=HYPE side=buy tif=Gtc ro=0 ticks=31225 stepInt=7 szInt=7 ok=1 err=none
+[INFO]    L2 BUY: $31.2185 × 19.46 ($22)
+🔍 DEBUG submit: pair=HYPE size=0.7(7steps) step=0.1 price=31.219(31219ticks) side=buy notional=21.85
+---PRE-GAP PNL---

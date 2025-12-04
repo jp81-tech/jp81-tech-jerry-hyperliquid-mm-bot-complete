@@ -23,6 +23,20 @@ export type VolatilityScore = {
   midPx: number
 }
 
+// Candle data structure
+export type Candle = {
+  t: number // open time (ms)
+  T: number // close time (ms)
+  s: string // symbol
+  i: string // interval
+  o: number // open
+  c: number // close
+  h: number // high
+  l: number // low
+  v: number // volume
+  n: number // number of trades
+}
+
 export class HyperliquidAPI {
   private baseUrl: string
 
@@ -46,6 +60,48 @@ export class HyperliquidAPI {
     }))
 
     return [meta, assetCtxs]
+  }
+
+  /**
+   * Get candles for a symbol
+   * @param coin Coin symbol (e.g., "BTC", "ETH")
+   * @param interval Interval string (e.g., "1h", "4h", "1d")
+   * @param startTime Optional start time (ms)
+   * @param endTime Optional end time (ms)
+   */
+  async getCandles(coin: string, interval: string, startTime?: number, endTime?: number): Promise<Candle[]> {
+    const body: any = {
+      type: 'candleSnapshot',
+      req: {
+        coin,
+        interval,
+        startTime: startTime || (Date.now() - 24 * 60 * 60 * 1000), // Default last 24h
+        endTime: endTime || Date.now()
+      }
+    }
+
+    const res = await fetch(`${this.baseUrl}/info`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+
+    if (!res.ok) throw new Error(`Failed to fetch candles: ${res.statusText}`)
+    const rawCandles = await res.json() as any[]
+
+    // Map raw response to Candle type
+    return rawCandles.map(c => ({
+      t: c.t,
+      T: c.T,
+      s: c.s,
+      i: c.i,
+      o: parseFloat(c.o),
+      c: parseFloat(c.c),
+      h: parseFloat(c.h),
+      l: parseFloat(c.l),
+      v: parseFloat(c.v),
+      n: c.n
+    }))
   }
 
   async calculateVolatilityScores(minVolume = 10e6): Promise<VolatilityScore[]> {

@@ -1,0 +1,19 @@
+[Unit]
+Description=On-chain Liquidity Monitor (rug pull detector)
+After=network.target
+
+[Service]
+Type=simple
+# CHANGE USER TO YOUR USERNAME
+User=root
+# CHANGE PATH TO WHERE YOU CLONED THE REPO
+WorkingDirectory=/root/hyperliquid-mm-bot-complete/scripts/liquidity_monitor
+# Point to your .env file
+EnvironmentFile=/root/hyperliquid-mm-bot-complete/.env
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
