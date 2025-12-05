@@ -114,10 +114,73 @@ export interface TokenFlowSignals {
   trades1h: number
   buyCount: number
   sellCount: number
+  liquidity: number       // New: from Token Overview
+  fdv: number            // New: from Token Overview
   confidence: number      // 0..1
   dataSource: 'full' | 'flows_fallback' | 'partial'
   dataQuality: 'full' | 'partial' | 'minimal' | 'dead'
   warnings: string[]
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ENDPOINT MANAGER (Circuit Breaker & Fallbacks)
+// ═══════════════════════════════════════════════════════════════
+
+interface EndpointState {
+  status: 'available' | 'forbidden' | 'rate_limited' | 'error'
+  lastFailure: number
+  cooldownUntil: number
+  failureCount: number
+}
+
+class EndpointManager {
+  private states: Record<string, EndpointState> = {}
+  private readonly FORBIDDEN_COOLDOWN = 24 * 60 * 60 * 1000 // 24h
+  private readonly ERROR_COOLDOWN = 60 * 1000 // 1 min
+
+  isAvailable(endpoint: string): boolean {
+    const state = this.states[endpoint]
+    if (!state) return true
+
+    if (Date.now() < state.cooldownUntil) {
+      return false
+    }
+
+    return true
+  }
+
+  recordSuccess(endpoint: string) {
+    if (this.states[endpoint]) {
+      delete this.states[endpoint]
+    }
+  }
+
+  recordFailure(endpoint: string, status: number) {
+    const state = this.states[endpoint] || {
+      status: 'available',
+      lastFailure: 0,
+      cooldownUntil: 0,
+      failureCount: 0
+    }
+
+    state.lastFailure = Date.now()
+    state.failureCount++
+
+    if (status === 403) {
+      state.status = 'forbidden'
+      state.cooldownUntil = Date.now() + this.FORBIDDEN_COOLDOWN
+      console.warn(`🔒 Endpoint ${endpoint} FORBIDDEN (403) - disabled for 24h`)
+    } else if (status === 429) {
+      state.status = 'rate_limited'
+      state.cooldownUntil = Date.now() + (5 * 60 * 1000)
+      console.warn(`⏳ Endpoint ${endpoint} rate limited - cooldown 5min`)
+    } else if (status >= 500) {
+      state.status = 'error'
+      state.cooldownUntil = Date.now() + this.ERROR_COOLDOWN
+    }
+
+    this.states[endpoint] = state
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -129,6 +192,7 @@ export class NansenProAPI {
   private apiKey: string
   private cache: Map<string, { data: any; timestamp: number }> = new Map()
   private riskCache: Map<string, { score: number; components: any; timestamp: number }> = new Map()
+  private endpointManager = new EndpointManager()
   private cacheTtlMs = 300000 // 5 minutes for most endpoints
   // Simple circuit breaker per endpoint+chain
   private circuit: Map<string, { state: 'CLOSED' | 'OPEN'; failures: number; lastFailure: number }> = new Map()
@@ -1133,10 +1197,23 @@ export class NansenProAPI {
       trades1h: 0,
       buyCount: 0,
       sellCount: 0,
+      liquidity: 0,
+      fdv: 0,
       confidence: 1.0,
       dataSource: 'full',
       dataQuality: 'full',
       warnings: []
+    }
+
+    // ── 0) LIQUIDITY & OVERVIEW (New priority) ──────────────────
+    try {
+      const overview = await this.getTokenOverview(tokenAddress, chain)
+      if (overview) {
+        signals.liquidity = overview.liquidity_usd || 0
+        signals.fdv = overview.fdv_usd || 0
+      }
+    } catch (e) {
+      // Non-critical
     }
 
     // ── 1) FLOWS (recent flows summary) ─────────────────────────
@@ -1235,18 +1312,33 @@ export class NansenProAPI {
   ): number {
     let mult = 1.0
 
-    const whale = Math.abs(signals.whaleNet)
-    if (whale > 100_000) mult += 0.3
-    if (whale > 500_000) mult += 0.5
-
-    const exch = signals.exchangeNet
-    if (exch > 100_000) mult += 0.4
-    if (exch > 500_000) mult += 0.6
-
-    if (Math.abs(signals.smartMoneyNet) > 50_000) {
-      mult += 0.2
+    // ── 1. LIQUIDITY PENALTY (Python Logic Port) ──────────────
+    // Low liquidity = higher risk = wider spread
+    if (signals.liquidity > 0) {
+      if (signals.liquidity < 200_000) {
+        mult += 0.3 // +30% spread if < $200k liq
+      } else if (signals.liquidity < 500_000) {
+        mult += 0.2 // +20% spread if < $500k liq
+      }
     }
 
+    // ── 2. WHALE / FLOW IMPACT ────────────────────────────────
+    const whale = Math.abs(signals.whaleNet)
+    // Mega Whale tiers (for BTC/ETH scale)
+    if (whale > 10_000_000) mult += 0.8  // $10M+ -> Massive impact
+    else if (whale > 1_000_000) mult += 0.5   // $1M+ -> High impact
+    else if (whale > 500_000) mult += 0.3     // $500k+
+    else if (whale > 100_000) mult += 0.15    // $100k+
+
+    const exch = signals.exchangeNet
+    if (exch > 5_000_000) mult += 0.8
+    else if (exch > 1_000_000) mult += 0.5
+    else if (exch > 100_000) mult += 0.2
+
+    if (Math.abs(signals.smartMoneyNet) > 500_000) mult += 0.4
+    else if (Math.abs(signals.smartMoneyNet) > 50_000) mult += 0.15
+
+    // ── 3. DATA QUALITY & CONFIDENCE ──────────────────────────
     if (signals.dataQuality === 'partial') {
       mult += 0.15
     } else if (signals.dataQuality === 'minimal') {
@@ -1259,6 +1351,7 @@ export class NansenProAPI {
       mult += 0.2
     }
 
+    // ── 4. CLAMP ──────────────────────────────────────────────
     if (mult < min) mult = min
     if (mult > max) mult = max
     return mult
@@ -1399,6 +1492,34 @@ export class NansenProAPI {
     const s = await this.getMonoBnbSignals()
     if (!s) return { pause: false }
     return this.computeKillSwitchForSignals(s, 'MONO/BNB')
+  }
+
+  /**
+   * Generic Guard: Computes Spread Mult + Kill Switch for ANY token config.
+   * Replaces the need for hardcoded per-token methods.
+   */
+  async getGenericTokenGuard(
+    label: string,
+    chain: string,
+    address: string,
+    spreadCaps: { min: number; max: number } = { min: 0.9, max: 2.0 }
+  ): Promise<{ spreadMult: number; pause: boolean; reason?: string }> {
+    const s = await this.getTokenFlowSignals(address, chain)
+    if (!s) {
+      // If signal fetch completely failed, neutral default
+      return { spreadMult: 1.0, pause: false }
+    }
+
+    // 1. Kill Switch
+    const ks = this.computeKillSwitchForSignals(s, label)
+    if (ks.pause) {
+      return { spreadMult: 1.0, pause: true, reason: ks.reason }
+    }
+
+    // 2. Spread Multiplier
+    const spreadMult = this.computeSpreadMultiplierForSignals(s, spreadCaps.min, spreadCaps.max)
+
+    return { spreadMult, pause: false }
   }
 
   // ═══════════════════════════════════════════════════════════════
