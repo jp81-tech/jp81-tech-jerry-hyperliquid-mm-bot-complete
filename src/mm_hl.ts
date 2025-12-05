@@ -8,6 +8,11 @@ import { applyBehaviouralRiskToLayers, type BehaviouralRiskMode } from './behavi
 import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js'
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { computeSideAutoSpread } from './risk/auto_spread.js'
+import {
+  SmartRotationEngine,
+  type NansenWhaleRisk,
+  type PairAnalysisLite
+} from './rotation/smart_rotation.js'
 import { MarketVisionService, NANSEN_TOKENS } from './signals/market_vision.js'
 import { Supervisor, SupervisorHooks } from './supervisor/index.js'
 import {
@@ -122,19 +127,26 @@ function envBool(key: string, fallback: boolean): boolean {
 }
 
 const MAX_INVENTORY_COINS: Record<string, number> = {
-  ZEC: envNumber("ZEC_INVENTORY_CAP_COINS", 4),
-  UNI: envNumber("UNI_INVENTORY_CAP_COINS", 120),
-  VIRTUAL: envNumber("VIRTUAL_INVENTORY_CAP_COINS", 2000),
-  HMSTR: envNumber("HMSTR_INVENTORY_CAP_COINS", 800000),
-  BOME: envNumber("BOME_INVENTORY_CAP_COINS", 250000),
-  MON: envNumber("MON_INVENTORY_CAP_COINS", 0)
+  ZEC: envNumber("ZEC_INVENTORY_CAP_COINS", 0),
+  UNI: envNumber("UNI_INVENTORY_CAP_COINS", 0),
+  VIRTUAL: envNumber("VIRTUAL_INVENTORY_CAP_COINS", 0),
+  HMSTR: envNumber("HMSTR_INVENTORY_CAP_COINS", 0),
+  BOME: envNumber("BOME_INVENTORY_CAP_COINS", 0),
+  MON: envNumber("MON_INVENTORY_CAP_COINS", 0),
+  ETH: envNumber("ETH_INVENTORY_CAP_COINS", 0),
+  FARTCOIN: envNumber("FARTCOIN_INVENTORY_CAP_COINS", 0)
 }
 
 const MAX_INVENTORY_USD: Record<string, number> = {
-  ZEC: envNumber("ZEC_MAX_POSITION_USD", 0),
-  HYPE: envNumber("HYPE_MAX_POSITION_USD", 0),
-  VIRTUAL: envNumber("VIRTUAL_MAX_POSITION_USD", 0),
-  MON: envNumber("MON_MAX_POSITION_USD", 0)
+  ZEC: envNumber("ZEC_MAX_POSITION_USD", 5000),
+  HYPE: envNumber("HYPE_MAX_POSITION_USD", 5000),
+  VIRTUAL: envNumber("VIRTUAL_MAX_POSITION_USD", 5000),
+  MON: envNumber("MON_MAX_POSITION_USD", 5000),
+  UNI: envNumber("UNI_MAX_POSITION_USD", 5000),
+  HMSTR: envNumber("HMSTR_MAX_POSITION_USD", 5000),
+  BOME: envNumber("BOME_MAX_POSITION_USD", 5000),
+  ETH: envNumber("ETH_MAX_POSITION_USD", 5000),
+  FARTCOIN: envNumber("FARTCOIN_MAX_POSITION_USD", 5000)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1536,6 +1548,8 @@ class LiveTrading implements TradingInterface {
       if (pair === 'ZEC') {
         const cetHour = getCETHour(now)
         cetHourZec = cetHour
+        // ZEC schedule disabled permanently
+        /*
         const offStart = Number(process.env.ZEC_OFF_HOUR_START ?? '0')
         const offEnd = Number(process.env.ZEC_OFF_HOUR_END ?? '7')
 
@@ -1554,6 +1568,7 @@ class LiveTrading implements TradingInterface {
           )
           return { success: false }
         }
+        */
       }
 
       // ═════════════════════════════════════════════════════════════════════
@@ -2838,7 +2853,7 @@ class LiveTrading implements TradingInterface {
 // HYPERLIQUID MM BOT - Main bot class
 // ─────────────────────────────────────────────────────────────────────────────
 
-type NansenBias = 'long' | 'short' | 'neutral'
+type NansenBias = 'long' | 'short' | 'neutral' | 'bull' | 'bear' | 'unknown'
 
 // ===== Rotation & pair management =====
 const MAX_ACTIVE_PAIRS = Number(process.env.MAX_ACTIVE_PAIRS ?? 3)
@@ -2887,6 +2902,12 @@ class HyperliquidMMBot {
   private infoClient: hl.InfoClient
   private walletAddress: string = ''
   private rotation: VolatilityRotation
+  private smartRotationEngine = new SmartRotationEngine({
+    maxActivePairs: Number(process.env.ROTATION_MAX_ACTIVE_PAIRS || 3),
+    minVolume1hUsd: 10_000,
+    rotationIntervalMs: 15 * 60 * 1000,
+  })
+  private lastSmartRotationPairs: string[] = []
   private marketVision: MarketVisionService
   private supervisor: Supervisor
   private stateManager: StateManager
@@ -3372,6 +3393,108 @@ class HyperliquidMMBot {
         await this.sleep(5000)
       }
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Smart Rotation
+  // ───────────────────────────────────────────────────────────────────────────
+
+  private async runSmartRotation(
+    candidatePairs: string[],
+  ): Promise<string[]> {
+    if (!process.env.ROTATION_ENABLED || process.env.ROTATION_ENABLED !== 'true') {
+      return candidatePairs
+    }
+
+    if (process.env.ROTATION_MODE !== 'top3') {
+      return candidatePairs
+    }
+
+    // New SmartRotationEngine doesn't handle cooldowns, logic moved to rotateIfNeeded
+    // Just rank them here.
+
+    const analyses: PairAnalysisLite[] = []
+
+    for (const pair of candidatePairs) {
+      const analysis = this.marketVision.getPairAnalysis(pair)
+      const visual: any = analysis?.visualAnalysis || {}
+
+      // Get Nansen Data
+      let nansenBias: NansenBias = 'unknown'
+      let nansenWhaleRisk: NansenWhaleRisk = 'unknown'
+      let nansenScore = analysis?.nansenScore
+
+      try {
+        const symbol = pair.split('/')[0].toUpperCase()
+        const config = NANSEN_TOKENS[symbol]
+        if (config && this.nansen && this.nansen.isEnabled()) {
+          const signals = await this.nansen.getTokenFlowSignals(config.address, config.chain)
+          if (signals) {
+            if (signals.smartMoneyNet > 100000) nansenBias = 'bull'
+            else if (signals.smartMoneyNet < -100000) nansenBias = 'bear'
+            else nansenBias = 'neutral'
+
+            const whaleNet = Math.abs(signals.whaleNet)
+            if (whaleNet > 5000000) nansenWhaleRisk = 'high'
+            else if (whaleNet > 1000000) nansenWhaleRisk = 'medium'
+            else nansenWhaleRisk = 'low'
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // Map trend to 0..1
+      let trendScore = 0.5
+      const t4h = analysis?.trend4h
+      if (t4h === 'bull') trendScore = 1.0
+      else if (t4h === 'bear') trendScore = 0.0
+      else trendScore = 0.5
+
+      // Map visual risk (0-10) to 0..1 (where 1 is risky)
+      let riskScore = 0.5
+      if (visual?.riskScore !== undefined) {
+        riskScore = visual.riskScore / 10.0
+      }
+
+      const a: PairAnalysisLite = {
+        symbol: pair,
+        trendScore,
+        volumeScore: 0.5, // Default volume score
+        riskScore,
+        nansenBias,
+        nansenScore,
+        nansenWhaleRisk
+      }
+
+      analyses.push(a)
+    }
+
+    const maxActive = Number(process.env.ROTATION_MAX_ACTIVE_PAIRS || 3)
+    const ranked = this.smartRotationEngine.rankPairs(analyses, maxActive)
+
+    const topPairs = ranked.map(r => r.symbol)
+
+    const pretty = ranked
+      .map(
+        r =>
+          `${r.symbol} (score=${r.score.toFixed(3)}, ` +
+          `bias=${r.nansenBias}, whale=${r.nansenWhaleRisk})`
+      )
+      .join(' | ')
+
+    this.notifier.info(
+      `🔄 [SMART ROTATION] candidates=${candidatePairs.join(', ')} → top=${topPairs.join(', ')}`,
+    )
+    this.notifier.info(`   [SMART ROTATION DETAIL] ${pretty}`)
+
+    // 🩺 Telemetry
+    if (Math.random() < 0.1) {
+      this.notifier.info(`🩺 [SMART ROTATION HEALTH] lastRun=${new Date().toISOString()} nansenOk=${!!this.nansen && this.nansen.isEnabled()} pairs=${topPairs.length}`)
+    }
+
+    this.lastSmartRotationPairs = topPairs
+    return topPairs
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -4355,11 +4478,12 @@ class HyperliquidMMBot {
 
   /**
    * Nansen-based spread multiplier + kill switch per pair.
-   * Mapuje Hyperliquid pair → konkretny adapter z nansen_pro.ts
+   * Dynamically uses NANSEN_TOKENS config for any pair (ZEC, ETH, FARTCOIN, etc.)
    */
   private async getNansenGuardsForPair(
     pair: string
   ): Promise<{ spreadMult: number; pause: boolean; reason?: string }> {
+    // Hard default – brak zmian jeśli Nansen off / brak integracji
     if (!this.nansen || !this.nansen.isEnabled || !this.nansen.isEnabled()) {
       return { spreadMult: 1.0, pause: false }
     }
@@ -4370,46 +4494,37 @@ class HyperliquidMMBot {
     let reason: string | undefined
 
     try {
-      if (symbol === 'ZEC') {
-        const ks = await this.nansen.getZecSolKillSwitch()
-        if (ks.pause) {
+      // ─────────────────────────────────────────────
+      // 1) Generic Token Guard from Config
+      // ─────────────────────────────────────────────
+      const config = NANSEN_TOKENS[symbol]
+
+      if (config) {
+        // Use generic guard with optional custom spread caps
+        const guard = await this.nansen.getGenericTokenGuard(
+          `${symbol}/${config.chain}`,
+          config.chain,
+          config.address,
+          config.spreadCaps // Pass custom { min, max } if defined
+        )
+
+        if (guard.pause) {
           pause = true
-          reason = ks.reason || 'ZEC/SOL kill-switch from Nansen'
-          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] ZEC: ${reason}`)
+          reason = guard.reason
+          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] ${symbol}: ${reason}`)
           return { spreadMult: 1.0, pause, reason }
         }
-        spreadMult = await this.nansen.getZecSolSpreadMultiplier()
-      } else if (symbol === 'VIRTUAL') {
-        const ks = await this.nansen.getVirtualBaseKillSwitch()
-        if (ks.pause) {
-          pause = true
-          reason = ks.reason || 'VIRTUAL/BASE kill-switch from Nansen'
-          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] VIRTUAL: ${reason}`)
-          return { spreadMult: 1.0, pause, reason }
-        }
-        spreadMult = await this.nansen.getVirtualBaseSpreadMultiplier()
-      } else if (symbol === 'HYPE') {
-        const ks = await this.nansen.getHypeHyperevmKillSwitch()
-        if (ks.pause) {
-          pause = true
-          reason = ks.reason || 'HYPE/HYPEREVM kill-switch from Nansen'
-          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] HYPE: ${reason}`)
-          return { spreadMult: 1.0, pause, reason }
-        }
-        spreadMult = await this.nansen.getHypeHyperevmSpreadMultiplier()
-      } else if (symbol === 'MON') {
-        const ks = await this.nansen.getMonoBnbKillSwitch()
-        if (ks.pause) {
-          pause = true
-          reason = ks.reason || 'MON/BNB kill-switch from Nansen'
-          this.notifier.warn(`💀 [NANSEN KILL SWITCH] MON: ${reason}`)
-          return { spreadMult: 1.0, pause, reason }
-        }
-        spreadMult = await this.nansen.getMonoBnbSpreadMultiplier()
+
+        spreadMult = guard.spreadMult
       } else {
+        // Fallback for unconfigured tokens
         return { spreadMult: 1.0, pause: false }
       }
 
+      // ─────────────────────────────────────────────
+      // 2) ZEC-Specific Panic Spread Core (Risk Score)
+      //    Retained for extra safety on ZEC/SOL
+      // ─────────────────────────────────────────────
       if (symbol === 'ZEC') {
         try {
           const risk = await this.nansen.getThrottledTokenRiskScore(
@@ -4439,22 +4554,30 @@ class HyperliquidMMBot {
         }
       }
 
+      // ─────────────────────────────────────────────
+      // 3) Global clamps i logi diagnostyczne
+      // ─────────────────────────────────────────────
+      // Safety clamp
       if (spreadMult < 0.8) spreadMult = 0.8
       if (spreadMult > 3.0) spreadMult = 3.0
 
       const baseLabel =
         symbol === 'MON'
-          ? '💀 [NANSEN RISK CORE]'
-          : '🧠 [NANSEN RISK CORE]'
+          ? '💀 [NANSEN GUARD]'
+          : '🧠 [NANSEN GUARD]'
 
-      this.notifier.info(
-        `${baseLabel} ${pair} spreadMult=${spreadMult.toFixed(
-          2
-        )} pause=${pause ? 'YES' : 'no'} (${reason || 'ok'})`
-      )
+      // Log only if meaningful impact
+      if (spreadMult !== 1.0 || pause) {
+        this.notifier.info(
+          `${baseLabel} ${pair} spreadMult=${spreadMult.toFixed(
+            2
+          )} pause=${pause ? 'YES' : 'no'} (${reason || 'ok'})`
+        )
+      }
 
       return { spreadMult, pause, reason }
     } catch (e: any) {
+      // Fail-safe – jeśli Nansen coś wywali, nie blokuj bota
       this.notifier.warn(
         `⚠️ [NANSEN GUARD CORE] ${pair} exception: ${e?.message || e}`
       )
@@ -4492,6 +4615,7 @@ class HyperliquidMMBot {
     }
 
     const midPrice = Number(pairData.midPx || 0)
+    const funding = Number(pairData.funding || 0)
     if (midPrice === 0) {
       this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
       return
@@ -4519,12 +4643,43 @@ class HyperliquidMMBot {
     const currentDate = new Date()
     const globalDowntrend = isGlobalDowntrendActive()
     const adaptive = computeAdaptiveMultipliers(symbol, currentDate, globalDowntrend)
+
+    // 🔥 FUNDING STRESS TEST (New from Python logic)
+    // High funding (>0.03%) = High volatility/imbalance expected -> Widen spread
+    if (Math.abs(funding) > 0.0003) {
+      adaptive.spreadMult *= 1.5
+      this.notifier.info(`🔥 [HIGH FUNDING] ${pair} funding=${(funding * 100).toFixed(4)}% -> spreadMult x1.5`)
+    } else if (Math.abs(funding) > 0.0001) {
+      adaptive.spreadMult *= 1.2
+    }
+
     if (adaptive.mode !== 'none') {
       this.notifier.info(
         `[RISK_ADAPT] ${pair} ${adaptive.mode === 'defensive' ? 'defensive mode' : 'weekend boost'} size×${adaptive.sizeMult.toFixed(2)} spread×${adaptive.spreadMult.toFixed(2)}`
       )
     }
     let capitalPerPair = capitalBase * adaptive.sizeMult
+
+    // 🔧 APPY TUNING OVERRIDES
+    const overridesConfig = NANSEN_TOKENS[symbol]?.tuning
+    if (overridesConfig && overridesConfig.enabled) {
+      if (overridesConfig.baseOrderSizeUsd) {
+        const tunedCapital = overridesConfig.baseOrderSizeUsd * 20
+        capitalPerPair = (capitalPerPair + tunedCapital) / 2
+      }
+      if (overridesConfig.maxPositionUsd && capitalPerPair > overridesConfig.maxPositionUsd) {
+        capitalPerPair = overridesConfig.maxPositionUsd
+      }
+      if (overridesConfig.baseSpreadBps) {
+        const currentSpreadBps = adaptive.spreadMult * 15; // Assume 15bps base
+        if (Math.abs(currentSpreadBps - overridesConfig.baseSpreadBps) > 5) {
+          const targetMult = overridesConfig.baseSpreadBps / 15
+          adaptive.spreadMult = (adaptive.spreadMult + targetMult) / 2
+        }
+      }
+      adaptive.spreadMult *= overridesConfig.smFlowSpreadMult
+      adaptive.spreadMult *= overridesConfig.smPositionSpreadMult
+    }
 
     // 👁️ MARKET VISION DYNAMIC SIZING
     // Adjust size based on Trend Confidence (1.25x) or Flash Crash (0.5x)
@@ -4881,25 +5036,47 @@ class HyperliquidMMBot {
       );
     }
 
-    // 🎯 Solana/ZEC bias upgrade – directional tilt based on trend
-    if (pair === 'ZEC') {
-      let biasShiftBps = 0;
+    // 🎯 GLOBAL BIAS CALCULATION (Trend + Tuning + Funding)
+    // Unified logic for all pairs, replacing the old ZEC-specific block
+    let biasShiftBps = 0;
 
+    // 1. ZEC Specific Trend Logic (Legacy/Proven)
+    if (pair === 'ZEC') {
       if (trend4h === 'bull' && trend15m === 'bull') {
-        // Bullish – lekkie przybliżenie ask i odsunięcie bid
         biasShiftBps = -3;
       } else if (trend4h === 'bear' && trend15m === 'bear') {
-        // Bearish – lekkie przybliżenie bid i odsunięcie ask
         biasShiftBps = 3;
       }
+    }
 
-      if (biasShiftBps !== 0) {
-        bidSpreadBps += biasShiftBps;
-        askSpreadBps -= biasShiftBps;
+    // 2. Nansen/Tuning Config Bias
+    const tuningConfig = NANSEN_TOKENS[symbol]?.tuning
+    if (tuningConfig && tuningConfig.smSignalSkew !== 0) {
+      // smSignalSkew < 0 -> Bearish -> Positive biasShiftBps (shift quotes UP/AWAY)
+      // -0.25 -> +5bps bias
+      biasShiftBps -= (tuningConfig.smSignalSkew * 20)
+    }
+
+    // 3. 🔥 FUNDING RATE BIAS (Arbitrage)
+    // High positive funding -> Crowded Longs -> We want to be Short (to earn funding) -> Shift quotes UP (easier sell, harder buy)
+    // High negative funding -> Crowded Shorts -> We want to be Long -> Shift quotes DOWN
+    const f = funding || 0;
+    let fundingBiasBps = 0;
+    if (f > 0.0005) fundingBiasBps = 10;      // > 0.05% hourly (~400% APY) -> Sell Aggressively
+    else if (f > 0.0002) fundingBiasBps = 5;  // > 0.02% hourly
+    else if (f < -0.0005) fundingBiasBps = -10;
+    else if (f < -0.0002) fundingBiasBps = -5;
+
+    biasShiftBps += fundingBiasBps;
+
+    // Apply Bias to Spreads
+    if (biasShiftBps !== 0) {
+      bidSpreadBps += biasShiftBps;
+      askSpreadBps -= biasShiftBps;
+
+      if (Math.abs(biasShiftBps) > 4) {
         this.notifier.info(
-          `🎯 [SOLANA BIAS] ZEC/SOL trend4h=${trend4h ?? 'n/a'} trend15m=${trend15m ?? 'n/a'} → biasShift=${biasShiftBps.toFixed(
-            1
-          )}bps`
+          `🎯 [BIAS] ${pair} shift=${biasShiftBps.toFixed(1)}bps (FundBias=${fundingBiasBps}, Tuning=${tuningConfig?.smSignalSkew ?? 0})`
         );
       }
     }
