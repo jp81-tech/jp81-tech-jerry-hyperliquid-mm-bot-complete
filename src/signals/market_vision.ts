@@ -46,7 +46,7 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
   },
   'HYPE': {
     chain: 'hyperevm',
-    address: '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
     spreadCaps: { min: 0.9, max: 1.3 },
     tuning: { // NEUTRAL / HIGH VOL
       enabled: true,
@@ -88,8 +88,8 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     }
   },
   'BTC': { // Dodaję manualnie mimo braku adresu, bo jest w tuningu
-    chain: 'bitcoin',
-    address: 'bitcoin',
+    chain: 'ethereum',
+    address: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599', // WBTC
     tuning: { // 🔴 SM HEAVY SHORT (9L / 52S)
       enabled: true,
       baseSpreadBps: 12,

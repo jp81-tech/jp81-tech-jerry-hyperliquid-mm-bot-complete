@@ -1,3 +1,5 @@
+import { RateLimiter } from '../utils/rate_limiter.js'
+
 // Use native fetch (Node 18+)
 
 export type HLMarket = {
@@ -39,13 +41,43 @@ export type Candle = {
 
 export class HyperliquidAPI {
   private baseUrl: string
+  private rateLimiter: RateLimiter
 
   constructor(baseUrl = 'https://api.hyperliquid.xyz') {
     this.baseUrl = baseUrl
+    this.rateLimiter = new RateLimiter(2) // 2 requests per second
+  }
+
+  private async fetchWithRetry(url: string, options: any, retries = 3): Promise<Response> {
+    for (let i = 0; i < retries; i++) {
+      // Wait for rate limit slot
+      await this.rateLimiter.waitForSlot()
+
+      try {
+        const res = await fetch(url, options)
+        if (res.status === 429 || res.status === 503 || res.status === 502) {
+          const delay = 2000 * Math.pow(2, i) // 2s, 4s, 8s
+          if (i < retries - 1) {
+            console.warn(`[HyperliquidAPI] Rate limit/Error ${res.status} on ${url}. Retrying in ${delay}ms...`)
+            await new Promise(r => setTimeout(r, delay))
+            continue
+          } else {
+            throw new Error(`Request failed with status ${res.status} after ${retries} retries`)
+          }
+        }
+        return res
+      } catch (e) {
+        if (i === retries - 1) throw e
+        const delay = 2000 * Math.pow(2, i)
+        console.warn(`[HyperliquidAPI] Network error on ${url}: ${e}. Retrying in ${delay}ms...`)
+        await new Promise(r => setTimeout(r, delay))
+      }
+    }
+    throw new Error('Max retries exceeded')
   }
 
   async getMetaAndAssetCtxs(): Promise<[{ universe: HLMarket[] }, HLAssetCtx[]]> {
-    const res = await fetch(`${this.baseUrl}/info`, {
+    const res = await this.fetchWithRetry(`${this.baseUrl}/info`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'metaAndAssetCtxs' })
@@ -60,6 +92,17 @@ export class HyperliquidAPI {
     }))
 
     return [meta, assetCtxs]
+  }
+
+  async getClearinghouseState(user: string): Promise<any> {
+    const res = await this.fetchWithRetry(`${this.baseUrl}/info`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'clearinghouseState', user })
+    })
+
+    if (!res.ok) throw new Error(`Failed to fetch clearinghouseState: ${res.statusText}`)
+    return await res.json()
   }
 
   /**
@@ -80,7 +123,7 @@ export class HyperliquidAPI {
       }
     }
 
-    const res = await fetch(`${this.baseUrl}/info`, {
+    const res = await this.fetchWithRetry(`${this.baseUrl}/info`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body)

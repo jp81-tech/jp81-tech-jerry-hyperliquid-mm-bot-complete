@@ -1,6 +1,6 @@
 # 🔧 HL MM Bot – Troubleshooting & Diagnostics
 
-**Ostatnia aktualizacja:** 2025‑11‑21  
+**Ostatnia aktualizacja:** 2025‑11‑21
 **Setup:** systemd + `mm-bot.service`, inventory guard + UNWIND mode, Slack alerts
 
 Ten plik jest Twoją kartką „na lodówkę” – ma Ci pozwolić w **60 sekund** sprawdzić:
@@ -17,7 +17,7 @@ Ten plik jest Twoją kartką „na lodówkę” – ma Ci pozwolić w **60 sekun
 Na Macu (lokalnie):
 
 ```bash
-ssh jerry@65.109.92.187
+ssh jerry@<SERVER_IP>
 ```
 
 Jeśli pyta o hasło – wpisujesz hasło użytkownika `jerry` na serwerze.
@@ -68,7 +68,7 @@ Przykład problemu:
 
 ```text
 Active: failed (Result: exit-code)
-``` 
+```
 
 Wtedy od razu:
 
@@ -303,7 +303,7 @@ Niektóre blokady zależą od PnL.
 
 ### 6.1. Szybki podgląd PnL
 
-Jeśli masz skrypt `daily_pnl_report` (systemd/cron): znajdziesz raport na Slacku w kanale PnL. 
+Jeśli masz skrypt `daily_pnl_report` (systemd/cron): znajdziesz raport na Slacku w kanale PnL.
 
 Manualny check z loga:
 
@@ -419,5 +419,5 @@ Jeśli utkniesz na którymś z kroków, możesz skopiować fragment loga + `.env
 
 ---
 
-**Autor:** ND helper (agresywny profil, HL MM)  
+**Autor:** ND helper (agresywny profil, HL MM)
 **Kontekst:** systemd + UNWIND + inventory guard + Slack reporting

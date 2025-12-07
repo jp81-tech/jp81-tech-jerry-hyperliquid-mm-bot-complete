@@ -3051,7 +3051,7 @@ class HyperliquidMMBot {
     console.log('📦 Legacy unwinding enabled: mode=' + (process.env.LEGACY_UNWIND_MODE || 'passive'))
 
     // Configuration from env
-    this.intervalSec = Number(process.env.MM_INTERVAL_SEC || 15)
+    this.intervalSec = Number(process.env.MM_INTERVAL_SEC || 60)
     this.baseOrderUsd = Number(process.env.BASE_ORDER_USD || 150)
     this.makerSpreadBps = Number(process.env.MAKER_SPREAD_BPS || 40)
     this.rotationIntervalSec = Number(process.env.ROTATION_INTERVAL_SEC || 14400) // 4 hours
@@ -3239,6 +3239,7 @@ class HyperliquidMMBot {
 
         // 🛑 LIQUIDITY GUARD: Cancel orders on blocked pairs
         await this.cancelAllOnBlockedPairs();
+        await this.sleep(2000);
 
         // ⚡ SYNC PnL FROM HYPERLIQUID (SOURCE OF TRUTH)
         // Note: syncPnLFromHyperliquid() handles daily PnL reset automatically
@@ -3263,6 +3264,7 @@ class HyperliquidMMBot {
             )
           }
         }
+        await this.sleep(2000);
 
         // Check daily loss limit
         const state = this.stateManager.getState()
@@ -3287,6 +3289,7 @@ class HyperliquidMMBot {
 
         // Rotate pairs if needed
         await this.rotateIfNeeded()
+        await this.sleep(2000);
 
         // WHALE TRACKER CHECK
         const now = Date.now();
@@ -3309,6 +3312,7 @@ class HyperliquidMMBot {
         if (this.nansenConflictCheckEnabled) {
           await this.checkNansenConflicts()
         }
+        await this.sleep(2000);
 
         // Execute market making
         // Check for manual rotation mode override
@@ -3330,6 +3334,7 @@ class HyperliquidMMBot {
 
         // Apply rotation pair limits: close positions outside MAX_ACTIVE_PAIRS
         await this.applyRotationPairs(activePairs)
+        await this.sleep(2000);
 
         // Enforce MAX_ACTIVE_PAIRS for execution as well
         if (activePairs.length > MAX_ACTIVE_PAIRS) {
@@ -3768,41 +3773,62 @@ class HyperliquidMMBot {
    * Get all pairs with open positions from the account
    */
   async getAllPositionPairs(): Promise<string[]> {
-    try {
-      // Delegate to trading instance to get positions
-      if (!(this.trading instanceof LiveTrading)) {
-        this.notifier.warn(`getAllPositionPairs requires LiveTrading instance`)
+    let retries = 0
+    const maxRetries = 3
+
+    while (retries < maxRetries) {
+      try {
+        // Delegate to trading instance to get positions
+        if (!(this.trading instanceof LiveTrading)) {
+          this.notifier.warn(`getAllPositionPairs requires LiveTrading instance`)
+          return []
+        }
+
+        const infoClient = (this.trading as any).infoClient
+        const walletAddress = (this.trading as any).walletAddress
+
+        if (!infoClient || typeof infoClient.clearinghouseState !== 'function') {
+          this.notifier.warn(`InfoClient not initialized in LiveTrading`)
+          return []
+        }
+
+        const userState = await infoClient.clearinghouseState({ user: walletAddress })
+
+        if (!userState || !userState.assetPositions) {
+          return []
+        }
+
+        // Extract pairs with non-zero position sizes
+        const positionPairs = userState.assetPositions
+          .filter((pos: any) => {
+            const size = Math.abs(parseFloat(pos.position?.szi || '0'))
+            return size > 0
+          })
+          .map((pos: any) => pos.position?.coin || '')
+          .filter((pair: string) => pair !== '')
+
+        return positionPairs
+      } catch (error: any) {
+        const errStr = String(error)
+        const errMsg = error?.message || ''
+        const fullMsg = (errStr + ' ' + errMsg).toLowerCase()
+        const isRateLimit = fullMsg.includes('429') || fullMsg.includes('too many requests') || fullMsg.includes('venue unreachable')
+
+        if (isRateLimit) {
+          retries++
+          const delay = 5000 * Math.pow(2, retries) // 10s, 20s, 40s
+          this.notifier.warn(
+            `⚠️ [HL-MM] Rate limit in getAllPositionPairs (attempt ${retries}/${maxRetries}). Sleeping ${delay}ms...`
+          )
+          await this.sleep(delay)
+          continue
+        }
+
+        this.notifier.warn(`Failed to get position pairs: ${errStr}`)
         return []
       }
-
-      const infoClient = (this.trading as any).infoClient
-      const walletAddress = (this.trading as any).walletAddress
-
-      if (!infoClient || typeof infoClient.clearinghouseState !== 'function') {
-        this.notifier.warn(`InfoClient not initialized in LiveTrading`)
-        return []
-      }
-
-      const userState = await infoClient.clearinghouseState({ user: walletAddress })
-
-      if (!userState || !userState.assetPositions) {
-        return []
-      }
-
-      // Extract pairs with non-zero position sizes
-      const positionPairs = userState.assetPositions
-        .filter((pos: any) => {
-          const size = Math.abs(parseFloat(pos.position?.szi || '0'))
-          return size > 0
-        })
-        .map((pos: any) => pos.position?.coin || '')
-        .filter((pair: string) => pair !== '')
-
-      return positionPairs
-    } catch (error) {
-      this.notifier.warn(`Failed to get position pairs: ${error}`)
-      return []
     }
+    return []
   }
 
   /**
@@ -3814,14 +3840,9 @@ class HyperliquidMMBot {
         return
       }
 
-      const infoClient = (this.trading as any).infoClient
       const walletAddress = (this.trading as any).walletAddress
 
-      if (!infoClient || typeof infoClient.clearinghouseState !== 'function') {
-        return
-      }
-
-      const userState = await infoClient.clearinghouseState({ user: walletAddress })
+      const userState = await this.api.getClearinghouseState(walletAddress)
       if (!userState || !userState.assetPositions) {
         return
       }
@@ -4129,7 +4150,33 @@ class HyperliquidMMBot {
 
   async executeMM(pairs: string[], activePairs: string[] = []) {
     // ⚡ OPTIMIZED: Fetch market data ONCE for all pairs (major latency improvement!)
-    const [meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
+    // Added retry logic for 429/Rate Limits
+    let meta: any, assetCtxs: any
+    let retries = 0
+    const maxRetries = 3
+
+    while (retries < maxRetries) {
+      try {
+        ;[meta, assetCtxs] = await this.api.getMetaAndAssetCtxs()
+        break // Success
+      } catch (error: any) {
+        const errStr = String(error)
+        const errMsg = error?.message || ''
+        const fullMsg = (errStr + ' ' + errMsg).toLowerCase()
+
+        if (fullMsg.includes('429') || fullMsg.includes('too many requests') || fullMsg.includes('venue unreachable')) {
+          retries++
+          const delay = 5000 * Math.pow(2, retries) // 10s, 20s, 40s
+          this.notifier.warn(
+            `⚠️ [HL-MM] Rate limit in executeMM data fetch (attempt ${retries}/${maxRetries}). Sleeping ${delay}ms...`
+          )
+          await this.sleep(delay)
+          if (retries >= maxRetries) throw error
+        } else {
+          throw error // Rethrow non-rate-limit errors immediately
+        }
+      }
+    }
 
     // Identify legacy pairs (positions not in top 3)
     const legacyPairs = pairs.filter(p => !activePairs.includes(p))
@@ -5133,6 +5180,19 @@ class HyperliquidMMBot {
       }
     }
 
+    // 🛑 FORCE SHORT ONLY FOR FARTCOIN (User Request)
+    if (pair === 'FARTCOIN') {
+      const currentSz = position ? Number(position.size) : 0;
+      // If not short (i.e. flat or long), forbid new Longs (Bids)
+      // This ensures we only enter via Shorts. Once Short, we can Bid to close.
+      if (currentSz >= 0) {
+        permissions.allowLongs = false;
+        if (permissions.reason) permissions.reason += ' | ';
+        permissions.reason += 'FARTCOIN_FORCE_SHORT_ONLY';
+        this.notifier.info(`[FORCE_SHORT_ONLY] FARTCOIN: No Short pos (sz=${currentSz}), blocking Bids.`);
+      }
+    }
+
     if (permissions.reason !== 'neutral_regime') {
       console.log(`🛡️  [REGIME] ${pair}: ${permissions.reason} (Longs: ${permissions.allowLongs}, Shorts: ${permissions.allowShorts})`);
     }
@@ -5852,11 +5912,13 @@ async function main() {
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...')
+    getNansenProAPI().cleanup()
     process.exit(0)
   })
 
   process.on('SIGTERM', () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...')
+    getNansenProAPI().cleanup()
     process.exit(0)
   })
 
