@@ -553,6 +553,9 @@ export class MarketVisionService {
           console.log(`👁️  ${pair}: Reversal Signal (${reversalWarning})! Score=${score} (4h=${trend4h})`);
         }
 
+        // THROTTLE REQUESTS: Prevent 429 on Hyperliquid and Nansen
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
       } catch (err) {
         // ignore individual pair errors
         console.warn(`Failed to update analysis for ${pair}:`, err);
