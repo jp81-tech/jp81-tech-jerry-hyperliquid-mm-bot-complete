@@ -13,6 +13,8 @@
  */
 
 import axios, { AxiosInstance } from 'axios'
+import fs from 'fs'
+import path from 'path'
 
 // ═══════════════════════════════════════════════════════════════
 // TYPE DEFINITIONS
@@ -198,9 +200,20 @@ export class NansenProAPI {
   private circuit: Map<string, { state: 'CLOSED' | 'OPEN'; failures: number; lastFailure: number }> = new Map()
   private failureThreshold = 3
   private cooldownMs = 60_000
+  private cacheFilePath = path.join(process.cwd(), 'data', 'nansen_cache_v2.json')
+  private isCacheDirty = false
 
   constructor(apiKey?: string) {
     this.apiKey = apiKey || process.env.NANSEN_API_KEY || ''
+
+    this.loadDiskCache()
+
+    // Auto-save cache every 60 seconds if dirty
+    setInterval(() => {
+      if (this.isCacheDirty) {
+        this.saveDiskCache()
+      }
+    }, 60000)
 
     this.client = axios.create({
       baseURL: 'https://api.nansen.ai/api/v1',
@@ -213,6 +226,49 @@ export class NansenProAPI {
 
     if (!this.apiKey) {
       console.warn('[Nansen Pro] No API key - features disabled')
+    }
+  }
+
+  private loadDiskCache() {
+    try {
+      if (fs.existsSync(this.cacheFilePath)) {
+        const raw = fs.readFileSync(this.cacheFilePath, 'utf-8');
+        const data = JSON.parse(raw);
+
+        // Restore main cache
+        if (data.cache) {
+          this.cache = new Map(data.cache);
+        }
+
+        // Restore risk cache
+        if (data.riskCache) {
+          this.riskCache = new Map(data.riskCache);
+        }
+
+        console.log(`[Nansen Pro] Loaded cache from disk (${this.cache.size} entries)`);
+      }
+    } catch (e) {
+      console.warn('[Nansen Pro] Failed to load disk cache:', e);
+    }
+  }
+
+  private saveDiskCache() {
+    try {
+      const data = {
+        cache: Array.from(this.cache.entries()),
+        riskCache: Array.from(this.riskCache.entries())
+      };
+
+      const dir = path.dirname(this.cacheFilePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      fs.writeFileSync(this.cacheFilePath, JSON.stringify(data));
+      this.isCacheDirty = false;
+      // console.debug('[Nansen Pro] Saved cache to disk');
+    } catch (e) {
+      console.error('[Nansen Pro] Failed to save disk cache:', e);
     }
   }
 
@@ -267,7 +323,8 @@ export class NansenProAPI {
 
   private isChainUnsupported(chain: string): boolean {
     // HL-native / BTC / inne niestandardowe nie mają sensownych danych TGM
-    const unsupported = ['hyperliquid', 'bitcoin']
+    // UWAGA: Hyperliquid jest wspierane dla perps, więc usuwam z blokady
+    const unsupported = ['bitcoin']
     return unsupported.includes(chain.toLowerCase())
   }
 
@@ -302,10 +359,12 @@ export class NansenProAPI {
 
         // Retry on 429 / timeout once with backoff
         if (code === 429) {
+          this.recordFailure(ep, chain)
           await this.sleep(5000)
           continue
         }
         if (code === 408) {
+          this.recordFailure(ep, chain)
           await this.sleep(2000)
           continue
         }
@@ -338,6 +397,7 @@ export class NansenProAPI {
 
   private setCache(key: string, data: any): void {
     this.cache.set(key, { data, timestamp: Date.now() })
+    this.isCacheDirty = true
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -836,6 +896,7 @@ export class NansenProAPI {
       components: result.components,
       timestamp: now
     })
+    this.isCacheDirty = true
 
     console.info(
       `[Nansen Pro] RISK REFRESH ${tokenAddress} chain=${chain} score=${result.score}/10 – ${result.components.reason}`
@@ -855,6 +916,11 @@ export class NansenProAPI {
       return []
     }
 
+    const tokenKey = tokens.sort().join(',')
+    const cacheKey = `flow_intel_${chain}_${tokenKey}`
+    const cached = this.getCached<NansenFlowIntelligence[]>(cacheKey, 15 * 60 * 1000) // 15 min cache
+    if (cached) return cached
+
     try {
       const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
       const now = new Date().toISOString()
@@ -869,9 +935,12 @@ export class NansenProAPI {
         chain
       )
 
-      return data?.flows || []
+      const result = data?.flows || []
+      this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       this.logError(error, 'Flow intelligence failed')
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -889,6 +958,10 @@ export class NansenProAPI {
       console.debug(`[Nansen Pro] DEX trades skipped for unsupported chain=${chain}`)
       return []
     }
+
+    const cacheKey = `dex_trades_${chain}_${tokenAddress}_${mode}`
+    const cached = this.getCached<NansenDexTrade[]>(cacheKey, 10 * 60 * 1000) // 10 min cache
+    if (cached) return cached
 
     try {
       const now = new Date()
@@ -928,9 +1001,12 @@ export class NansenProAPI {
         payload,
         chain
       )
-      return data?.data || []
+      const result = data?.data || []
+      this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       this.logError(error, `DEX Trades (${mode}) failed for ${tokenAddress}`)
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -944,6 +1020,10 @@ export class NansenProAPI {
       console.debug(`[Nansen Pro] Holders skipped for unsupported chain=${chain}`)
       return []
     }
+
+    const cacheKey = `holders_${chain}_${tokenAddress}`
+    const cached = this.getCached<NansenTokenHolder[]>(cacheKey, 30 * 60 * 1000) // 30 min cache (holders change slowly)
+    if (cached) return cached
 
     try {
       const data = await this.postWithResilience(
@@ -959,9 +1039,12 @@ export class NansenProAPI {
         chain
       )
 
-      return data?.holders || []
+      const result = data?.holders || []
+      this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       this.logError(error, `Holders failed for ${tokenAddress}`)
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1012,6 +1095,10 @@ export class NansenProAPI {
       return []
     }
 
+    const cacheKey = `tgm_perps_${chain}_${token}_${minUsd}`
+    const cached = this.getCached<NansenPerpPositionTgm[]>(cacheKey, 15 * 60 * 1000) // 15 min cache
+    if (cached) return cached
+
     try {
       // Structure based on provided Python script for Perps mode
       const payload = {
@@ -1033,9 +1120,13 @@ export class NansenProAPI {
         payload,
         chain
       )
-      return data?.data || []
+      const result = data?.data || []
+      this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       this.logError(error, `TGM Perp Positions failed for ${token}`)
+      // Cache failure as empty to prevent retry loops on 404s
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1050,21 +1141,32 @@ export class NansenProAPI {
       return []
     }
 
+    const cacheKey = `sm_perp_trades_${chain}_${symbol}`
+    const cached = this.getCached<any[]>(cacheKey, 15 * 60 * 1000) // 15 min cache
+    if (cached) return cached
+
     try {
       const now = new Date()
       const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000)
 
-      const response = await this.client.post('/smart-money/perp-trades', {
-        chain,
-        symbol,
-        date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
-        filters: { value_usd: { min: 50000 } },
-        order_by: [{ field: 'block_time', direction: 'DESC' }]
-      })
+      const data = await this.postWithResilience(
+        '/smart-money/perp-trades',
+        {
+          chain,
+          symbol,
+          date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+          filters: { value_usd: { min: 50000 } },
+          order_by: [{ field: 'block_time', direction: 'DESC' }]
+        },
+        chain
+      )
 
-      return response.data.data || []
+      const result = data?.data || []
+      this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       console.error(`[Nansen Pro] SM Perp Trades failed for ${symbol}:`, error.message)
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1456,7 +1558,7 @@ export class NansenProAPI {
    * Uses WHYPE address as primary signal source (better DEX coverage).
    */
   async getHypeHyperevmSignals(): Promise<TokenFlowSignals | null> {
-    const WHYPE_HYPEREVM = '0x5555555555555555555555555555555555555555'
+    const WHYPE_HYPEREVM = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
     return this.getTokenFlowSignals(WHYPE_HYPEREVM, 'hyperevm')
   }
 
