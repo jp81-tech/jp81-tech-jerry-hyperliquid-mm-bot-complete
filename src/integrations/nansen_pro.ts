@@ -15,6 +15,7 @@
 import axios, { AxiosInstance } from 'axios'
 import fs from 'fs'
 import path from 'path'
+import { RateLimiter } from '../utils/rate_limiter.js'
 
 // ═══════════════════════════════════════════════════════════════
 // TYPE DEFINITIONS
@@ -124,66 +125,7 @@ export interface TokenFlowSignals {
   warnings: string[]
 }
 
-// ═══════════════════════════════════════════════════════════════
-// ENDPOINT MANAGER (Circuit Breaker & Fallbacks)
-// ═══════════════════════════════════════════════════════════════
-
-interface EndpointState {
-  status: 'available' | 'forbidden' | 'rate_limited' | 'error'
-  lastFailure: number
-  cooldownUntil: number
-  failureCount: number
-}
-
-class EndpointManager {
-  private states: Record<string, EndpointState> = {}
-  private readonly FORBIDDEN_COOLDOWN = 24 * 60 * 60 * 1000 // 24h
-  private readonly ERROR_COOLDOWN = 60 * 1000 // 1 min
-
-  isAvailable(endpoint: string): boolean {
-    const state = this.states[endpoint]
-    if (!state) return true
-
-    if (Date.now() < state.cooldownUntil) {
-      return false
-    }
-
-    return true
-  }
-
-  recordSuccess(endpoint: string) {
-    if (this.states[endpoint]) {
-      delete this.states[endpoint]
-    }
-  }
-
-  recordFailure(endpoint: string, status: number) {
-    const state = this.states[endpoint] || {
-      status: 'available',
-      lastFailure: 0,
-      cooldownUntil: 0,
-      failureCount: 0
-    }
-
-    state.lastFailure = Date.now()
-    state.failureCount++
-
-    if (status === 403) {
-      state.status = 'forbidden'
-      state.cooldownUntil = Date.now() + this.FORBIDDEN_COOLDOWN
-      console.warn(`🔒 Endpoint ${endpoint} FORBIDDEN (403) - disabled for 24h`)
-    } else if (status === 429) {
-      state.status = 'rate_limited'
-      state.cooldownUntil = Date.now() + (5 * 60 * 1000)
-      console.warn(`⏳ Endpoint ${endpoint} rate limited - cooldown 5min`)
-    } else if (status >= 500) {
-      state.status = 'error'
-      state.cooldownUntil = Date.now() + this.ERROR_COOLDOWN
-    }
-
-    this.states[endpoint] = state
-  }
-}
+// EndpointManager removed
 
 // ═══════════════════════════════════════════════════════════════
 // NANSEN PRO API CLIENT
@@ -194,7 +136,8 @@ export class NansenProAPI {
   private apiKey: string
   private cache: Map<string, { data: any; timestamp: number }> = new Map()
   private riskCache: Map<string, { score: number; components: any; timestamp: number }> = new Map()
-  private endpointManager = new EndpointManager()
+  private endpointManager = null // removed
+
   private cacheTtlMs = 300000 // 5 minutes for most endpoints
   // Simple circuit breaker per endpoint+chain
   private circuit: Map<string, { state: 'CLOSED' | 'OPEN'; failures: number; lastFailure: number }> = new Map()
@@ -202,14 +145,18 @@ export class NansenProAPI {
   private cooldownMs = 60_000
   private cacheFilePath = path.join(process.cwd(), 'data', 'nansen_cache_v2.json')
   private isCacheDirty = false
+  private rateLimiter: RateLimiter
+
+  private saveInterval: NodeJS.Timeout | null = null
 
   constructor(apiKey?: string) {
     this.apiKey = apiKey || process.env.NANSEN_API_KEY || ''
+    this.rateLimiter = new RateLimiter(2) // 2 requests per second
 
     this.loadDiskCache()
 
     // Auto-save cache every 60 seconds if dirty
-    setInterval(() => {
+    this.saveInterval = setInterval(() => {
       if (this.isCacheDirty) {
         this.saveDiskCache()
       }
@@ -324,7 +271,7 @@ export class NansenProAPI {
   private isChainUnsupported(chain: string): boolean {
     // HL-native / BTC / inne niestandardowe nie mają sensownych danych TGM
     // UWAGA: Hyperliquid jest wspierane dla perps, więc usuwam z blokady
-    const unsupported = ['bitcoin']
+    const unsupported: string[] = []
     return unsupported.includes(chain.toLowerCase())
   }
 
@@ -350,35 +297,42 @@ export class NansenProAPI {
         continue
       }
 
-      try {
-        const res = await this.client.post(ep, payload)
-        this.recordSuccess(ep, chain)
-        return res.data
-      } catch (error: any) {
-        const code = error?.response?.status
+      // Retry loop for this endpoint
+      for (let attempt = 0; attempt < 2; attempt++) {
+        // Wait for rate limit slot
+        await this.rateLimiter.waitForSlot()
 
-        // Retry on 429 / timeout once with backoff
-        if (code === 429) {
-          this.recordFailure(ep, chain)
-          await this.sleep(5000)
-          continue
-        }
-        if (code === 408) {
-          this.recordFailure(ep, chain)
-          await this.sleep(2000)
-          continue
-        }
+        try {
+          const res = await this.client.post(ep, payload)
+          this.recordSuccess(ep, chain)
+          return res.data
+        } catch (error: any) {
+          const code = error?.response?.status
 
-        // 404 / 422: try next fallback quietly
-        if (code === 404 || code === 422) {
-          this.recordFailure(ep, chain)
-          console.debug(`[Nansen Pro] ${ep} skipped (status=${code})`)
-          continue
-        }
+          // Retry on 429 / timeout once with backoff
+          if ((code === 429 || code === 408) && attempt === 0) {
+            // Do not record failure immediately for retryable errors if we have attempts left
+            // This prevents "double-counting" failures if the retry also fails
+            // But we SHOULD record it if we want circuit breaker to see "instability"
+            // However, per Bug 2 request: "The code should either only record the failure once per endpoint+chain attempt, or avoid retrying rate-limit errors."
+            // We choose to NOT record failure on the FIRST attempt, only if the retry also fails (caught by final error handler)
+            await this.sleep(code === 429 ? 5000 : 2000)
+            continue // Retry same endpoint
+          }
 
-        // Other errors
-        this.recordFailure(ep, chain)
-        this.logError(error, `POST ${ep}`)
+          // 404 / 422: try next fallback quietly (break inner loop)
+          if (code === 404 || code === 422) {
+            // Do not record failure for expected missing data (keeps circuit closed)
+            console.debug(`[Nansen Pro] ${ep} skipped (status=${code})`)
+            break
+          }
+
+          // FIX: Record failure even for 429/408 if we are out of retries (attempt === 1)
+          this.recordFailure(ep, chain)
+          this.logError(error, `POST ${ep}`)
+
+          break // Move to next endpoint
+        }
       }
     }
 
@@ -419,18 +373,22 @@ export class NansenProAPI {
       const now = new Date()
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
 
-      const response = await this.client.post('/perp-screener', {
-        date: {
-          from: sevenDaysAgo.toISOString(),
-          to: now.toISOString()
+      const data = await this.postWithResilience(
+        '/perp-screener',
+        {
+          date: {
+            from: sevenDaysAgo.toISOString(),
+            to: now.toISOString()
+          },
+          pagination: {
+            page: 1,
+            per_page: limit
+          }
         },
-        pagination: {
-          page: 1,
-          per_page: limit
-        }
-      })
+        'hyperliquid'
+      )
 
-      const traders: NansenPerpTrader[] = response.data.data || []
+      const traders: NansenPerpTrader[] = data?.data || []
       this.setCache(cacheKey, traders)
 
       return traders
@@ -450,16 +408,20 @@ export class NansenProAPI {
       const now = new Date()
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 3600 * 1000)
 
-      const response = await this.client.post('/tgm/perp-pnl-leaderboard', {
-        token_symbol: tokenSymbol,
-        date: {
-          from: sevenDaysAgo.toISOString(),
-          to: now.toISOString()
+      const data = await this.postWithResilience(
+        '/tgm/perp-pnl-leaderboard',
+        {
+          token_symbol: tokenSymbol,
+          date: {
+            from: sevenDaysAgo.toISOString(),
+            to: now.toISOString()
+          },
+          pagination: { page: 1, per_page: limit }
         },
-        pagination: { page: 1, per_page: limit }
-      })
+        'hyperliquid'
+      )
 
-      return response.data.data || []
+      return data?.data || []
     } catch (error: any) {
       console.error(`[Nansen Pro] PnL leaderboard for ${tokenSymbol} failed:`, error.message)
       return []
@@ -473,11 +435,15 @@ export class NansenProAPI {
     if (!this.isEnabled()) return null
 
     try {
-      const response = await this.client.post('/profiler/perp-positions', {
-        address: walletAddress
-      })
+      const data = await this.postWithResilience(
+        '/profiler/perp-positions',
+        {
+          address: walletAddress
+        },
+        'hyperliquid'
+      )
 
-      return response.data.data || null
+      return data?.data || null
     } catch (error: any) {
       console.error(`[Nansen Pro] Wallet positions for ${walletAddress} failed:`, error.message)
       return null
@@ -894,7 +860,7 @@ export class NansenProAPI {
     this.riskCache.set(key, {
       score: result.score,
       components: result.components,
-      timestamp: now
+      timestamp: Date.now()
     })
     this.isCacheDirty = true
 
@@ -940,7 +906,7 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, 'Flow intelligence failed')
-      this.setCache(cacheKey, [])
+      // this.setCache(cacheKey, []) // Removed: Do not cache failures
       return []
     }
   }
@@ -1006,7 +972,7 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `DEX Trades (${mode}) failed for ${tokenAddress}`)
-      this.setCache(cacheKey, [])
+      // this.setCache(cacheKey, []) // Removed: Do not cache failures
       return []
     }
   }
@@ -1044,7 +1010,7 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `Holders failed for ${tokenAddress}`)
-      this.setCache(cacheKey, [])
+      // this.setCache(cacheKey, []) // Removed: Do not cache failures
       return []
     }
   }
@@ -1125,8 +1091,8 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `TGM Perp Positions failed for ${token}`)
-      // Cache failure as empty to prevent retry loops on 404s
-      this.setCache(cacheKey, [])
+      // Cache failure as empty to prevent retry loops on 404s - DISABLED per request
+      // this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1166,7 +1132,7 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       console.error(`[Nansen Pro] SM Perp Trades failed for ${symbol}:`, error.message)
-      this.setCache(cacheKey, [])
+      // this.setCache(cacheKey, []) // Removed: Do not cache failures
       return []
     }
   }
@@ -1182,15 +1148,19 @@ export class NansenProAPI {
     if (!this.isEnabled()) return []
 
     try {
-      const response = await this.client.post('/profiler/entity/counterparties', {
-        entity_id: entityId,
-        chain: chain,
-        date_range: { from: '1D_AGO', to: 'NOW' },
-        order_by: [{ field: 'volume_out_usd', direction: 'DESC' }],
-        pagination: { page: 1, per_page: 50 }
-      })
+      const data = await this.postWithResilience(
+        '/profiler/entity/counterparties',
+        {
+          entity_id: entityId,
+          chain: chain,
+          date_range: { from: '1D_AGO', to: 'NOW' },
+          order_by: [{ field: 'volume_out_usd', direction: 'DESC' }],
+          pagination: { page: 1, per_page: 50 }
+        },
+        chain
+      )
 
-      return response.data.data || []
+      return data?.data || []
     } catch (error: any) {
       console.error(`[Nansen Pro] Entity counterparties failed for ${entityId}:`, error.message)
       return []
@@ -1204,14 +1174,18 @@ export class NansenProAPI {
     if (!this.isEnabled()) return []
 
     try {
-      const response = await this.client.post('/profiler/address/transactions', {
-        address: address,
-        chain: chain,
-        date_range: { from: '1H_AGO', to: 'NOW' },
-        pagination: { page: 1, per_page: 20 }
-      })
+      const data = await this.postWithResilience(
+        '/profiler/address/transactions',
+        {
+          address: address,
+          chain: chain,
+          date_range: { from: '1H_AGO', to: 'NOW' },
+          pagination: { page: 1, per_page: 20 }
+        },
+        chain
+      )
 
-      return response.data.data || []
+      return data?.data || []
     } catch (error: any) {
       console.error(`[Nansen Pro] Address txs failed for ${address}:`, error.message)
       return []
@@ -1225,16 +1199,20 @@ export class NansenProAPI {
     if (!this.isEnabled()) return []
 
     try {
-      const response = await this.client.post('/tgm/transfers', {
-        chain: chain,
-        token_address: tokenAddress,
-        date_range: { from: '1H_AGO', to: 'NOW' },
-        filters: { value_usd: { min: minUsd } },
-        order_by: [{ field: 'block_timestamp', direction: 'DESC' }],
-        pagination: { page: 1, per_page: 50 }
-      })
+      const data = await this.postWithResilience(
+        '/tgm/transfers',
+        {
+          chain: chain,
+          token_address: tokenAddress,
+          date_range: { from: '1H_AGO', to: 'NOW' },
+          filters: { value_usd: { min: minUsd } },
+          order_by: [{ field: 'block_timestamp', direction: 'DESC' }],
+          pagination: { page: 1, per_page: 50 }
+        },
+        chain
+      )
 
-      return response.data.data || []
+      return data?.data || []
     } catch (error: any) {
       console.error(`[Nansen Pro] Token transfers failed for ${tokenAddress}:`, error.message)
       return []
@@ -1432,7 +1410,7 @@ export class NansenProAPI {
     else if (whale > 500_000) mult += 0.3     // $500k+
     else if (whale > 100_000) mult += 0.15    // $100k+
 
-    const exch = signals.exchangeNet
+    const exch = Math.abs(signals.exchangeNet)
     if (exch > 5_000_000) mult += 0.8
     else if (exch > 1_000_000) mult += 0.5
     else if (exch > 100_000) mult += 0.2
@@ -1558,7 +1536,7 @@ export class NansenProAPI {
    * Uses WHYPE address as primary signal source (better DEX coverage).
    */
   async getHypeHyperevmSignals(): Promise<TokenFlowSignals | null> {
-    const WHYPE_HYPEREVM = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+    const WHYPE_HYPEREVM = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
     return this.getTokenFlowSignals(WHYPE_HYPEREVM, 'hyperevm')
   }
 
@@ -1630,6 +1608,17 @@ export class NansenProAPI {
 
   clearCache(): void {
     this.cache.clear()
+  }
+
+  cleanup(): void {
+    if (this.saveInterval) {
+      clearInterval(this.saveInterval)
+      this.saveInterval = null
+    }
+    // Save one last time if needed
+    if (this.isCacheDirty) {
+      this.saveDiskCache()
+    }
   }
 
   /**

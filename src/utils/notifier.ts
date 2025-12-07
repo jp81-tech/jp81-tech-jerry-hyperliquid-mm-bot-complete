@@ -18,17 +18,17 @@ export class ConsoleNotifier implements Notifier {
       msg.includes('[NANSEN KILL SWITCH]') ||
       msg.includes('🚨')
     ) {
-      telegramBot.send(msg, 'info');
+      telegramBot.send(msg, 'info').catch(e => console.error('[Telegram] Failed to send info:', e.message));
     }
   }
 
   warn(msg: string) {
     console.warn(`[WARN] ${msg}`);
-    telegramBot.send(msg, 'warn');
+    telegramBot.send(msg, 'warn').catch(e => console.error('[Telegram] Failed to send warn:', e.message));
   }
 
   error(msg: string) {
     console.error(`[ERROR] ${msg}`);
-    telegramBot.send(msg, 'error');
+    telegramBot.send(msg, 'error').catch(e => console.error('[Telegram] Failed to send error:', e.message));
   }
 }

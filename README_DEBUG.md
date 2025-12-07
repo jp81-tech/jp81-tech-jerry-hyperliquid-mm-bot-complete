@@ -251,7 +251,7 @@ Jeśli na HL widzisz że:
 ps aux | grep mm_hl.ts | grep -v grep
 ```
 
-- **Jeśli NIE MA procesu** → bot się wywalił (crashed).  
+- **Jeśli NIE MA procesu** → bot się wywalił (crashed).
 - **Jeśli JEST proces** → być może wisi (hung).
 
 ---
@@ -311,11 +311,11 @@ sleep 15
 tail -50 bot.log | grep 'quant_evt=submit' | tail -5
 ```
 
-**Idź na Hyperliquid UI:**  
-→ Order History  
+**Idź na Hyperliquid UI:**
+→ Order History
 → Czy widzisz **NOWE** `Open` z aktualnym timestampem (ostatnie 1-2 min)?
 
-- ✅ **TAK** → bot żyje  
+- ✅ **TAK** → bot żyje
 - ❌ **NIE** → bot znowu padł, wróć do kroku 1
 
 ---
@@ -333,7 +333,7 @@ tail -50 bot.log | grep 'quant_evt=submit' | tail -5
 #    - Close positions (lub zostaw małe, bezpieczne <$2k total)
 ```
 
-**Dlaczego?**  
+**Dlaczego?**
 Bo bot może paść i zostawić stare zlecenia, które powoli się fillują bez kontroli.
 
 ---
@@ -500,15 +500,15 @@ Ten rozdział jest ściągą do ogarniania serwera `hl-mm.jerrytrades.pl` i bota
 
 **Najważniejsze rzeczy do backupu:**
 
-- repo bota:  
+- repo bota:
   `/home/jerry/hyperliquid-mm-bot-complete`
-- główna konfiguracja:  
+- główna konfiguracja:
   `/home/jerry/hyperliquid-mm-bot-complete/.env`
-- jednostki systemd:  
-  `/etc/systemd/system/mm-bot.service`  
-  `/etc/systemd/system/*pnl*.service|*.timer`  
+- jednostki systemd:
+  `/etc/systemd/system/mm-bot.service`
+  `/etc/systemd/system/*pnl*.service|*.timer`
   `/etc/systemd/system/*health*.service|*.timer`
-- konfiguracja SSH:  
+- konfiguracja SSH:
   `/etc/ssh/sshd_config`
 
 **Szybki backup lokalny do tar:**
@@ -529,7 +529,7 @@ tar czf /root/mm-bot-backup-$(date +%Y%m%d).tar.gz \
 
 ```bash
 # na Macu
-scp root@65.109.92.187:/root/mm-bot-backup-*.tar.gz ~/Backups/
+scp root@<SERVER_IP>:/root/mm-bot-backup-*.tar.gz ~/Backups/
 ```
 
 ---
@@ -659,7 +659,7 @@ Force-redeploy świeżego `mm_hl.ts` z Maca na serwer:
 ```bash
 # na Macu
 scp /Users/jerry/Desktop/hyperliquid-mm-bot-complete/src/mm_hl.ts \
-  root@65.109.92.187:/home/jerry/hyperliquid-mm-bot-complete/src/mm_hl.ts
+  root@<SERVER_IP>:/home/jerry/hyperliquid-mm-bot-complete/src/mm_hl.ts
 ```
 
 Potem na serwerze restart:
