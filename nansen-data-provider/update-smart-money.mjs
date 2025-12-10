@@ -2,8 +2,8 @@
 /**
  * Smart Money Data Updater
  *
- * This script runs in Claude Code environment (has MCP access) and:
- * 1. Queries Nansen MCP for Smart Money positions
+ * This script queries Nansen API directly and:
+ * 1. Queries Nansen API for Smart Money positions
  * 2. Parses the results
  * 3. Pushes to Data Provider API on production server
  *
@@ -13,11 +13,6 @@
  * Cron (every 5 minutes):
  *   Run every 5 minutes: cd /path/to/nansen-data-provider && node update-smart-money.mjs >> update.log 2>&1
  */
-
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execPromise = promisify(exec);
 
 // Configuration
 const DATA_PROVIDER_URL = process.env.DATA_PROVIDER_URL || 'http://65.109.92.187:8080';
@@ -49,47 +44,59 @@ function parseMarkdownTable(markdown) {
 }
 
 /**
- * Query Nansen MCP for Smart Money positions
+ * Query Nansen API directly for Smart Money positions
  *
- * NOTE: This uses the actual MCP tool call syntax that works in Claude Code
+ * NOTE: Direct HTTP call to Nansen MCP endpoint
  */
 async function queryNansenMCP(tokenSymbol) {
-  console.log(`[${tokenSymbol}] Querying Nansen MCP...`);
+  console.log(`[${tokenSymbol}] Querying Nansen API...`);
 
   try {
-    // Call MCP using npx (Claude Code environment)
-    const cmd = `npx -y @anthropic-ai/mcp-client call https://mcp.nansen.ai/ra/mcp/ \
-      mcp__nansen__token_current_top_holders \
-      '{"request":{"parameters":{"mode":"perps","token_address":"${tokenSymbol}","label_type":"smart_money"},"page":1}}' \
-      --header "NANSEN-API-KEY:${NANSEN_API_KEY}" \
-      --allow-http`;
+    const requestBody = {
+      jsonrpc: '2.0',
+      method: 'tools/call',
+      params: {
+        name: 'mcp__nansen__token_current_top_holders',
+        arguments: {
+          request: {
+            parameters: {
+              mode: 'perps',
+              token_address: tokenSymbol,
+              label_type: 'smart_money'
+            },
+            page: 1
+          }
+        }
+      },
+      id: 1
+    };
 
-    const { stdout, stderr } = await execPromise(cmd, {
-      timeout: 30000,
-      maxBuffer: 10 * 1024 * 1024
+    const response = await fetch('https://mcp.nansen.ai/ra/mcp/', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'NANSEN-API-KEY': NANSEN_API_KEY
+      },
+      body: JSON.stringify(requestBody)
     });
 
-    if (stderr && !stderr.includes('npm notice')) {
-      console.error(`[${tokenSymbol}] Warning:`, stderr);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
-    // Parse the response
-    try {
-      const result = JSON.parse(stdout);
-      const content = result.content?.[0]?.text || '';
+    const result = await response.json();
 
-      if (!content) {
-        throw new Error('No content in MCP response');
-      }
+    // Extract markdown content from MCP response
+    const content = result.result?.content?.[0]?.text || '';
 
-      return content;
-    } catch (parseError) {
-      console.error(`[${tokenSymbol}] Failed to parse MCP response:`, parseError.message);
-      return null;
+    if (!content) {
+      throw new Error('No content in API response');
     }
+
+    return content;
 
   } catch (error) {
-    console.error(`[${tokenSymbol}] MCP query failed:`, error.message);
+    console.error(`[${tokenSymbol}] API query failed:`, error.message);
     return null;
   }
 }
