@@ -44,3 +44,4 @@ secrets/
 
 # SSH
 .ssh/
+.env.remote
