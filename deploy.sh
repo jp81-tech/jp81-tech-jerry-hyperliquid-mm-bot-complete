@@ -3,7 +3,9 @@ set -e
 
 # Konfiguracja
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    source .env
+    set +a
 fi
 
 SERVER_USER="${DEPLOY_USER:-jerry}"
