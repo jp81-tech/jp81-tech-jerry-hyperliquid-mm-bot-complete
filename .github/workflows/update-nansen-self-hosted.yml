@@ -21,7 +21,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./nansen-data-provider
-        run: npm install
+        run: npm ci
 
       - name: Update Smart Money data
         working-directory: ./nansen-data-provider
@@ -30,7 +30,27 @@ jobs:
           DATA_PROVIDER_URL: http://localhost:8080
         run: |
           echo "🚀 Starting Nansen Smart Money update..."
-          node update-smart-money.mjs
+          echo "Node version:"
+          node -v
+          echo "NPM version:"
+          npm -v
+          echo "--- files in working directory ---"
+          ls -la
+          echo "--- package.json ---"
+          if [ -f package.json ]; then cat package.json; else echo "no package.json"; fi
+          echo "--- show script (first 200 lines) ---"
+          if [ -f update-smart-money.mjs ]; then sed -n '1,200p' update-smart-money.mjs; else echo "update-smart-money.mjs not found"; fi
+          echo "--- running update (with extra diagnostics) ---"
+          LOGFILE=update-smart-money.log
+          # run node with source maps and trace warnings, capture output
+          node --enable-source-maps --trace-warnings update-smart-money.mjs >"$LOGFILE" 2>&1 || true
+          echo "----- last 200 lines of $LOGFILE -----"
+          tail -n 200 "$LOGFILE"
+          # Fail if the script did not indicate success
+          if ! grep -q "Update completed" "$LOGFILE"; then
+            echo "Node script did not complete successfully; see $LOGFILE above"
+            exit 1
+          fi
 
       - name: Check Data Provider health
         if: always()
