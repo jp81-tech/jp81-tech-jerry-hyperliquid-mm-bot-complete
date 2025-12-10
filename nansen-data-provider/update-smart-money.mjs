@@ -16,7 +16,7 @@
 
 // Configuration
 const DATA_PROVIDER_URL = process.env.DATA_PROVIDER_URL || 'http://65.109.92.187:8080';
-const NANSEN_API_KEY = process.env.NANSEN_API_KEY || 'DGLPOtSE9rbfy1O2ZnQO7eBmUBM2Qxcf';
+const NANSEN_API_KEY = process.env.NANSEN_API_KEY || 'VPukhDZkn1G2giIKaQlEx00zEETJDZRg';
 const TARGET_TOKENS = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC'];
 
 /**
