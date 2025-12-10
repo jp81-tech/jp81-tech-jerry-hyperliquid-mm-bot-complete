@@ -1,0 +1,46 @@
+name: Update Nansen Data (Self-hosted)
+
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  update-data:
+    runs-on: [self-hosted, mcp, linux]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ./nansen-data-provider
+        run: npm install
+
+      - name: Update Smart Money data
+        working-directory: ./nansen-data-provider
+        env:
+          NANSEN_API_KEY: ${{ secrets.NANSEN_API_KEY }}
+          DATA_PROVIDER_URL: http://localhost:8080
+        run: |
+          echo "🚀 Starting Nansen Smart Money update..."
+          node update-smart-money.mjs
+
+      - name: Check Data Provider health
+        if: always()
+        run: |
+          echo "📊 Checking Data Provider status..."
+          curl -s http://localhost:8080/health || echo "⚠️ Data Provider not responding"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Nansen data update failed!"
+          echo "Time: $(date)"
+          echo "Check runner logs for details"
