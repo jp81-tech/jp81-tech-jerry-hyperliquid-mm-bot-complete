@@ -1,17 +1,22 @@
 import * as hl from '@nktkas/hyperliquid'
+import dns from 'dns'
 import 'dotenv/config'
+
+// 🛡️ FIX: Node.js 18+ IPv6/IPv4 compatibility issue
+dns.setDefaultResultOrder('ipv4first')
+
 import { ethers } from 'ethers'
 import fs from 'fs'
 import path from 'path'
 import { HyperliquidAPI } from './api/hyperliquid.js'
 import { applyBehaviouralRiskToLayers, type BehaviouralRiskMode } from './behaviouralRisk.js'
-import { RiskManager, createConservativeRiskConfig, RiskAction, type RiskCheckResult } from './risk/RiskManager.js'
-import { TrendFilter } from './risk/trendFilter.js'
-import { ShadowWatch, createDefaultShadowWatch, type ShadowWatchResult } from './risk/shadowWatch.js'
-import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js'
 import { getGoldenDuoSignal, type GoldenDuoSignal } from './integrations/nansen_hyperliquid.js'
+import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js'
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { computeSideAutoSpread } from './risk/auto_spread.js'
+import { createConservativeRiskConfig, RiskAction, RiskManager, type RiskCheckResult } from './risk/RiskManager.js'
+import { createDefaultShadowWatch, ShadowWatch } from './risk/shadowWatch.js'
+import { TrendFilter } from './risk/trendFilter.js'
 import {
   SmartRotationEngine,
   type NansenWhaleRisk,
@@ -59,6 +64,24 @@ import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
 // Extend HyperliquidAPI to include infoClient (exists at runtime)
 type ExtendedHyperliquidAPI = HyperliquidAPI & {
   infoClient: hl.InfoClient
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOLDEN DUO DATA (Smart Money + Whale positioning from Nansen)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type GoldenDuoData = {
+  bias: number                    // 0-1 scale (0=bearish, 1=bullish)
+  signal: string                  // 'bullish', 'bearish', 'aligned_bearish', 'divergence_strong', etc.
+  sm_net_balance_usd: number      // Smart Money net position in USD
+  whale_net_balance_usd: number   // Whale net position in USD
+  whale_dump_alert?: boolean      // True if whale is dumping
+  positionBias?: number           // Legacy compatibility
+  flowSkew?: number               // Flow skew -1 to +1
+  divergence_type?: string        // 'sm_bull_whale_bear', 'sm_bear_whale_bull', 'none'
+  divergence_strength?: string    // 'extreme', 'strong', 'moderate', 'weak', 'none'
+  divergence_spread_mult?: number // Spread multiplier for divergence
+  divergence_inventory_mult?: number // Inventory multiplier for divergence
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -870,13 +893,13 @@ class SignalVerifier {
         // Jeśli Bias był Bearish (<0), a cena spadła -> WIN
         const priceChangePct = (currentPrice - snap.priceAtEntry) / snap.priceAtEntry
         const isWin = (snap.biasAtEntry > 0 && priceChangePct > 0.005) || // +0.5% profit
-                      (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
+          (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
 
         snap.status = isWin ? 'validated_win' : 'validated_loss'
         this.updateScore(pair, isWin)
         changed = true
 
-        console.log(`🕵️ [VERIFIER] Result for ${pair}: ${isWin ? '✅ WIN' : '❌ LOSS'} (Bias: ${snap.biasAtEntry}, Delta: ${(priceChangePct*100).toFixed(2)}%)`)
+        console.log(`🕵️ [VERIFIER] Result for ${pair}: ${isWin ? '✅ WIN' : '❌ LOSS'} (Bias: ${snap.biasAtEntry}, Delta: ${(priceChangePct * 100).toFixed(2)}%)`)
       }
     }
 
@@ -1189,6 +1212,16 @@ class LiveTrading implements TradingInterface {
   // Daily notional tracking (per coin, per day)
   private dailyNotionalByPair: Map<string, number> = new Map()
   private dailyNotionalDay: string | null = null
+
+  /**
+   * 🛡️ MODULE 3: Deadzone Check (API Economy)
+   * Prevents spamming exchange with micro-updates (< 2bps change).
+   */
+  private shouldUpdateQuote(newPrice: number, oldPrice: number | undefined): boolean {
+    if (!oldPrice) return true;
+    const diffBps = Math.abs(newPrice - oldPrice) / oldPrice * 10000;
+    return diffBps >= 2.0; // 2bps deadzone
+  }
 
   constructor(privateKey: string, api: HyperliquidAPI, chaseConfig: ChaseConfig | null = null) {
     if (!privateKey) {
@@ -1721,6 +1754,13 @@ class LiveTrading implements TradingInterface {
 
       // Round price to valid tick size (institutional-grade rounding)
       let roundedPrice = roundToTick(price, specs.tickSize)
+
+      // 🛡️ MODULE 3: Deadzone Check (API Economy)
+      const lastPrice = this.lastFillPrice.get(pair);
+      if (!reduceOnlyLocal && !this.shouldUpdateQuote(roundedPrice, lastPrice)) {
+        return { success: false };
+      }
+      this.lastFillPrice.set(pair, roundedPrice);
 
       // ═════════════════════════════════════════════════════════════════════
       // TIER 2: Volatility Detection
@@ -3123,6 +3163,27 @@ class HyperliquidMMBot {
 
   private isDryRun: boolean
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INSTITUTIONAL MULTI-TIER ARCHITECTURE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // TIER 2: Tactical Worker (5s) - SM Trade Detection
+  private tacticalInterval?: ReturnType<typeof setInterval>
+  private tacticalSignalBuffer: Map<string, number> = new Map() // Symbol -> Alpha Shift bps
+
+  // TIER 3: Strategic Worker (1m) - Golden Duo Sync
+  private strategicInterval?: ReturnType<typeof setInterval>
+  private goldenDuoData: Record<string, GoldenDuoData> = {}
+
+  // TIER 4: Positioning Worker (1h) - Rotation
+  private positioningInterval?: ReturnType<typeof setInterval>
+
+  // CEX Flow Analysis (for distribution/accumulation detection)
+  private cexFlowAnalysis: Map<string, { alertLevel: string; message: string; isDistributing: boolean; ratioVsAverage: number }> = new Map()
+
+  // L2 Order Book Cache (for Order Book Intelligence)
+  private l2BookCache: Map<string, { bids: Array<{ px: string; sz: string }>; asks: Array<{ px: string; sz: string }>; timestamp: number }> = new Map()
+
   constructor() {
     this.api = new HyperliquidAPI()
     this.infoClient = new hl.InfoClient({ transport: new hl.HttpTransport() })
@@ -3346,6 +3407,14 @@ class HyperliquidMMBot {
       }
     } else {
       this.notifier.info('✅ Paper trading ready')
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // MULTI-TIER WORKERS (Institutional Order Book Intelligence)
+    // ════════════════════════════════════════════════════════════════════════
+    if (this.config.enableMultiLayer) {
+      this.initializeMultiTierWorkers()
+      this.notifier.info('🏛️  Multi-tier workers initialized (TACTICAL 5s, STRATEGIC 60s)')
     }
   }
 
@@ -3640,6 +3709,67 @@ class HyperliquidMMBot {
   // Smart Rotation
   // ───────────────────────────────────────────────────────────────────────────
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // Smart Money & Whale Scoring Logic (Zgodna z Pythonem)
+  // ───────────────────────────────────────────────────────────────────────────
+
+  private calculateCompositeScore(data: any): { score: number; confidence: number; warnings: string[]; bias: NansenBias; whaleRisk: NansenWhaleRisk } {
+    let smScore = 0
+    let whaleScore = 0
+    const warnings: string[] = []
+
+    // 1. SMART MONEY SCORING (60% weight)
+    const smUsd = data.sm_net_balance_usd || 0
+    if (smUsd > 50_000_000) smScore = 100
+    else if (smUsd > 10_000_000) smScore = 70
+    else if (smUsd > 1_000_000) smScore = 40
+    else if (smUsd < -50_000_000) smScore = -100
+    else if (smUsd < -10_000_000) smScore = -70
+    else if (smUsd < -1_000_000) smScore = -40
+
+    // 2. WHALE SCORING (40% weight)
+    const whaleUsd = data.whale_net_balance_usd || 0
+    if (whaleUsd > 50_000_000) whaleScore = 100
+    else if (whaleUsd > 10_000_000) whaleScore = 70
+    else if (whaleUsd > 1_000_000) whaleScore = 40
+    else if (whaleUsd < -50_000_000) whaleScore = -100
+    else if (whaleUsd < -10_000_000) whaleScore = -70
+    else if (whaleUsd < -1_000_000) whaleScore = -40
+
+    const combinedScore = (smScore * 0.6) + (whaleScore * 0.4)
+
+    // 3. CONFIDENCE & BIAS MAPPING
+    let confidence = 0.4
+    if ((smScore > 0 && whaleScore > 0) || (smScore < 0 && whaleScore < 0)) {
+      confidence = 0.8 + (Math.min(Math.abs(smScore), Math.abs(whaleScore)) / 500)
+    }
+
+    if (data.sm_holders < 20) {
+      warnings.push(`LOW_LIQUIDITY (${data.sm_holders} SM holders)`)
+      confidence *= 0.5
+    }
+
+    if (data.whale_dump_alert) {
+      warnings.push('WHALE_DUMP_ALERT')
+      if (combinedScore > 0) confidence *= 0.3
+    }
+
+    if ((smUsd > 0 && whaleUsd < -5_000_000) || (smUsd < 0 && whaleUsd > 5_000_000)) {
+      warnings.push('SM_WHALE_DIVERGENCE')
+      confidence *= 0.2
+    }
+
+    let bias: NansenBias = 'neutral'
+    if (combinedScore >= 25) bias = 'bull'
+    else if (combinedScore <= -25) bias = 'bear'
+
+    let whaleRisk: NansenWhaleRisk = 'medium'
+    if (whaleScore <= -70) whaleRisk = 'high'
+    else if (whaleScore >= 40) whaleRisk = 'low'
+
+    return { score: combinedScore, confidence, warnings, bias, whaleRisk }
+  }
+
   private async runSmartRotation(
     candidatePairs: string[],
   ): Promise<string[]> {
@@ -3665,24 +3795,38 @@ class HyperliquidMMBot {
       let nansenWhaleRisk: NansenWhaleRisk = 'unknown'
       let nansenScore = analysis?.nansenScore
 
-      try {
-        const symbol = pair.split('/')[0].toUpperCase()
-        const config = NANSEN_TOKENS[symbol]
-        if (config && this.nansen && this.nansen.isEnabled()) {
-          const signals = await this.nansen.getTokenFlowSignals(config.address, config.chain)
-          if (signals) {
-            if (signals.smartMoneyNet > 100000) nansenBias = 'bull'
-            else if (signals.smartMoneyNet < -100000) nansenBias = 'bear'
-            else nansenBias = 'neutral'
+      const symbol = pair.split('/')[0].toUpperCase()
+      const config = NANSEN_TOKENS[symbol] || { chain: 'hyperliquid', address: symbol }
 
-            const whaleNet = Math.abs(signals.whaleNet)
-            if (whaleNet > 5000000) nansenWhaleRisk = 'high'
-            else if (whaleNet > 1000000) nansenWhaleRisk = 'medium'
-            else nansenWhaleRisk = 'low'
-          }
+      // Get fresh data from Golden Duo Cache (already synced by Strategic Worker)
+      const gdSignal = this.goldenDuoData[symbol] || this.goldenDuoData[symbol.toLowerCase()]
+
+      if (gdSignal) {
+        const composite = this.calculateCompositeScore(gdSignal)
+        nansenBias = composite.bias
+        nansenWhaleRisk = composite.whaleRisk
+        nansenScore = composite.score
+
+        if (composite.warnings.length > 0) {
+          console.log(`⚠️ [NANSEN] ${pair} warnings: ${composite.warnings.join(', ')} (conf=${(composite.confidence * 100).toFixed(0)}%)`)
         }
-      } catch (e) {
-        // ignore
+      } else {
+        // Fallback to legacy if available, but primarily use GoldenDuo
+        try {
+          if (config && this.nansen && this.nansen.isEnabled()) {
+            const signals = await this.nansen.getTokenFlowSignals(config.address, config.chain)
+            if (signals) {
+              if (signals.smartMoneyNet > 100000) nansenBias = 'bull'
+              else if (signals.smartMoneyNet < -100000) nansenBias = 'bear'
+              else nansenBias = 'neutral'
+
+              const whaleNet = Math.abs(signals.whaleNet)
+              if (whaleNet > 5000000) nansenWhaleRisk = 'high'
+              else if (whaleNet > 1000000) nansenWhaleRisk = 'medium'
+              else nansenWhaleRisk = 'low'
+            }
+          }
+        } catch (e) { }
       }
 
       // Map trend to 0..1
@@ -4955,6 +5099,29 @@ class HyperliquidMMBot {
     }
   }
 
+  /**
+   * Institutional Grade Skew Pricing
+   * Combines: Exponential Inventory + Funding Arbitrage + Whale Shadowing
+   */
+  private calculateAdvancedSkew(pair: string, currentSkew: number, fundingRate: number): number {
+    const symbol = pair.split(/[-_]/)[0].toUpperCase();
+
+    // 1. Exponential Inventory Skew
+    const invRatio = Math.abs(currentSkew);
+    const invSign = currentSkew >= 0 ? 1 : -1;
+    const expFactor = 2.5; // Aggressiveness
+    const exponentialSkew = invSign * 0.05 * (Math.exp(expFactor * invRatio) - 1);
+
+    // 2. Funding-Induced Skew (Arbitrage)
+    const fundingSkew = (fundingRate * 100) * 5;
+
+    // 3. Whale Shadowing (Tactical Front-running)
+    const tacticalShift = this.tacticalSignalBuffer.get(symbol) || 0;
+
+    const combinedSkewBps = (exponentialSkew * 100) + fundingSkew + tacticalShift;
+    return Math.max(-100, Math.min(100, combinedSkewBps));
+  }
+
   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
     // 🔍 LIQUIDITY CHECK (Anti-Rug Pull)
     const liqFlags = loadLiquidityFlags();
@@ -5406,38 +5573,25 @@ class HyperliquidMMBot {
       );
     }
 
-    // 🎯 GLOBAL BIAS CALCULATION (Trend + Tuning + Funding)
-    // Unified logic for all pairs, replacing the old ZEC-specific block
-    let biasShiftBps = 0;
+    // 🎯 INSTITUTIONAL BIAS & SKEW CALCULATION
+    const advancedSkewBps = this.calculateAdvancedSkew(pair, inventorySkew, funding);
+    let biasShiftBps = advancedSkewBps;
 
-    // 1. ZEC Specific Trend Logic (Legacy/Proven)
-    if (pair === 'ZEC') {
-      if (trend4h === 'bull' && trend15m === 'bull') {
-        biasShiftBps = -3;
-      } else if (trend4h === 'bear' && trend15m === 'bear') {
-        biasShiftBps = 3;
-      }
+    // ⚡ MODULE 1 & 2 INTEGRATION: Order Book Micro-Signals
+    const bookSignals = this.analyzeOrderBook(pair);
+
+    // 1. Imbalance Alpha: Shift price towards pressure
+    if (Math.abs(bookSignals.imbalance) > 0.3) {
+      const imbalanceShift = bookSignals.imbalance * 5; // Up to 5bps shift based on pressure
+      biasShiftBps += imbalanceShift;
+      this.notifier.info(`📊 [IMBALANCE] ${pair}: ${(bookSignals.imbalance * 100).toFixed(1)}% pressure → shift ${imbalanceShift > 0 ? '+' : ''}${imbalanceShift.toFixed(1)}bps`);
     }
 
-    // 2. Nansen/Tuning Config Bias
-    const tuningConfig = NANSEN_TOKENS[symbol]?.tuning
-    if (tuningConfig && tuningConfig.smSignalSkew !== 0) {
-      // smSignalSkew < 0 -> Bearish -> Positive biasShiftBps (shift quotes UP/AWAY)
-      // -0.25 -> +5bps bias
-      biasShiftBps -= (tuningConfig.smSignalSkew * 20)
+    // 2. Wall Avoidance: Widen spread if a wall is pushing against us
+    if (bookSignals.wallDetected) {
+      adaptive.spreadMult *= 1.25;
+      this.notifier.info(`🧱 [WALL DETECTED] ${pair}: ${bookSignals.wallSide.toUpperCase()} wall found → spread widened by 25%`);
     }
-
-    // 3. 🔥 FUNDING RATE BIAS (Arbitrage)
-    // High positive funding -> Crowded Longs -> We want to be Short (to earn funding) -> Shift quotes UP (easier sell, harder buy)
-    // High negative funding -> Crowded Shorts -> We want to be Long -> Shift quotes DOWN
-    const f = funding || 0;
-    let fundingBiasBps = 0;
-    if (f > 0.0005) fundingBiasBps = 10;      // > 0.05% hourly (~400% APY) -> Sell Aggressively
-    else if (f > 0.0002) fundingBiasBps = 5;  // > 0.02% hourly
-    else if (f < -0.0005) fundingBiasBps = -10;
-    else if (f < -0.0002) fundingBiasBps = -5;
-
-    biasShiftBps += fundingBiasBps;
 
     // Apply Bias to Spreads
     if (biasShiftBps !== 0) {
@@ -5446,7 +5600,7 @@ class HyperliquidMMBot {
 
       if (Math.abs(biasShiftBps) > 4) {
         this.notifier.info(
-          `🎯 [BIAS] ${pair} shift=${biasShiftBps.toFixed(1)}bps (FundBias=${fundingBiasBps}, Tuning=${tuningConfig?.smSignalSkew ?? 0})`
+          `🎯 [BIAS] ${pair} shift=${biasShiftBps.toFixed(1)}bps (FundBias=${(funding * 100 * 5).toFixed(1)}, Tactical=${(this.tacticalSignalBuffer.get(symbol) || 0).toFixed(1)})`
         );
       }
     }
@@ -5883,7 +6037,44 @@ class HyperliquidMMBot {
     // 🛡️ Safety: Clamp to min/max bounds (same as multi-layer)
     const MIN_SPREAD_BPS = Number(process.env.MIN_FINAL_SPREAD_BPS ?? 8)
     const MAX_SPREAD_BPS = Number(process.env.MAX_FINAL_SPREAD_BPS ?? 140)
-    const clampedSpread = Math.max(MIN_SPREAD_BPS, Math.min(MAX_SPREAD_BPS, adjustedSpread))
+    let clampedSpread = Math.max(MIN_SPREAD_BPS, Math.min(MAX_SPREAD_BPS, adjustedSpread))
+
+    // ══════════════════════════════════════════════════════════════
+    // 🏛️ INSTITUTIONAL ORDER BOOK INTELLIGENCE
+    // ══════════════════════════════════════════════════════════════
+    if (this.config.enableMultiLayer) {
+      // 1. DIVERGENCE MULTIPLIERS (from Golden Duo TIER 3)
+      const divMults = this.getDivergenceMultipliers(pair)
+      if (divMults.spreadMult !== 1.0) {
+        clampedSpread = clampedSpread * divMults.spreadMult
+        console.log(`🏛️ [DIVERGENCE] ${pair}: Spread ×${divMults.spreadMult.toFixed(2)}, Inv ×${divMults.inventoryMult.toFixed(2)}`)
+      }
+
+      // 2. ORDER BOOK INTELLIGENCE (Imbalance Alpha + Wall Avoidance)
+      try {
+        const obAnalysis = this.analyzeOrderBook(pair)
+        if (obAnalysis) {
+          // Imbalance Alpha: Widen spread when order book is heavily imbalanced
+          // imbalance is -1 to +1, where positive = bid-heavy, negative = ask-heavy
+          const absImbalance = Math.abs(obAnalysis.imbalance)
+          if (absImbalance > 0.3) {
+            const imbalanceMult = 1 + (absImbalance * 0.5) // Max 1.5x for 100% imbalance
+            clampedSpread = clampedSpread * imbalanceMult
+            console.log(`📊 [IMBALANCE] ${pair}: Imbalance ${(obAnalysis.imbalance * 100).toFixed(0)}% → Spread ×${imbalanceMult.toFixed(2)}`)
+          }
+
+          // Wall Avoidance: Log when large walls detected
+          if (obAnalysis.wallDetected) {
+            console.log(`🧱 [WALL] ${pair}: Large wall detected on ${obAnalysis.wallSide.toUpperCase()} side`)
+          }
+        }
+      } catch (err) {
+        // Silently ignore order book analysis errors
+      }
+    }
+
+    // Re-clamp after adjustments
+    clampedSpread = Math.max(MIN_SPREAD_BPS, Math.min(MAX_SPREAD_BPS, clampedSpread))
 
     const spreadFactor = clampedSpread / 10000
 
@@ -5914,7 +6105,7 @@ class HyperliquidMMBot {
     // Log VERIFIED signals (not raw)
     if (rawPositionBias !== 0 || rawFlowSkew !== 0) {
       this.notifier.info(
-        `[GOLDEN_VERIFIED] ${pair} | Raw Bias: ${rawPositionBias.toFixed(2)} → Verified: ${positionBias.toFixed(2)} (Conf: ${(confidence*100).toFixed(0)}%) | Flow: ${flowSkew.toFixed(2)}`
+        `[GOLDEN_VERIFIED] ${pair} | Raw Bias: ${rawPositionBias.toFixed(2)} → Verified: ${positionBias.toFixed(2)} (Conf: ${(confidence * 100).toFixed(0)}%) | Flow: ${flowSkew.toFixed(2)}`
       )
     }
 
@@ -6552,8 +6743,229 @@ class HyperliquidMMBot {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // INSTITUTIONAL ORDER BOOK INTELLIGENCE MODULES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * 📊 MODULE 1 & 2: Order Book Intelligence (Imbalance + Wall Detection)
+   * Scans top levels of L2 book to detect momentum and large liquidity walls.
+   */
+  private analyzeOrderBook(pair: string): { imbalance: number; wallDetected: boolean; wallSide: 'bid' | 'ask' | 'none' } {
+    const book = this.l2BookCache.get(pair);
+    if (!book || book.bids.length === 0 || book.asks.length === 0) {
+      return { imbalance: 0, wallDetected: false, wallSide: 'none' };
+    }
+
+    const DEPTH_LEVELS = 5;
+    const WALL_THRESHOLD_USD = 50000; // $50k is a significant wall on most HL pairs
+
+    let bidVol = 0;
+    let askVol = 0;
+    let wallDetected = false;
+    let wallSide: 'bid' | 'ask' | 'none' = 'none';
+
+    // 1. Calculate Imbalance (Top 5 levels)
+    for (let i = 0; i < Math.min(DEPTH_LEVELS, book.bids.length); i++) {
+      const vol = Number(book.bids[i].sz) * Number(book.bids[i].px);
+      bidVol += vol;
+      if (vol > WALL_THRESHOLD_USD) {
+        wallDetected = true;
+        wallSide = 'bid';
+      }
+    }
+
+    for (let i = 0; i < Math.min(DEPTH_LEVELS, book.asks.length); i++) {
+      const vol = Number(book.asks[i].sz) * Number(book.asks[i].px);
+      askVol += vol;
+      if (vol > WALL_THRESHOLD_USD) {
+        wallDetected = true;
+        wallSide = 'ask';
+      }
+    }
+
+    const imbalance = (bidVol - askVol) / (bidVol + askVol); // Range: -1 to +1
+
+    return { imbalance, wallDetected, wallSide };
+  }
+
+  /**
+   * 🛡️ MODULE 3: Deadzone Check (API Economy)
+   * Prevents spamming exchange with micro-updates (< 2bps change).
+   */
+  private shouldUpdateQuote(newPrice: number, oldPrice: number | undefined): boolean {
+    if (!oldPrice) return true;
+    const diffBps = Math.abs(newPrice - oldPrice) / oldPrice * 10000;
+    return diffBps >= 2.0; // 2bps deadzone
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MULTI-TIER WORKER FUNCTIONS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Initialize Multi-Tier Workers (call from constructor or initialize)
+   */
+  private initializeMultiTierWorkers(): void {
+    // 1. TIER 2: TACTICAL WORKER (Every 5s) - Smart Money Trade Detection
+    this.tacticalInterval = setInterval(() => {
+      this.runTacticalWorker().catch(err =>
+        this.notifier.warn(`[TACTICAL] Worker failed: ${err.message}`)
+      );
+    }, 5000);
+
+    // 2. TIER 3: STRATEGIC WORKER (Every 1m) - Bias & Golden Duo Sync
+    this.strategicInterval = setInterval(() => {
+      this.syncGoldenDuo().catch(err =>
+        this.notifier.warn(`[STRATEGIC] Golden Duo sync failed: ${err.message}`)
+      );
+    }, 60000);
+
+    // Initial sync
+    this.syncGoldenDuo().catch(() => { });
+
+    this.notifier.info(`🚀 [MULTI-TIER] Institutional workers initialized (T2:5s, T3:1m)`);
+  }
+
+  /**
+   * TIER 2: TACTICAL WORKER (Every 5s)
+   * Detects real-time Smart Money trades and applies immediate Alpha Shift
+   */
+  private async runTacticalWorker(): Promise<void> {
+    try {
+      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8080'
+      const response = await fetch(`${proxyUrl}/api/latest_trades`)
+      if (!response.ok) return;
+
+      const { trades } = await response.json() as { trades: any[] };
+      if (!Array.isArray(trades)) return;
+
+      // Clear old buffer
+      this.tacticalSignalBuffer.clear();
+
+      // Look for significant trades from known whales
+      const WHALE_WATCHLIST = [
+        { name: 'Laurent Zeimes', address: '0x8def9f', tier: 2, weight: 0.9 },
+        { name: 'muzzy.eth', address: '0xe4446d', tier: 2, weight: 0.85 },
+        { name: 'SM_0xea6670', address: '0xea6670', tier: 3, weight: 0.7 },
+        { name: 'SM_0x570b09', address: '0x570b09', tier: 3, weight: 0.65 },
+      ];
+
+      for (const trade of trades) {
+        const whale = WHALE_WATCHLIST.find(w =>
+          trade.address?.toLowerCase().includes(w.address.toLowerCase()) ||
+          trade.trader?.toLowerCase().includes(w.name.toLowerCase())
+        );
+
+        if (whale) {
+          const sideLower = trade.side?.toLowerCase() || '';
+          const sideSign = (sideLower === 'buy' || sideLower === 'long') ? 1 : -1;
+          const impact = 5 * (4 - whale.tier) * whale.weight * sideSign; // Up to 15bps shift
+
+          const current = this.tacticalSignalBuffer.get(trade.symbol) || 0;
+          this.tacticalSignalBuffer.set(trade.symbol, current + impact);
+
+          if (Math.abs(impact) > 2) {
+            this.notifier.info(`🎯 [TACTICAL] ${whale.name} ${trade.side} on ${trade.symbol} → Alpha Shift ${impact > 0 ? '+' : ''}${impact.toFixed(1)}bps`);
+          }
+        }
+      }
+    } catch (e) {
+      // Silent tactical fail
+    }
+  }
+
+  /**
+   * TIER 3: STRATEGIC WORKER (Every 1m)
+   * Syncs Golden Duo data from nansen-bridge and detects divergences
+   */
+  private async syncGoldenDuo(): Promise<void> {
+    try {
+      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8080'
+      const response = await fetch(`${proxyUrl}/api/golden_duo`)
+      if (!response.ok) {
+        return;
+      }
+
+      const data = await response.json() as Record<string, any>;
+
+      // Update cache with divergence detection
+      for (const [coin, v] of Object.entries(data)) {
+        const smNet = v.sm_net_balance_usd || 0;
+        const whaleNet = v.whale_net_balance_usd || 0;
+        const smIsLong = smNet > 0;
+        const whaleIsLong = whaleNet > 0;
+
+        // Calculate divergence
+        if (smIsLong !== whaleIsLong && (Math.abs(smNet) > 1_000_000 || Math.abs(whaleNet) > 1_000_000)) {
+          const positionDiff = Math.abs(smNet - whaleNet);
+
+          v.divergence_type = smIsLong ? 'sm_bull_whale_bear' : 'sm_bear_whale_bull';
+
+          if (positionDiff > 100_000_000) {
+            v.divergence_strength = 'extreme';
+            v.divergence_spread_mult = 1.5;
+            v.divergence_inventory_mult = 1.5;
+          } else if (positionDiff > 50_000_000) {
+            v.divergence_strength = 'strong';
+            v.divergence_spread_mult = 1.4;
+            v.divergence_inventory_mult = 1.4;
+          } else if (positionDiff > 10_000_000) {
+            v.divergence_strength = 'moderate';
+            v.divergence_spread_mult = 1.3;
+            v.divergence_inventory_mult = 1.3;
+          } else {
+            v.divergence_strength = 'weak';
+            v.divergence_spread_mult = 1.15;
+            v.divergence_inventory_mult = 1.15;
+          }
+
+          const emoji = v.divergence_strength === 'extreme' ? '🔥🔥' :
+            v.divergence_strength === 'strong' ? '🔥' : '⚡';
+          this.notifier.info(
+            `${emoji} [DIVERGENCE ${v.divergence_strength.toUpperCase()}] ${coin}: ` +
+            `SM ${smIsLong ? 'LONG' : 'SHORT'} $${(Math.abs(smNet) / 1e6).toFixed(1)}M vs ` +
+            `Whale ${whaleIsLong ? 'LONG' : 'SHORT'} $${(Math.abs(whaleNet) / 1e6).toFixed(1)}M ` +
+            `→ spread×${v.divergence_spread_mult} inv×${v.divergence_inventory_mult}`
+          );
+        } else {
+          v.divergence_type = 'none';
+          v.divergence_strength = 'none';
+          v.divergence_spread_mult = 1.0;
+          v.divergence_inventory_mult = 1.0;
+        }
+
+        this.goldenDuoData[coin] = v as GoldenDuoData;
+      }
+
+      const count = Object.keys(data).length;
+      if (count > 0) {
+        console.log(`[GoldenDuo] Synced ${count} coins from nansen-bridge`);
+      }
+    } catch (e) {
+      // Silent fail
+    }
+  }
+
+  /**
+   * Get Golden Duo divergence multipliers for a pair
+   */
+  private getDivergenceMultipliers(pair: string): { spreadMult: number; inventoryMult: number } {
+    const symbol = pair.replace('-PERP', '').replace('-USD', '');
+    const data = this.goldenDuoData[symbol];
+
+    if (data && data.divergence_spread_mult && data.divergence_spread_mult > 1.0) {
+      return {
+        spreadMult: data.divergence_spread_mult,
+        inventoryMult: data.divergence_inventory_mult || 1.0
+      };
+    }
+
+    return { spreadMult: 1.0, inventoryMult: 1.0 };
+  }
+
   sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, 2000))
+    return new Promise(resolve => setTimeout(resolve, ms))
   }
 }
 
