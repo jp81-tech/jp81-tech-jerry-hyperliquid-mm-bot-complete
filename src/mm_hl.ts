@@ -9,7 +9,9 @@ import { ethers } from 'ethers'
 import fs from 'fs'
 import path from 'path'
 import { HyperliquidAPI } from './api/hyperliquid.js'
+import crypto from 'crypto'
 import { applyBehaviouralRiskToLayers, type BehaviouralRiskMode } from './behaviouralRisk.js'
+import { BinancePriceAnchor } from './integrations/binance_anchor.js'
 import { getGoldenDuoSignal, type GoldenDuoSignal } from './integrations/nansen_hyperliquid.js'
 import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js'
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
@@ -22,8 +24,24 @@ import {
   type NansenWhaleRisk,
   type PairAnalysisLite
 } from './rotation/smart_rotation.js'
+import { AdverseSelectionTracker } from './signals/adverse_selection.js'
+import { FundingArbitrage } from './signals/funding_arbitrage.js'
+import { LiquidationShield } from './signals/liquidation_shield.js'
 import { MarketVisionService, NANSEN_TOKENS } from './signals/market_vision.js'
+import { VPINAnalyzer } from './signals/vpin_analyzer.js'
+import { WhaleIntelligence } from './signals/whale_intelligence.js'
 import { Supervisor, SupervisorHooks } from './supervisor/index.js'
+import { BIAS_CONFIGS } from './mm/bias_config.js'
+import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
+import { DynamicConfigManager } from './mm/dynamic_config.js'
+import { HyperliquidMarketDataProvider } from './mm/market_data.js'
+import { TelemetryCollector } from './telemetry/TelemetryCollector.js'
+import { DailySnapshotGenerator } from './telemetry/DailySnapshotGenerator.js'
+import { TelemetryServer } from './telemetry/TelemetryServer.js'
+import { AlertManager } from './alerts/AlertManager.js'
+import { AlertCategory, AlertSeverity } from './types/alerts.js'
+import fetch from 'node-fetch'
+import { ShadowTradingIntegration, ShadowAlertIntegration, type NansenTrade, type TradeSignal } from './shadow/index.js'
 import {
   calculateInventorySkew,
   ChaseConfig,
@@ -75,6 +93,7 @@ type GoldenDuoData = {
   signal: string                  // 'bullish', 'bearish', 'aligned_bearish', 'divergence_strong', etc.
   sm_net_balance_usd: number      // Smart Money net position in USD
   whale_net_balance_usd: number   // Whale net position in USD
+  sm_holders?: number             // Optional: number of SM holders/traders (used for liquidity confidence)
   whale_dump_alert?: boolean      // True if whale is dumping
   positionBias?: number           // Legacy compatibility
   flowSkew?: number               // Flow skew -1 to +1
@@ -82,6 +101,7 @@ type GoldenDuoData = {
   divergence_strength?: string    // 'extreme', 'strong', 'moderate', 'weak', 'none'
   divergence_spread_mult?: number // Spread multiplier for divergence
   divergence_inventory_mult?: number // Inventory multiplier for divergence
+  top_traders_pnl?: 'positive' | 'negative' | 'mixed' | 'shorts_winning' | 'longs_underwater' // 🛡️ uPnL Weighting
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -594,6 +614,16 @@ class StateManager {
     return this.state
   }
 
+  getLastProcessedFillTime(): number | null {
+    return this.state.lastProcessedFillTime ?? null
+  }
+
+  getLastTradeTimestamp(): number | null {
+    if (!this.state.trades.length) return null
+    const latest = this.state.trades[this.state.trades.length - 1]
+    return latest?.ts ?? null
+  }
+
   updatePosition(pair: string, size: number, entryPrice: number, side: 'long' | 'short') {
     if (size === 0) {
       delete this.state.positions[pair]
@@ -694,8 +724,14 @@ class StateManager {
     onFill?: (pair: string, notionalUsd: number, fillTime: Date) => void
   ): Promise<{ newFills: number, pnlDelta: number }> {
     try {
-      // Fetch all fills from Hyperliquid
-      const fills = await infoClient.userFills({ user: walletAddress })
+      // Fetch fills from last 24h using userFillsByTime (userFills returns stale data)
+      const startTime = Date.now() - 24 * 60 * 60 * 1000
+      const response = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'userFillsByTime', user: walletAddress, startTime })
+      })
+      const fills = await response.json() as any[]
 
       if (!fills || fills.length === 0) {
         return { newFills: 0, pnlDelta: 0 }
@@ -784,6 +820,8 @@ class StateManager {
           size: parseFloat(fill.sz),
           pnl: netPnl
         })
+
+        this.state.lastProcessedFillTime = fillTime.getTime()
       }
 
       // Calculate effective daily PnL: raw from HL minus anchor
@@ -893,7 +931,7 @@ class SignalVerifier {
         // Jeśli Bias był Bearish (<0), a cena spadła -> WIN
         const priceChangePct = (currentPrice - snap.priceAtEntry) / snap.priceAtEntry
         const isWin = (snap.biasAtEntry > 0 && priceChangePct > 0.005) || // +0.5% profit
-          (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
+                      (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
 
         snap.status = isWin ? 'validated_win' : 'validated_loss'
         this.updateScore(pair, isWin)
@@ -1171,7 +1209,7 @@ class LiveTrading implements TradingInterface {
   // WebSocket & Rate Limit
   private websocket: HyperliquidWebSocket | null = null
   private rateLimitReserver: RateLimitReserver | null = null
-  private l2BookCache: Map<string, L2BookUpdate> = new Map()  // Cache latest L2 book data
+  public l2BookCache: Map<string, L2BookUpdate> = new Map()  // Cache latest L2 book data (exposed for bot-level analytics)
 
   // Quantization telemetry per asset/side (rolling counters)
   private quantTelemetry: Map<string, {
@@ -1205,6 +1243,22 @@ class LiveTrading implements TradingInterface {
   private solSuppressWindowSec: number
   private solSuppressThreshold: number
   private specsRefreshSec: number
+
+  // 🛡️ TOXIC FLOW PROTECTION MODULES
+  public vpinAnalyzers: Map<string, VPINAnalyzer> = new Map()
+  public adverseTracker: AdverseSelectionTracker = new AdverseSelectionTracker()
+  public binanceAnchor: BinancePriceAnchor = new BinancePriceAnchor(['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'XRPUSDT', 'HYPEUSDT', 'AAVEUSDT', 'AVAXUSDT'])
+  public whaleIntel: WhaleIntelligence = new WhaleIntelligence()
+  public fundingArb: FundingArbitrage = new FundingArbitrage()
+  public liqShield: LiquidationShield = new LiquidationShield()
+
+  // 🔮 SMART MONEY SHADOW TRADING MODULE
+  public shadowTrading: ShadowTradingIntegration = new ShadowTradingIntegration()
+  private shadowAlert: ShadowAlertIntegration | null = null
+  private shadowTradePollInterval?: ReturnType<typeof setInterval>
+  private shadowConsensusInterval?: ReturnType<typeof setInterval>
+  private shadowLastTradeTimestamp = 0
+  private shadowFeedUrl?: string
 
   // Per-process sequence counter for disambiguating concurrent attempts
   private seq: number = 0
@@ -1543,11 +1597,28 @@ class LiveTrading implements TradingInterface {
 
     // Initialize WebSocket for real-time data
     const enableWebSocket = process.env.ENABLE_WEBSOCKET === 'true'
-    if (enableWebSocket && this.chaseConfig) {
+    if (enableWebSocket) {
       try {
         this.websocket = new HyperliquidWebSocket()
         await this.websocket.connect()
         console.log('✅ WebSocket connected for real-time data')
+
+        // 🛡️ ADVERSE SELECTION: Listen to our own fills
+        if (this.walletAddress) {
+          this.websocket.subscribeUserFills(this.walletAddress, (fills: any[]) => {
+            fills.forEach(f => {
+              this.adverseTracker.recordFill({
+                id: f.oid.toString(),
+                symbol: f.coin,
+                side: f.side === 'B' ? 'buy' : 'sell',
+                price: Number(f.px),
+                size: Number(f.sz),
+                midPriceAtFill: Number(f.px), // Simplified
+                timestamp: Date.now()
+              });
+            });
+          });
+        }
       } catch (error) {
         console.error('❌ Failed to connect WebSocket:', error)
       }
@@ -1558,6 +1629,13 @@ class LiveTrading implements TradingInterface {
     if (enableRateReserve) {
       this.rateLimitReserver = new RateLimitReserver(this.exchClient, true)
       console.log('✅ Rate limit reservation enabled')
+    }
+
+    // 🛡️ TIER 0: Binance Price Anchor
+    try {
+      await this.binanceAnchor.connect()
+    } catch (e) {
+      console.error('⚠️ Binance Anchor failed to connect, but continuing...')
     }
   }
 
@@ -1576,7 +1654,16 @@ class LiveTrading implements TradingInterface {
           // Cache the latest L2 book data
           this.l2BookCache.set(pair, data)
         })
-        console.log(`📊 Subscribed to L2 book: ${pair}`)
+
+        // 🧪 VPIN: Subscribe to all trades for this pair
+        this.websocket.subscribeTrades(pair, (trade: any) => {
+          if (!this.vpinAnalyzers.has(pair)) {
+            this.vpinAnalyzers.set(pair, new VPINAnalyzer());
+          }
+          this.vpinAnalyzers.get(pair)!.addTrade(Number(trade.px), Number(trade.sz), trade.side === 'B' ? 'buy' : 'sell');
+        });
+
+        console.log(`📊 Subscribed to L2 book & Trades: ${pair}`)
       }
     }
   }
@@ -1756,6 +1843,7 @@ class LiveTrading implements TradingInterface {
       let roundedPrice = roundToTick(price, specs.tickSize)
 
       // 🛡️ MODULE 3: Deadzone Check (API Economy)
+      // If we already have an order near this price, skip update to save rate limits
       const lastPrice = this.lastFillPrice.get(pair);
       if (!reduceOnlyLocal && !this.shouldUpdateQuote(roundedPrice, lastPrice)) {
         return { success: false };
@@ -2110,10 +2198,10 @@ class LiveTrading implements TradingInterface {
         const coinStep = specs.lotSize || Math.pow(10, -stepDec)
         const clampedSteps = Math.round(clampedSizeCoins / coinStep)
         const clampedSizeFinal = (clampedSteps * coinStep).toFixed(stepDec)
-        currentSizeStr = clampedSizeFinal
-        console.log(
+          currentSizeStr = clampedSizeFinal
+          console.log(
           `🔧 Clamped ${pair} size: ${sizeInCoinsFinal.toFixed(stepDec)} → ${clampedSizeFinal} (notional: $${(Number(clampedSizeFinal) * Number(currentPriceStr)).toFixed(2)})`
-        )
+          )
       }
 
       let attempt = 0
@@ -3007,6 +3095,35 @@ class LiveTrading implements TradingInterface {
       console.warn(`Error closing position for ${pair}: ${error}`)
     }
   }
+
+  /**
+   * Get recent fills from Hyperliquid API using userFillsByTime endpoint
+   * Note: userFills endpoint returns cached/stale data, userFillsByTime is real-time
+   */
+  async getRecentFills(): Promise<{ time: number; coin: string; side: string }[]> {
+    try {
+      // Use userFillsByTime for real-time data (last 24h)
+      const startTime = Date.now() - 24 * 60 * 60 * 1000
+      const response = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'userFillsByTime',
+          user: this.walletAddress,
+          startTime
+        })
+      })
+      const fills = await response.json() as any[]
+      return fills.map((f: any) => ({
+        time: f.time,
+        coin: f.coin,
+        side: f.side
+      }))
+    } catch (err) {
+      console.warn('[LiveTrading] Failed to fetch fills:', err)
+      return []
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3023,39 +3140,6 @@ const STICKY_PAIRS = (process.env.STICKY_PAIRS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter((s) => s.length > 0)
-
-// Bias configuration per strength level
-type BiasConfig = {
-  boostAmount: number      // Inventory skew adjustment
-  maxContraSkew: number    // Max position against bias
-  contraPnlLimit: number   // Stop-loss USD for contra positions
-  tightenFactor: number    // Multiplier for favorable side spreads
-  widenFactor: number      // Multiplier for unfavorable side spreads
-}
-
-const BIAS_CONFIGS: Record<string, BiasConfig> = {
-  'strong': {
-    boostAmount: 0.40,      // 40% push toward bias direction
-    maxContraSkew: 0.25,    // Max 25% position against bias
-    contraPnlLimit: -20,    // Close contra positions at -$20
-    tightenFactor: 0.7,     // 30% tighter on favorable side
-    widenFactor: 1.3        // 30% wider on unfavorable side
-  },
-  'soft': {
-    boostAmount: 0.15,      // 15% gentle push toward bias
-    maxContraSkew: 0.40,    // Max 40% position against bias (more freedom)
-    contraPnlLimit: -50,    // Close contra positions at -$50
-    tightenFactor: 0.9,     // 10% tighter on favorable side
-    widenFactor: 1.1        // 10% wider on unfavorable side
-  },
-  'neutral': {
-    boostAmount: 0,         // No directional push
-    maxContraSkew: 1.0,     // Full freedom (100% either direction)
-    contraPnlLimit: -700,   // Standard daily limit
-    tightenFactor: 1.0,     // Symmetric spreads
-    widenFactor: 1.0
-  }
-}
 
 class HyperliquidMMBot {
   private api: HyperliquidAPI
@@ -3080,6 +3164,26 @@ class HyperliquidMMBot {
   private gridManager: GridManager | null = null
   private legacyUnwinder: LegacyUnwinder
   private lastWhaleCheck = 0;
+  private _contrarianLogAt: Record<string, number> = {};  // Throttle contrarian status logs
+  private _autoPauseLogAt: number = 0;  // Throttle auto-pause logs
+  private marketDataProvider: HyperliquidMarketDataProvider
+  private telemetryCollector: TelemetryCollector
+  private alertManager: AlertManager
+  private dailySnapshotGenerator?: DailySnapshotGenerator
+  private telemetryServer?: TelemetryServer
+  private lastFillTimestamp: number | null = null
+  private lastFillWatchdogAlertAt: number = 0
+  private fillWatchdogMaxIdleMs: number = Number(process.env.FILL_WATCHDOG_MAX_IDLE_MS || 6 * 60 * 60 * 1000)
+  private fillWatchdogCooldownMs: number = Number(process.env.FILL_WATCHDOG_COOLDOWN_MS || 60 * 60 * 1000)
+  private shadowTradesUrl?: string
+  private shadowPollIntervalMs = 0
+  private shadowConsensusIntervalMs = 0
+  private shadowFetchTimeoutMs = 0
+  private shadowTradePoller?: NodeJS.Timeout
+  private shadowConsensusTimer?: NodeJS.Timeout
+  private shadowAlertIntegration?: ShadowAlertIntegration
+  private processedShadowTradeKeys: string[] = []
+  private processedShadowTradeSet: Set<string> = new Set()
 
   private intervalSec: number
   private baseOrderUsd: number
@@ -3120,7 +3224,7 @@ class HyperliquidMMBot {
   // Nansen bias lock (risk management against strong signals)
   private nansenBiasCache: {
     lastLoad: number
-    data: Record<string, { boost: number; direction: string; biasStrength: string; buySellPressure: number; updatedAt: string }>
+    data: Record<string, NansenBiasEntry>
   } = { lastLoad: 0, data: {} }
 
   // Golden Duo signals cache (Smart Money position bias + flow skew)
@@ -3141,8 +3245,13 @@ class HyperliquidMMBot {
 
   // Per-pair limity spreadu (w bps) – override globalnych clampów
   private static readonly PAIR_SPREAD_LIMITS: Record<string, { min: number; max: number }> = {
+    // Manual basket (DOGE/LIT/SUI) tuning
+    DOGE: { min: 5, max: 25 },
+    LIT: { min: 8, max: 35 },
+    SUI: { min: 7, max: 30 },
     ZEC: { min: 35, max: 180 },     // Increased min spread further (sideways market, reducing churn)
     HYPE: { min: 15, max: 140 },    // More aggressive on HYPE
+    XPL: { min: 35, max: 200 },     // 🚀 NEW: High volatility protection for XPL
     VIRTUAL: { min: 18, max: 170 }  // Kept as is (was profitable)
   }
 
@@ -3162,6 +3271,42 @@ class HyperliquidMMBot {
   private behaviouralRiskMode: BehaviouralRiskMode = 'normal'
 
   private isDryRun: boolean
+  private dynamicConfigManager?: DynamicConfigManager
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Live position cache (source of truth: Hyperliquid)
+  // Used as a safe fallback when local stateManager positions are missing/stale.
+  // ───────────────────────────────────────────────────────────────────────────
+  private livePosCache: {
+    ts: number
+    byCoin: Map<string, { size: number; entryPrice: number; side: 'long' | 'short' }>
+  } = { ts: 0, byCoin: new Map() }
+
+  private async getLivePositionForPair(pair: string): Promise<{ size: number; entryPrice: number; side: 'long' | 'short' } | null> {
+    try {
+      const now = Date.now()
+      const ttlMs = Number(process.env.LIVE_POS_CACHE_MS || 5000)
+      if (now - this.livePosCache.ts > ttlMs || this.livePosCache.byCoin.size === 0) {
+        const walletAddress = (this.trading as any)?.walletAddress || this.walletAddress
+        if (!walletAddress) return null
+        const userState = await this.api.getClearinghouseState(walletAddress)
+        const next = new Map<string, { size: number; entryPrice: number; side: 'long' | 'short' }>()
+        for (const ap of userState?.assetPositions ?? []) {
+          const p = ap?.position
+          if (!p) continue
+          const coin = String(p.coin || '').toUpperCase()
+          const sz = Number(p.szi || 0)
+          if (!coin || !Number.isFinite(sz) || Math.abs(sz) < 1e-9) continue
+          const entry = Number(p.entryPx || 0)
+          next.set(coin, { size: sz, entryPrice: entry, side: sz > 0 ? 'long' : 'short' })
+        }
+        this.livePosCache = { ts: now, byCoin: next }
+      }
+      return this.livePosCache.byCoin.get(pair.toUpperCase()) ?? null
+    } catch {
+      return null
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // INSTITUTIONAL MULTI-TIER ARCHITECTURE
@@ -3181,9 +3326,6 @@ class HyperliquidMMBot {
   // CEX Flow Analysis (for distribution/accumulation detection)
   private cexFlowAnalysis: Map<string, { alertLevel: string; message: string; isDistributing: boolean; ratioVsAverage: number }> = new Map()
 
-  // L2 Order Book Cache (for Order Book Intelligence)
-  private l2BookCache: Map<string, { bids: Array<{ px: string; sz: string }>; asks: Array<{ px: string; sz: string }>; timestamp: number }> = new Map()
-
   constructor() {
     this.api = new HyperliquidAPI()
     this.infoClient = new hl.InfoClient({ transport: new hl.HttpTransport() })
@@ -3193,9 +3335,69 @@ class HyperliquidMMBot {
     })
     this.marketVision = new MarketVisionService(this.api)
     this.stateManager = new StateManager()
+    this.lastFillTimestamp =
+      this.stateManager.getLastProcessedFillTime() ??
+      this.stateManager.getLastTradeTimestamp() ??
+      null
     this.notifier = new ConsoleNotifier()
     this.nansen = getNansenProAPI()
     this.orderReporter = new OrderReporter(this.notifier)
+    this.marketDataProvider = new HyperliquidMarketDataProvider(this.api)
+    this.telemetryCollector = new TelemetryCollector()
+    this.alertManager = new AlertManager()
+
+    const dynamicConfigTokens = (process.env.DYNAMIC_CONFIG_TOKENS ?? 'DOGE,LIT,SUI')
+      .split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter((s) => s.length > 0)
+    const dynamicConfigEnabled = process.env.DYNAMIC_CONFIG_ENABLED !== 'false'
+    if (dynamicConfigEnabled && dynamicConfigTokens.length > 0) {
+      this.dynamicConfigManager = new DynamicConfigManager({
+        tokens: dynamicConfigTokens,
+        notifier: this.notifier,
+        intervalMs: Number(process.env.DYNAMIC_CONFIG_INTERVAL_MS || 5 * 60 * 1000),
+        dataPath: process.env.SMART_MONEY_DATA_PATH,
+        marketDataProvider: async (token) => this.marketDataProvider.getData(token),
+        telemetryCollector: this.telemetryCollector,
+        alertManager: this.alertManager
+      })
+    }
+
+    const snapshotEnabled = process.env.DAILY_SNAPSHOT_ENABLED !== 'false'
+    if (snapshotEnabled) {
+      const snapshotTokens = (process.env.DAILY_SNAPSHOT_TOKENS ?? 'DOGE,LIT,SUI')
+        .split(',')
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => s.length > 0);
+
+      if (snapshotTokens.length > 0) {
+        this.dailySnapshotGenerator = new DailySnapshotGenerator({
+          tokens: snapshotTokens,
+          marketDataFetcher: (token) => this.marketDataProvider.getData(token),
+          smartMoneyPath: process.env.SMART_MONEY_DATA_PATH,
+          outputDir: process.env.TELEMETRY_SNAPSHOT_DIR,
+          cron: process.env.DAILY_SNAPSHOT_CRON,
+          timezone: process.env.DAILY_SNAPSHOT_TZ,
+          notifier: this.notifier
+        })
+      }
+    }
+
+    // Initialize TelemetryServer (REST API for monitoring)
+    const telemetryServerEnabled = process.env.TELEMETRY_SERVER_ENABLED !== 'false'
+    if (telemetryServerEnabled) {
+      this.telemetryServer = new TelemetryServer({
+        port: parseInt(process.env.TELEMETRY_PORT ?? '8080', 10),
+        alertManager: this.alertManager,
+        telemetryCollector: this.telemetryCollector,
+        getPositions: () => this.getTelemetryPositions(),
+        getPerformance: () => this.getTelemetryPerformance(),
+        getContrarianData: () => this.getTelemetryContrarian(),
+        getShadowData: () => this.getTelemetryShadow(),
+        getWatchdogData: () => this.getTelemetryWatchdog()
+      })
+      this.telemetryServer.start()
+    }
 
     // Initialize Nansen Bias Service (filter/bias engine)
     // Stub implementation - NansenBiasService not available
@@ -3385,19 +3587,50 @@ class HyperliquidMMBot {
       await (this.trading as LiveTrading).initialize()
       this.notifier.info('✅ Live trading initialized')
 
+      // Initialize lastFillTimestamp from API if not set from state
+      if (!this.lastFillTimestamp) {
+        try {
+          const lt = this.trading as LiveTrading
+          const fills = await lt.getRecentFills()
+          if (fills.length > 0) {
+            const latestFill = fills[fills.length - 1]
+            this.lastFillTimestamp = latestFill.time
+            const age = Math.round((Date.now() - this.lastFillTimestamp) / 60000)
+            this.notifier.info(`📊 Last fill: ${age} minutes ago (${latestFill.coin} ${latestFill.side})`)
+          } else {
+            this.lastFillTimestamp = Date.now()
+            this.notifier.info('📊 No fills found - watchdog starts from now')
+          }
+        } catch (err) {
+          this.lastFillTimestamp = Date.now()
+          this.notifier.warn(`⚠️ Could not fetch last fill: ${err}`)
+        }
+      }
+
       // AUTOMATIC CLEANUP ON STARTUP (optional via SKIP_STARTUP_CLEANUP env var)
       const skipCleanup = process.env.SKIP_STARTUP_CLEANUP === 'true'
+      const rotationMode = process.env.ROTATION_MODE ?? 'auto'
+      const preservePositions = process.env.PRESERVE_POSITIONS_ON_START === 'true'
 
       if (skipCleanup) {
         this.notifier.info('⏭️  Skipping startup cleanup - keeping existing positions')
       } else {
-        this.notifier.info('🧹 Cleaning up: canceling all open orders and closing positions...')
+        const skipClosePositions = rotationMode === 'manual' || preservePositions
+        this.notifier.info(
+          skipClosePositions
+            ? '🧹 Startup cleanup: canceling all open orders (preserving positions)...'
+            : '🧹 Cleaning up: canceling all open orders and closing positions...'
+        )
         try {
           await (this.trading as LiveTrading).cancelAllOrders()
           this.notifier.info('   ✅ All orders canceled')
 
+          if (!skipClosePositions) {
           await (this.trading as LiveTrading).closeAllPositions()
           this.notifier.info('   ✅ All positions closed')
+          } else {
+            this.notifier.info('   ⏭️  Preserved positions on startup')
+          }
 
           this.notifier.info('✅ Cleanup complete - starting with clean slate')
         } catch (error) {
@@ -3415,6 +3648,19 @@ class HyperliquidMMBot {
     if (this.config.enableMultiLayer) {
       this.initializeMultiTierWorkers()
       this.notifier.info('🏛️  Multi-tier workers initialized (TACTICAL 5s, STRATEGIC 60s)')
+    }
+
+    if (this.dynamicConfigManager) {
+      const tracked = this.dynamicConfigManager.getTrackedTokens().join(', ') || 'none'
+      this.notifier.info(`[DynamicConfig] Enabled for tokens: ${tracked}`)
+      this.dynamicConfigManager.start()
+    }
+
+    this.initializeShadowTrading()
+
+    if (this.dailySnapshotGenerator) {
+      const runOnStart = process.env.DAILY_SNAPSHOT_RUN_ON_START !== 'false'
+      this.dailySnapshotGenerator.start(undefined, runOnStart)
     }
   }
 
@@ -3463,6 +3709,8 @@ class HyperliquidMMBot {
           break
         }
 
+        this.checkFillWatchdog()
+
         // 🛑 LIQUIDITY GUARD: Cancel orders on blocked pairs
         await this.cancelAllOnBlockedPairs();
         await this.sleep(2000);
@@ -3478,7 +3726,7 @@ class HyperliquidMMBot {
           // Use BTC price as reference (or any liquid pair)
           const [, assetCtxs] = await this.api.getMetaAndAssetCtxs()
           const btcCtx = assetCtxs.find((ctx) => ctx.coin === 'BTC')
-          const btcPrice = btcCtx ? Number(btcCtx.markPx) : 0
+          const btcPrice = btcCtx ? Number(btcCtx.midPx) : 0
 
           const riskCheck = this.riskManager.checkHealth(
             currentEquity,
@@ -3546,6 +3794,7 @@ class HyperliquidMMBot {
             }
           )
           if (syncResult.newFills > 0) {
+            this.lastFillTimestamp = this.stateManager.getLastProcessedFillTime() ?? Date.now()
             const state = this.stateManager.getState()
             const anchor = state.dailyPnlAnchorUsd ?? 0
             const rawDailyPnl = anchor + state.dailyPnl // Reconstruct raw from effective + anchor
@@ -3713,10 +3962,18 @@ class HyperliquidMMBot {
   // Smart Money & Whale Scoring Logic (Zgodna z Pythonem)
   // ───────────────────────────────────────────────────────────────────────────
 
-  private calculateCompositeScore(data: any): { score: number; confidence: number; warnings: string[]; bias: NansenBias; whaleRisk: NansenWhaleRisk } {
+  private calculateCompositeScore(data: GoldenDuoData): { score: number; confidence: number; warnings: string[]; bias: NansenBias; whaleRisk: NansenWhaleRisk } {
     let smScore = 0
     let whaleScore = 0
     const warnings: string[] = []
+
+    // 🛡️ uPnL / ROI Weighting Logic
+    let pnlWeight = 1.0
+    if (data.top_traders_pnl === 'positive' || data.top_traders_pnl === 'shorts_winning') {
+      pnlWeight = 1.5 // Winner bonus
+    } else if (data.top_traders_pnl === 'negative' || data.top_traders_pnl === 'longs_underwater') {
+      pnlWeight = 0.5 // Bagholder penalty
+    }
 
     // 1. SMART MONEY SCORING (60% weight)
     const smUsd = data.sm_net_balance_usd || 0
@@ -3726,6 +3983,9 @@ class HyperliquidMMBot {
     else if (smUsd < -50_000_000) smScore = -100
     else if (smUsd < -10_000_000) smScore = -70
     else if (smUsd < -1_000_000) smScore = -40
+
+    // Apply uPnL weight to SM score
+    smScore *= pnlWeight
 
     // 2. WHALE SCORING (40% weight)
     const whaleUsd = data.whale_net_balance_usd || 0
@@ -3744,8 +4004,9 @@ class HyperliquidMMBot {
       confidence = 0.8 + (Math.min(Math.abs(smScore), Math.abs(whaleScore)) / 500)
     }
 
-    if (data.sm_holders < 20) {
-      warnings.push(`LOW_LIQUIDITY (${data.sm_holders} SM holders)`)
+    const smHolders = Number(data.sm_holders ?? 9999)
+    if (smHolders < 20) {
+      warnings.push(`LOW_LIQUIDITY (${smHolders} SM holders)`)
       confidence *= 0.5
     }
 
@@ -3818,7 +4079,7 @@ class HyperliquidMMBot {
             if (signals) {
               if (signals.smartMoneyNet > 100000) nansenBias = 'bull'
               else if (signals.smartMoneyNet < -100000) nansenBias = 'bear'
-              else nansenBias = 'neutral'
+            else nansenBias = 'neutral'
 
               const whaleNet = Math.abs(signals.whaleNet)
               if (whaleNet > 5000000) nansenWhaleRisk = 'high'
@@ -3842,14 +4103,60 @@ class HyperliquidMMBot {
         riskScore = visual.riskScore / 10.0
       }
 
+      // 🧠 Intelligence Score Components
+      const lt = this.trading as LiveTrading;
+      const vpin = lt.vpinAnalyzers?.get(pair)?.calculateVPIN();
+      const whaleIntelShift = lt.whaleIntel?.getAlphaShiftBps(symbol);
+
+      // Get latest funding rate for this pair
+      let fundingRate = 0;
+      let midPxForPair = 0;
+      try {
+        const [meta, ctxs] = await this.api.getMetaAndAssetCtxs();
+        const pairData = ctxs.find(ctx => ctx.coin === pair);
+        fundingRate = Number(pairData?.funding || 0);
+        midPxForPair = Number(pairData?.midPx || 0);
+      } catch (e) {
+        // ignore fetch error
+      }
+
+      // SmartRotationEngine expects its own NansenBias type; map our legacy bias values.
+      const rotationBias: import('./rotation/smart_rotation.js').NansenBias =
+        nansenBias === 'bull' || nansenBias === 'long'
+          ? 'bull'
+          : nansenBias === 'bear' || nansenBias === 'short'
+            ? 'bear'
+            : nansenBias === 'neutral'
+              ? 'neutral'
+              : 'unknown'
+
       const a: PairAnalysisLite = {
         symbol: pair,
         trendScore,
         volumeScore: 0.5, // Default volume score
         riskScore,
-        nansenBias,
+        nansenBias: rotationBias,
         nansenScore,
-        nansenWhaleRisk
+        nansenWhaleRisk,
+        vpin,
+        fundingRate,
+        whaleIntelShift,
+        // Pass full USD data for Smart Rotation 2.0
+        smartMoneyData: gdSignal ? {
+          netBalance: 0,
+          netBalanceUsd: gdSignal.sm_net_balance_usd || 0,
+          holders: Number((gdSignal as any).sm_holders || 0),
+          longs24hUsd: 0,
+          shorts24hUsd: 0
+        } : undefined,
+        whaleData: gdSignal ? {
+          netBalance: 0,
+          netBalanceUsd: gdSignal.whale_net_balance_usd || 0,
+          holders: Number((gdSignal as any).whale_holders || 0),
+          longs24hUsd: 0,
+          shorts24hUsd: 0
+        } : undefined,
+        priceUsd: midPxForPair || 0
       }
 
       analyses.push(a)
@@ -3864,7 +4171,9 @@ class HyperliquidMMBot {
       .map(
         r =>
           `${r.symbol} (score=${r.score.toFixed(3)}, ` +
-          `bias=${r.nansenBias}, whale=${r.nansenWhaleRisk})`
+          `bias=${r.nansenBias}, whale=${r.nansenWhaleRisk}, ` +
+          `vpin=${r.vpin !== undefined ? (r.vpin * 100).toFixed(0) + '%' : 'N/A'}, ` +
+          `fund=${r.fundingRate !== undefined ? (r.fundingRate * 10000).toFixed(1) + 'bps' : 'N/A'})`
       )
       .join(' | ')
 
@@ -3887,6 +4196,14 @@ class HyperliquidMMBot {
   // ───────────────────────────────────────────────────────────────────────────
 
   async rotateIfNeeded() {
+    // Manual mode or disabled rotation: do not auto-rotate / close positions automatically.
+    // Active pairs are handled below via MANUAL_ACTIVE_PAIRS in the main loop.
+    const rotationEnabled = process.env.ROTATION_ENABLED === 'true'
+    const rotationMode = process.env.ROTATION_MODE ?? 'auto'
+    if (!rotationEnabled || rotationMode === 'manual') {
+      return
+    }
+
     const now = Date.now()
 
     if (now - this.lastRotationTime < this.rotationIntervalSec * 1000) {
@@ -3922,28 +4239,10 @@ class HyperliquidMMBot {
       const topPairs = await this.rotation.getTop3Pairs()
       const candidatePairs = topPairs.map(s => s.pair)
 
-      // 2) Refresh Nansen signals for these symbols (if enabled)
-      if (this.nansenBias.isEnabled()) {
-        await this.nansenBias.refreshForSymbols(candidatePairs)
+      // 2) Run Smart Rotation 2.0 (VPIN + Whale + Funding)
+      const orderedBySmartRotation = await this.runSmartRotation(candidatePairs)
 
-        // Log Nansen signals
-        for (const pair of candidatePairs) {
-          const signal = this.nansenBias.getSignal(pair)
-          if (signal) {
-            this.notifier.info(
-              `🧠 [NANSEN] ${pair}: risk=${signal.riskLevel}, score=${signal.rotationScore.toFixed(0)}, ` +
-              `flow24h=$${(signal.smartFlow24hUsd / 1000000).toFixed(2)}M, fresh=${signal.freshWalletScore.toFixed(0)}`
-            )
-          }
-        }
-      }
-
-      // 3) Filter and sort by Nansen rotation score (if enabled)
-      const orderedByNansen = this.nansenBias.isEnabled()
-        ? this.nansenBias.getRotationCandidates(candidatePairs)
-        : candidatePairs
-
-      // 4) Target size and check if rotation is needed (compare with current pairs)
+      // 3) Target size and check if rotation is needed
       const targetCount = Math.min(
         MAX_ACTIVE_PAIRS,
         Number(process.env.ROTATION_TARGET_COUNT || 3)
@@ -3952,41 +4251,26 @@ class HyperliquidMMBot {
       const currentPairs = this.rotation.getCurrentPairs()
       const hasOverflow = currentPairs.length > targetCount
 
-      // Check for overdue pairs (time-based rotation enforce)
+      // Check for overdue pairs
       const maxHoldMs = this.getMaxRotationHoldMs()
       const overduePairs = currentPairs.filter(p => this.isRotationOverdue(p))
 
       if (overduePairs.length > 0) {
-        this.notifier.warn(
-          `[ROTATION] Overdue pairs detected: ${overduePairs.join(
-            ','
-          )} (maxHoldHours=${(maxHoldMs / 3600000).toFixed(1)})`
-        )
+        this.notifier.warn(`[ROTATION] Overdue pairs: ${overduePairs.join(',')} (maxHoldHours=${(maxHoldMs / 3600000).toFixed(1)})`)
       }
 
       const shouldRotate =
         currentPairs.length === 0 ||
-        orderedByNansen.length === 0 ||
-        !orderedByNansen.every((p: string) => currentPairs.includes(p)) ||
-        orderedByNansen[0] !== currentPairs[0] ||
+        orderedBySmartRotation.length === 0 ||
+        !orderedBySmartRotation.every((p: string) => currentPairs.includes(p)) ||
+        orderedBySmartRotation[0] !== currentPairs[0] ||
         overduePairs.length > 0 ||
-        hasOverflow // Force rotation if any pair is overdue or we exceed max
-
-      if (hasOverflow) {
-        this.notifier.warn(
-          `[ROTATION] Active pairs=${currentPairs.length} exceed target=${targetCount} – forcing trim`
-        )
-      }
+        hasOverflow
 
       if (shouldRotate) {
-        // Fresh candidates sorted by rotationScore
-        const freshCandidates = orderedByNansen.slice(0, targetCount * 2) // Get more candidates than needed
+        const freshCandidates = orderedBySmartRotation.slice(0, targetCount * 2)
+        let nextPairs = [...currentPairs].filter(p => !overduePairs.includes(p))
 
-        // Start with current pairs, but remove overdue ones first
-        let nextPairs = [...currentPairs]
-        nextPairs = nextPairs.filter(p => !overduePairs.includes(p))
-
-        // Add new candidates until we reach targetCount
         for (const sym of freshCandidates) {
           if (nextPairs.length >= targetCount) break
           if (!nextPairs.includes(sym)) {
@@ -3994,41 +4278,11 @@ class HyperliquidMMBot {
           }
         }
 
-        // If we still have less than targetCount (e.g., not enough candidates),
-        // we can allow one overdue pair back to avoid having too few pairs
-        if (nextPairs.length < targetCount && overduePairs.length > 0) {
-          for (const p of overduePairs) {
-            if (!nextPairs.includes(p)) {
-              nextPairs.push(p)
-              if (nextPairs.length >= targetCount) break
-            }
-          }
-        }
+        const newPairs = nextPairs.slice(0, targetCount)
+        this.notifier.info(`🚀 [ROTATION COMPLETED] Active set: ${newPairs.join(', ')}`)
+        this.notifier.info(`   Reason: Intelligence Score 2.0 (VPIN + Whale + Funding)`)
 
-        // Update rotation state with time-limit aware pairs
-        const newPairs = nextPairs.slice(0, targetCount) // Ensure we don't exceed targetCount
-
-        this.notifier.info(`✅ Rotated to: ${newPairs.join(', ')}`)
-        this.notifier.info(`   Reason: Nansen-filtered rotation`)
-
-        // Log top pairs with scores
-        for (let i = 0; i < newPairs.length && i < topPairs.length; i++) {
-          const pair = newPairs[i]
-          const volScore = topPairs.find(s => s.pair === pair)
-          const nansenSignal = this.nansenBias.getSignal(pair)
-
-          if (volScore) {
-            const nansenInfo = nansenSignal
-              ? ` | Nansen: ${nansenSignal.riskLevel} (${nansenSignal.rotationScore.toFixed(0)})`
-              : ''
-            this.notifier.info(
-              `   ${i + 1}. ${pair}: vol=${volScore.volatility24h.toFixed(2)}%, score=${volScore.score.toFixed(2)}${nansenInfo}`
-            )
-          }
-        }
-
-        // Update rotation state manually (since we're bypassing rotation.rotate())
-        // We'll need to update the rotation state directly
+        // Update rotation state manually
         const rotationState = (this.rotation as any).state
         if (rotationState) {
           rotationState.currentPairs = newPairs
@@ -4036,43 +4290,26 @@ class HyperliquidMMBot {
             ; (this.rotation as any).saveState()
         }
 
-        // Mark pairs as entered rotation and clean up removed pairs
         for (const p of newPairs) {
-          if (!this.rotationSince[p]) {
-            this.markRotationEntered(p)
+          if (!this.rotationSince[p]) this.markRotationEntered(p)
           }
-        }
-
-        // Clean up pairs that were removed from rotation
         for (const old of Object.keys(this.rotationSince)) {
-          if (!newPairs.includes(old)) {
-            delete this.rotationSince[old]
-          }
+          if (!newPairs.includes(old)) delete this.rotationSince[old]
         }
 
-        // Set leverage for new pairs (LIVE mode only)
         if (!this.isDryRun && this.trading instanceof LiveTrading) {
           const targetLeverage = Number(process.env.LEVERAGE || 1)
-          this.notifier.info(`🔧 Setting ${targetLeverage}x leverage for new pairs...`)
-
           for (const pair of newPairs) {
-            try {
-              await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
-            } catch (error) {
-              this.notifier.warn(`   Failed to set leverage for ${pair}: ${error}`)
-            }
+            try { await (this.trading as LiveTrading).setLeverage(pair, targetLeverage) } catch (e) { }
           }
         }
 
-        // Close positions in pairs we're rotating out of
+        this.lastRotationTime = Date.now()
         await this.closeOldPositions(newPairs)
-
-        this.lastRotationTime = now
       } else {
-        this.notifier.info(`✓ Current pairs still optimal: ${orderedByNansen.slice(0, 3).join(', ')}`)
-        this.lastRotationTime = now
+        this.notifier.info(`✅ [ROTATION STABLE] Matches Intelligence Score 2.0 target: ${currentPairs.join(', ')}`)
+        this.lastRotationTime = Date.now()
       }
-
     } catch (error) {
       this.notifier.error(`Error in rotation: ${error}`)
     }
@@ -4228,15 +4465,7 @@ class HyperliquidMMBot {
       }
 
       // Load Nansen bias data
-      const biasPath = path.join(process.cwd(), 'runtime', 'nansen_bias.json')
-      let biases: Record<string, any> = {}
-      try {
-        if (fs.existsSync(biasPath)) {
-          biases = JSON.parse(fs.readFileSync(biasPath, 'utf8'))
-        }
-      } catch (err) {
-        return
-      }
+      const biases = this.nansenBiasCache.data
 
       const now = Date.now()
 
@@ -4640,31 +4869,29 @@ class HyperliquidMMBot {
   private getNansenBiasForPair(pair: string): NansenBias {
     try {
       const symbol = pair.split(/[-_]/)[0].toUpperCase()
-      const now = Date.now()
 
-      // Reload bias data every 60 seconds
-      if (now - this.nansenBiasCache.lastLoad > 60_000) {
-        const biasPath = path.join(process.cwd(), 'runtime', 'nansen_bias.json')
-        if (fs.existsSync(biasPath)) {
-          const raw = fs.readFileSync(biasPath, 'utf-8')
-          this.nansenBiasCache.data = JSON.parse(raw)
-          this.nansenBiasCache.lastLoad = now
+      // Get fresh data from Golden Duo Cache (synced every 60s from Proxy)
+      const gdSignal = this.goldenDuoData[symbol] || this.goldenDuoData[symbol.toLowerCase()]
+
+      if (!gdSignal) {
+        // DEBUG: Log when no signal found
+        if (pair === 'ZEC' || pair === 'kPEPE') {
+          console.log(`[DEBUG BIAS] ${pair}: No gdSignal found (keys: ${Object.keys(this.goldenDuoData).slice(0,5).join(',')})`)
         }
+        return 'neutral'
       }
 
-      const entry = this.nansenBiasCache.data[symbol]
-      if (!entry) return 'neutral'
+      // bias is 0.0 (bearish) to 1.0 (bullish)
+      const bias = gdSignal.bias
+      const result: NansenBias = bias > 0.6 ? 'long' : bias < 0.4 ? 'short' : 'neutral'
 
-      // Only act on strong signals (boost >= 2.0)
-      if (Math.abs(entry.boost) < 2.0) return 'neutral'
+      // DEBUG: Log bias calculation for key pairs
+      if (pair === 'ZEC' || pair === 'kPEPE') {
+        console.log(`[DEBUG BIAS] ${pair}: bias=${bias} → ${result}`)
+      }
 
-      return entry.direction === 'long'
-        ? 'long'
-        : entry.direction === 'short'
-          ? 'short'
-          : 'neutral'
+      return result
     } catch (error) {
-      // Fail gracefully - if bias file doesn't exist or has errors, return neutral
       return 'neutral'
     }
   }
@@ -5069,7 +5296,32 @@ class HyperliquidMMBot {
       }
 
       // ─────────────────────────────────────────────
-      // 3) Global clamps i logi diagnostyczne
+      // 3) CEX FLOW GUARD (Based on your new logic)
+      // ─────────────────────────────────────────────
+      const cexAnalysis = this.cexFlowAnalysis.get(symbol)
+      if (cexAnalysis) {
+        if (cexAnalysis.alertLevel !== 'SAFE' && cexAnalysis.alertLevel !== 'WATCH') {
+          const cexSpreadMultiplier =
+            cexAnalysis.alertLevel === 'CRITICAL'
+              ? 1.6
+              : cexAnalysis.alertLevel === 'ELEVATED'
+                ? 1.3
+                : cexAnalysis.alertLevel === 'WARNING'
+                  ? 1.15
+                  : 1.0
+          spreadMult *= cexSpreadMultiplier
+          const msg = `CEX flow ${cexAnalysis.alertLevel} (${cexAnalysis.ratioVsAverage.toFixed(1)}x)`
+          reason = reason ? `${reason} + ${msg}` : msg
+
+          if (cexAnalysis.alertLevel === 'CRITICAL') {
+            pause = true // Hard stop for critical inflow
+            reason += ' (PAUSED)'
+          }
+        }
+      }
+
+      // ─────────────────────────────────────────────
+      // 4) Global clamps i logi diagnostyczne
       // ─────────────────────────────────────────────
       // Safety clamp
       if (spreadMult < 0.8) spreadMult = 0.8
@@ -5122,12 +5374,79 @@ class HyperliquidMMBot {
     return Math.max(-100, Math.min(100, combinedSkewBps));
   }
 
+  /**
+   * 📊 MODULE 1 & 2: Order Book Intelligence (Imbalance + Wall Detection)
+   * Scans top levels of L2 book to detect momentum and large liquidity walls.
+   */
+  private analyzeOrderBook(pair: string): { imbalance: number; wallDetected: boolean; wallSide: 'bid' | 'ask' | 'none' } {
+    const lt = this.trading as LiveTrading
+    const book = lt.l2BookCache.get(pair);
+    if (!book || !book.levels || book.levels[0].length === 0 || book.levels[1].length === 0) {
+      return { imbalance: 0, wallDetected: false, wallSide: 'none' };
+    }
+
+    const DEPTH_LEVELS = 5;
+    const WALL_THRESHOLD_USD = 50000; // $50k is a significant wall on most HL pairs
+
+    let bidVol = 0;
+    let askVol = 0;
+    let wallDetected = false;
+    let wallSide: 'bid' | 'ask' | 'none' = 'none';
+
+    // book.levels: [asks, bids] where each level is [px, sz]
+    const asks = book.levels[0]
+    const bids = book.levels[1]
+
+    // 1. Calculate Imbalance (Top 5 levels)
+    for (let i = 0; i < Math.min(DEPTH_LEVELS, bids.length); i++) {
+      const px = Number(bids[i][0])
+      const sz = Number(bids[i][1])
+      const vol = sz * px
+      bidVol += vol;
+      if (vol > WALL_THRESHOLD_USD) {
+        wallDetected = true;
+        wallSide = 'bid';
+      }
+    }
+
+    for (let i = 0; i < Math.min(DEPTH_LEVELS, asks.length); i++) {
+      const px = Number(asks[i][0])
+      const sz = Number(asks[i][1])
+      const vol = sz * px
+      askVol += vol;
+      if (vol > WALL_THRESHOLD_USD) {
+        wallDetected = true;
+        wallSide = 'ask';
+      }
+    }
+
+    const imbalance = (bidVol - askVol) / (bidVol + askVol); // Range: -1 to +1
+
+    return { imbalance, wallDetected, wallSide };
+  }
+
   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
     // 🔍 LIQUIDITY CHECK (Anti-Rug Pull)
     const liqFlags = loadLiquidityFlags();
     if (isPairBlockedByLiquidity(pair, liqFlags)) {
       console.warn(`[LIQUIDITY BLOCK] ${pair} is blocked due to CRITICAL/RUG risk!`);
       return; // Stop processing this pair
+    }
+
+    // 🛑 AUTO-PAUSE CHECK (Safety Circuit Breaker)
+    if (this.alertManager?.shouldPauseTrading()) {
+      const status = this.alertManager.getPauseStatus()
+      if (!this._autoPauseLogAt || Date.now() - this._autoPauseLogAt > 60_000) {
+        this._autoPauseLogAt = Date.now()
+        const remainingMin = status.pausedUntil
+          ? Math.ceil((status.pausedUntil.getTime() - Date.now()) / 60_000)
+          : 0
+        console.warn(
+          `🛑 [AUTO-PAUSE] Trading suspended for ${pair} | ` +
+          `Reason: ${status.reason} | Remaining: ${remainingMin} min`
+        )
+      }
+      return // Skip trading while paused
     }
 
     const startTime = Date.now()
@@ -5157,13 +5476,37 @@ class HyperliquidMMBot {
       this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
       return
     }
+
+    // 🛡️ TIER 0: EXTERNAL PRICE ANCHOR (Binance Protection)
+    const symbol = pair.split(/[-_]/)[0]
+    const liveTrading = this.trading as LiveTrading;
+    if (liveTrading.binanceAnchor) {
+      const discrepancy = liveTrading.binanceAnchor.getDiscrepancy(symbol, midPrice);
+      if (discrepancy !== null && discrepancy > 0.01) { // 1% gap
+        const binancePrice = liveTrading.binanceAnchor.getPrice(symbol);
+        this.notifier.error(`🚨 [EXTERNAL ANCHOR PANIC] ${pair} HL=$${midPrice.toFixed(2)} vs Binance=$${binancePrice?.toFixed(2)} (gap=${(discrepancy * 100).toFixed(2)}%)! Stopping quotes.`);
+        return; // Halt all activity for this pair to prevent arbitrage losses or flash crash issues
+      }
+    }
+
     if (pair === 'ZEC') {
       recordZecMidPrice(midPrice)
     }
 
-    // Get position and calculate inventory skew
+    // Get position and calculate inventory skew.
+    // Prefer local state (fast). If missing/stale, fall back to live HL state (cached).
     const state = this.stateManager.getState()
-    const position = state.positions[pair]
+    let position = state.positions[pair]
+    if (!position) {
+      const livePos = await this.getLivePositionForPair(pair)
+      if (livePos) {
+        position = {
+          size: livePos.size,
+          entryPrice: livePos.entryPrice,
+          side: livePos.side
+        } as any
+      }
+    }
 
     // 🛑 HARD STOP for MON (Emergency Guard)
     if (pair === 'MON') {
@@ -5176,18 +5519,33 @@ class HyperliquidMMBot {
     }
 
     const capitalBase = Number(process.env.ROTATION_TARGET_PER_PAIR_USD || this.baseOrderUsd * 20) // Default: 20× baseOrderUsd if not set
-    const symbol = pair.split(/[-_]/)[0].toUpperCase()
     const currentDate = new Date()
     const globalDowntrend = isGlobalDowntrendActive()
-    const adaptive = computeAdaptiveMultipliers(symbol, currentDate, globalDowntrend)
+    const adaptive = computeAdaptiveMultipliers(symbol.toUpperCase(), currentDate, globalDowntrend)
 
-    // 🔥 FUNDING STRESS TEST (New from Python logic)
-    // High funding (>0.03%) = High volatility/imbalance expected -> Widen spread
-    if (Math.abs(funding) > 0.0003) {
-      adaptive.spreadMult *= 1.5
-      this.notifier.info(`🔥 [HIGH FUNDING] ${pair} funding=${(funding * 100).toFixed(4)}% -> spreadMult x1.5`)
-    } else if (Math.abs(funding) > 0.0001) {
-      adaptive.spreadMult *= 1.2
+    // 🛡️ TIER 1: WHALE SHADOWING & FUNDING ARBITRAGE (INTELLIGENCE)
+    const lt = this.trading as LiveTrading;
+
+    // 1. Whale Intelligence Alpha Shift
+    const whaleAlphaBps = lt.whaleIntel.getAlphaShiftBps(symbol.toUpperCase());
+    if (Math.abs(whaleAlphaBps) > 0) {
+      this.notifier.info(`🐋 [WHALE SHADOW] ${pair}: Alpha Shift ${whaleAlphaBps > 0 ? '+' : ''}${whaleAlphaBps.toFixed(1)}bps (following winners)`);
+    }
+
+    // 2. Funding Arbitrage
+    const fundingBiasBps = lt.fundingArb.calculateFundingBias(funding) * 5; // Up to 5bps shift
+    const fundingSpreadMult = lt.fundingArb.getSpreadMultiplier(funding);
+
+    if (Math.abs(fundingBiasBps) > 1 || fundingSpreadMult > 1.0) {
+      adaptive.spreadMult *= fundingSpreadMult;
+      this.notifier.info(`💰 [FUNDING ARB] ${pair}: Bias=${fundingBiasBps.toFixed(1)}bps Mult=x${fundingSpreadMult.toFixed(2)} (funding=${(funding * 100).toFixed(4)}%)`);
+    }
+
+    // 3. Liquidation Shield
+    const liqMult = lt.liqShield.getLiquidationRiskMultiplier(symbol.toUpperCase(), midPrice, lt.l2BookCache.get(pair));
+    if (liqMult > 1.0) {
+      adaptive.spreadMult *= liqMult;
+      this.notifier.warn(`🛡️ [LIQUIDATION SHIELD] ${pair}: Large anomalous depth detected → spread x${liqMult}`);
     }
 
     if (adaptive.mode !== 'none') {
@@ -5196,8 +5554,12 @@ class HyperliquidMMBot {
       )
     }
     let capitalPerPair = capitalBase * adaptive.sizeMult
+    let sizeMultipliers = { bid: 1.0, ask: 1.0 }
+    let targetInventoryBias = 0
+    let capitalMultiplier = 1.0
 
-    // 🔧 APPY TUNING OVERRIDES
+    // 🔧 APPLY TUNING OVERRIDES - DynamicConfigManager updates NANSEN_TOKENS directly
+    // Read tuning from NANSEN_TOKENS which includes live emergency overrides
     const overridesConfig = NANSEN_TOKENS[symbol]?.tuning
     if (overridesConfig && overridesConfig.enabled) {
       if (overridesConfig.baseOrderSizeUsd) {
@@ -5216,6 +5578,142 @@ class HyperliquidMMBot {
       }
       adaptive.spreadMult *= overridesConfig.smFlowSpreadMult
       adaptive.spreadMult *= overridesConfig.smPositionSpreadMult
+      capitalMultiplier = overridesConfig.capitalMultiplier ?? capitalMultiplier
+      sizeMultipliers = {
+        bid: overridesConfig.bidSizeMultiplier ?? sizeMultipliers.bid,
+        ask: overridesConfig.askSizeMultiplier ?? sizeMultipliers.ask
+      }
+      targetInventoryBias = overridesConfig.targetInventory ?? 0
+
+      // ============================================================
+      // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
+      // ============================================================
+      if (position && Math.abs(position.size) > 0) {
+        const positionSide = position.size > 0 ? 'long' : 'short'
+        const positionValueUsd = Math.abs(position.size) * midPrice
+
+        // SQUEEZE TRIGGER: Price reached profit target → close all
+        if (overridesConfig.squeezeTriggerPrice) {
+          const triggerPrice = overridesConfig.squeezeTriggerPrice
+          const shouldTrigger = positionSide === 'long'
+            ? midPrice >= triggerPrice  // Long: close when price goes UP
+            : midPrice <= triggerPrice  // Short: close when price goes DOWN
+
+          if (shouldTrigger) {
+            const pnlPct = positionSide === 'long'
+              ? ((midPrice - (position.entryPrice || midPrice)) / (position.entryPrice || midPrice)) * 100
+              : (((position.entryPrice || midPrice) - midPrice) / (position.entryPrice || midPrice)) * 100
+
+            this.notifier.warn(
+              `🎯 [SQUEEZE TRIGGER] ${pair} HIT! Price $${midPrice.toFixed(4)} reached trigger $${triggerPrice.toFixed(4)} ` +
+              `| ${positionSide.toUpperCase()} $${positionValueUsd.toFixed(0)} | PnL: ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}% ` +
+              `| CLOSING POSITION...`
+            )
+
+            try {
+              // Market close the position
+              await (this.trading as LiveTrading).closePositionForPair(pair, 'squeeze_trigger')
+              this.notifier.info(`✅ [SQUEEZE CLOSED] ${pair} position closed at $${midPrice.toFixed(4)}`)
+              return // Exit after closing
+            } catch (err: any) {
+              this.notifier.error(`❌ [SQUEEZE CLOSE FAILED] ${pair}: ${err?.message || err}`)
+            }
+          }
+        }
+
+        // STOP LOSS: Price hit stop → close all
+        if (overridesConfig.stopLossPrice) {
+          const stopPrice = overridesConfig.stopLossPrice
+          const shouldStop = positionSide === 'long'
+            ? midPrice <= stopPrice   // Long: stop when price goes DOWN
+            : midPrice >= stopPrice   // Short: stop when price goes UP
+
+          if (shouldStop) {
+            const pnlPct = positionSide === 'long'
+              ? ((midPrice - (position.entryPrice || midPrice)) / (position.entryPrice || midPrice)) * 100
+              : (((position.entryPrice || midPrice) - midPrice) / (position.entryPrice || midPrice)) * 100
+
+            this.notifier.error(
+              `🛑 [STOP LOSS] ${pair} HIT! Price $${midPrice.toFixed(4)} reached stop $${stopPrice.toFixed(4)} ` +
+              `| ${positionSide.toUpperCase()} $${positionValueUsd.toFixed(0)} | PnL: ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}% ` +
+              `| EMERGENCY CLOSE...`
+            )
+
+            try {
+              await (this.trading as LiveTrading).closePositionForPair(pair, 'stop_loss')
+              this.notifier.info(`✅ [STOP CLOSED] ${pair} position closed at $${midPrice.toFixed(4)}`)
+              return // Exit after closing
+            } catch (err: any) {
+              this.notifier.error(`❌ [STOP CLOSE FAILED] ${pair}: ${err?.message || err}`)
+            }
+          }
+        }
+
+        // Log contrarian status periodically
+        if (overridesConfig.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE') {
+          const triggerDist = overridesConfig.squeezeTriggerPrice
+            ? ((overridesConfig.squeezeTriggerPrice - midPrice) / midPrice * 100).toFixed(2)
+            : 'n/a'
+          const stopDist = overridesConfig.stopLossPrice
+            ? ((midPrice - overridesConfig.stopLossPrice) / midPrice * 100).toFixed(2)
+            : 'n/a'
+
+          // Log once per 5 minutes to avoid spam
+          const logKey = `contrarian_status_${pair}`
+          const now = Date.now()
+          if (!this._contrarianLogAt?.[logKey] || now - this._contrarianLogAt[logKey] > 300_000) {
+            if (!this._contrarianLogAt) this._contrarianLogAt = {}
+            this._contrarianLogAt[logKey] = now
+            this.notifier.info(
+              `🎲 [CONTRARIAN STATUS] ${pair} ${positionSide.toUpperCase()} $${positionValueUsd.toFixed(0)} ` +
+              `| Trigger: ${triggerDist}% away | Stop: ${stopDist}% away ` +
+              `| Severity: ${overridesConfig.smConflictSeverity}`
+            )
+          }
+        }
+      }
+    }
+    capitalPerPair *= capitalMultiplier
+    capitalPerPair = Math.max(50, capitalPerPair)
+
+    // 🔮 SHADOW TRADING: Get grid bias adjustment from elite SM traders
+    const lt2 = this.trading as LiveTrading
+    const shadowAdjustment = lt2.shadowTrading.getGridBiasAdjustment(symbol, targetInventoryBias)
+    if (shadowAdjustment) {
+      targetInventoryBias = shadowAdjustment.adjustedBias
+      this.notifier.info(
+        `🔮 [SHADOW] ${pair} bias adjusted: ${shadowAdjustment.originalBias.toFixed(3)} → ` +
+        `${shadowAdjustment.adjustedBias.toFixed(3)} | ${shadowAdjustment.reason}`
+      )
+    }
+
+    // 🔮⚔️ SHADOW-CONTRARIAN CONFLICT DETECTION
+    // If we have a contrarian position AND strong shadow signal in opposite direction
+    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE') {
+      const positionSideForConflict: 'long' | 'short' | 'none' =
+        position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none'
+
+      const conflict = lt2.shadowTrading.detectShadowContrarianConflict(
+        symbol,
+        positionSideForConflict,
+        true, // contrarian is active
+        {
+          isCritical: overridesConfig.smConflictSeverity === 'CRITICAL'
+        }
+      )
+
+      if (conflict.conflict && conflict.action === 'CLOSE_CONTRARIAN') {
+        this.notifier.warn(
+          `⚔️ [SHADOW-CONTRARIAN] ${pair}: ${conflict.reason} | AUTO-CLOSING POSITION`
+        )
+        try {
+          await (this.trading as LiveTrading).closePositionForPair(pair, 'shadow_contrarian_conflict')
+          this.notifier.info(`✅ [SHADOW OVERRIDE] ${pair} contrarian position closed due to strong SM signal`)
+          return // Exit after closing
+        } catch (err: any) {
+          this.notifier.error(`❌ [SHADOW CLOSE FAILED] ${pair}: ${err?.message || err}`)
+        }
+      }
     }
 
     // 👁️ MARKET VISION DYNAMIC SIZING
@@ -5251,6 +5749,19 @@ class HyperliquidMMBot {
     }
 
     const actualSkew = inventorySkew; // Capture real inventory skew BEFORE vision injection
+    const inventoryDeviation = actualSkew - targetInventoryBias
+    if (inventoryDeviation > 0.05) {
+      sizeMultipliers.bid *= 0.7
+      sizeMultipliers.ask *= 1.2
+    } else if (inventoryDeviation < -0.05) {
+      sizeMultipliers.bid *= 1.2
+      sizeMultipliers.ask *= 0.7
+    }
+    // Allow 0 for emergency overrides (SM winning scenario), otherwise clamp to 0.25 minimum
+    const bidWasZero = sizeMultipliers.bid === 0
+    const askWasZero = sizeMultipliers.ask === 0
+    sizeMultipliers.bid = bidWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.bid))
+    sizeMultipliers.ask = askWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.ask))
 
     // 👁️ MarketVision Skew Injection
     const visionSkew = this.marketVision.getSizeSkew(pair);
@@ -5325,48 +5836,44 @@ class HyperliquidMMBot {
     const MAX_CONTRA_SKEW = config.maxContraSkew
     const BIAS_BOOST = config.boostAmount
 
+    // 🔧 FIX: BIAS_BOOST was incorrectly modifying inventorySkew, causing sideSpreads to calculate
+    // wrong asymmetry. For SHORT bias it made bids tight (like we're already short and want to buy back)
+    // instead of making asks tight (to sell into the trend).
+    //
+    // Directional spread asymmetry now comes ONLY from nansenBidFactor/nansenAskFactor.
+    // We keep MAX_CONTRA_SKEW safety clamp to limit positions against the bias.
+
     if (nansenBias === 'long') {
-      // Strong bullish bias
+      // Safety: Prevent excessive short positions against LONG bias
       const originalSkew = inventorySkew
-
-      // 1. Actively push toward long positions (deepening)
-      inventorySkew = Math.min(1, inventorySkew + BIAS_BOOST)
-
-      // 2. But prevent excessive short positions (safety)
       if (inventorySkew < -MAX_CONTRA_SKEW) {
         inventorySkew = -MAX_CONTRA_SKEW
-      }
-
-      if (originalSkew !== inventorySkew) {
         this.notifier.info(
-          `🧭 Bias boost: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
-          `(Nansen LONG bias +${BIAS_BOOST * 100}% boost${inventorySkew === -MAX_CONTRA_SKEW ? ', clamped at -25%' : ''})`
+          `🛡️ MAX_CONTRA_SKEW clamp: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
+          `(Nansen LONG bias, limiting SHORT exposure to ${MAX_CONTRA_SKEW * 100}%)`
         )
       }
     }
 
     if (nansenBias === 'short') {
-      // Strong bearish bias
+      // Safety: Prevent excessive long positions against SHORT bias
       const originalSkew = inventorySkew
-
-      // 1. Actively push toward short positions (deepening)
-      inventorySkew = Math.max(-1, inventorySkew - BIAS_BOOST)
-
-      // 2. But prevent excessive long positions (safety)
       if (inventorySkew > MAX_CONTRA_SKEW) {
         inventorySkew = MAX_CONTRA_SKEW
-      }
-
-      if (originalSkew !== inventorySkew) {
         this.notifier.info(
-          `🧭 Bias boost: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
-          `(Nansen SHORT bias -${BIAS_BOOST * 100}% boost${inventorySkew === MAX_CONTRA_SKEW ? ', clamped at +25%' : ''})`
+          `🛡️ MAX_CONTRA_SKEW clamp: ${(originalSkew * 100).toFixed(1)}% → ${(inventorySkew * 100).toFixed(1)}% ` +
+          `(Nansen SHORT bias, limiting LONG exposure to ${MAX_CONTRA_SKEW * 100}%)`
         )
       }
     }
 
     // 📊 Calculate L1 spread breakdown BEFORE generating orders (for detailed logging)
-    const baseL1OffsetBps = 20 // L1 base offset from GridManager
+    // If token tuning provides a baseSpreadBps, use it as the L1 base offset (baseRaw) for this pair.
+    // This makes the configured "DOGE=8bps / SUI=10bps / LIT=12bps" reflect in live quoting & logs.
+    const baseL1OffsetBps =
+      overridesConfig?.enabled && overridesConfig.baseSpreadBps && overridesConfig.baseSpreadBps > 0
+        ? overridesConfig.baseSpreadBps
+        : 20 // default L1 base offset
 
     // 0) Bazowy spread z profilu (conservative / aggressive)
     const rawBaseSpreadBps = this.makerSpreadBps
@@ -5376,8 +5883,10 @@ class HyperliquidMMBot {
     // Dla L1 używamy baseL1OffsetBps jako bazowy offset, ale możemy też zastosować profil
     const baseL1OffsetWithProfile = this.applySpreadProfile(baseL1OffsetBps)
 
-    const skewAdjBidBps = this.gridManager!.getInventoryAdjustment(inventorySkew, 'bid')
-    const skewAdjAskBps = this.gridManager!.getInventoryAdjustment(inventorySkew, 'ask')
+    // For transparency/logging we must use REAL position skew (actualSkew), not signal-adjusted inventorySkew.
+    // Otherwise logs can show "inverted" skew adjustments when Nansen/Vision inject bias into inventorySkew.
+    const skewAdjBidBps = this.gridManager!.getInventoryAdjustment(actualSkew, 'bid')
+    const skewAdjAskBps = this.gridManager!.getInventoryAdjustment(actualSkew, 'ask')
 
     // Nansen factors
     const nansenBidFactor = nansenBias === 'long' ? config.tightenFactor : nansenBias === 'short' ? config.widenFactor : 1.0
@@ -5575,7 +6084,7 @@ class HyperliquidMMBot {
 
     // 🎯 INSTITUTIONAL BIAS & SKEW CALCULATION
     const advancedSkewBps = this.calculateAdvancedSkew(pair, inventorySkew, funding);
-    let biasShiftBps = advancedSkewBps;
+    let biasShiftBps = advancedSkewBps + whaleAlphaBps + fundingBiasBps;
 
     // ⚡ MODULE 1 & 2 INTEGRATION: Order Book Micro-Signals
     const bookSignals = this.analyzeOrderBook(pair);
@@ -5593,6 +6102,32 @@ class HyperliquidMMBot {
       this.notifier.info(`🧱 [WALL DETECTED] ${pair}: ${bookSignals.wallSide.toUpperCase()} wall found → spread widened by 25%`);
     }
 
+    // 🛡️ ADVANCED TOXIC FLOW PROTECTION
+    // 1. VPIN Analysis
+    if (liveTrading.vpinAnalyzers) {
+      if (!liveTrading.vpinAnalyzers.has(pair)) {
+        liveTrading.vpinAnalyzers.set(pair, new VPINAnalyzer());
+      }
+      const vpinInfo = liveTrading.vpinAnalyzers.get(pair)!.getToxicityLevel();
+      if (vpinInfo.spreadMult > 1.0) {
+        adaptive.spreadMult *= vpinInfo.spreadMult;
+        this.notifier.info(`🧪 [VPIN TOXICITY] ${pair}: level=${vpinInfo.level} vpin=${vpinInfo.vpin.toFixed(2)} → spread ×${vpinInfo.spreadMult}`);
+      }
+    }
+
+    // 2. Adverse Selection Analysis
+    if (liveTrading.adverseTracker) {
+      const l2 = liveTrading.l2BookCache.get(pair)
+      const bestAskPx = l2?.levels?.[0]?.[0]?.[0]
+      const bestBidPx = l2?.levels?.[1]?.[0]?.[0]
+      const currentMid = bookSignals.imbalance > 0 ? Number(bestAskPx || 0) : Number(bestBidPx || 0)
+      const adverseMult = liveTrading.adverseTracker.calculateAdverseSelectionScore(pair, currentMid || 0);
+      if (adverseMult > 1.0) {
+        adaptive.spreadMult *= adverseMult;
+        this.notifier.warn(`⚠️ [ADVERSE SELECTION] ${pair}: Detecting toxic counterparty flow → spread ×${adverseMult}`);
+      }
+    }
+
     // Apply Bias to Spreads
     if (biasShiftBps !== 0) {
       bidSpreadBps += biasShiftBps;
@@ -5605,13 +6140,14 @@ class HyperliquidMMBot {
       }
     }
 
-    // Calculate Multipliers for GridManager (so deep layers follow the asymmetry)
-    const gridBidMult = currentBaseSpread > 1e-9 ? bidSpreadBps / currentBaseSpread : 1.0;
-    const gridAskMult = currentBaseSpread > 1e-9 ? askSpreadBps / currentBaseSpread : 1.0;
-
-    // 2) Nansen bias – asymetria
+    // 2) Nansen bias – asymetria (applied FIRST so gridMult includes Nansen factors)
     bidSpreadBps *= nansenBidFactor
     askSpreadBps *= nansenAskFactor
+
+    // 🔧 FIX: Calculate gridMult AFTER Nansen factors, so grid layers follow the correct asymmetry
+    // For SHORT bias: nansenAskFactor=0.7 (tight asks), nansenBidFactor=1.3 (wide bids)
+    const gridBidMult = currentBaseSpread > 1e-9 ? bidSpreadBps / currentBaseSpread : 1.0;
+    const gridAskMult = currentBaseSpread > 1e-9 ? askSpreadBps / currentBaseSpread : 1.0;
 
     // 3) Behavioural risk (FOMO / knife) – tylko BUY side
     bidSpreadBps *= behaviouralBidFactor
@@ -5684,7 +6220,8 @@ class HyperliquidMMBot {
       inventorySkew,
       permissions,
       actualSkew,
-      { bid: gridBidMult, ask: gridAskMult }
+      { bid: gridBidMult, ask: gridAskMult },
+      sizeMultipliers
     )
 
     // 🛑 Apply ZEC trend-stop: in strong uptrend with short inventory, do not place new asks
@@ -5694,6 +6231,28 @@ class HyperliquidMMBot {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
         this.notifier.info(
           `🛑 [TREND STOP APPLY] ZEC/SOL removed ${originalAsks} asks – bids only (reduce-short mode)`
+        )
+      }
+    }
+
+    // 🛑 EMERGENCY OVERRIDE: Remove bid orders when SM shorts are winning
+    if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders)) {
+      const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
+      if (originalBids > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
+        this.notifier.warn(
+          `🛑 [EMERGENCY] ${pair} removed ${originalBids} BIDS - SM shorts winning, asks only`
+        )
+      }
+    }
+
+    // 🛑 EMERGENCY OVERRIDE: Remove ask orders when SM longs are winning
+    if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders)) {
+      const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
+      if (originalAsks > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+        this.notifier.warn(
+          `🛑 [EMERGENCY] ${pair} removed ${originalAsks} ASKS - SM longs winning, bids only`
         )
       }
     }
@@ -6110,7 +6669,7 @@ class HyperliquidMMBot {
     }
 
     // B. RISK LAYER: Calculate Dynamic Inventory Limits (use VERIFIED bias)
-    const baseMaxPos = this.config.MAX_POSITION_USD || 10000
+    const baseMaxPos = Number(process.env.MAX_POSITION_USD || 10000)
     const { maxLong, maxShort } = this.calculateDynamicLimits(baseMaxPos, positionBias)
 
     // Log dynamic limits if they differ from base
@@ -6125,8 +6684,8 @@ class HyperliquidMMBot {
     let allowSell = true
 
     if (position) {
-      const currentPosValue = Math.abs(parseFloat(position.positionValue))
-      const currentPosSize = parseFloat(position.szi)
+      const currentPosSize = Number(position.size || 0)
+      const currentPosValue = Math.abs(currentPosSize) * midPrice
 
       // If we have a Long position exceeding the Smart Money limit -> Block buys
       if (currentPosSize > 0 && currentPosValue >= maxLong) {
@@ -6143,6 +6702,16 @@ class HyperliquidMMBot {
           `[GOLDEN_DUO_BLOCK] ${pair} Short position $${currentPosValue.toFixed(0)} >= limit $${maxShort.toFixed(0)} - blocking sells`
         )
       }
+    }
+
+    // 🛑 EMERGENCY OVERRIDE: Block orders when size multiplier is 0
+    if (sizeMultipliers.bid === 0) {
+      allowBuy = false
+      this.notifier.warn(`🛑 [EMERGENCY] ${pair} BIDS DISABLED - SM shorts winning, no new longs`)
+    }
+    if (sizeMultipliers.ask === 0) {
+      allowSell = false
+      this.notifier.warn(`🛑 [EMERGENCY] ${pair} ASKS DISABLED - SM longs winning, no new shorts`)
     }
 
     // D. EXECUTION LAYER: Calculate Alpha Shift (Front-running)
@@ -6473,6 +7042,23 @@ class HyperliquidMMBot {
     this.notifier.info(`   Tuning: order=${(this.tuning.orderUsdFactor * 100).toFixed(0)}% | spread=${(this.tuning.makerSpreadFactor * 100).toFixed(0)}%`)
     this.notifier.info(`   Health: ${supervisorResult.healthEval.severity} | ${visionStr}`)
 
+    // Log Toxic Flow Protection status (properties are on LiveTrading, not HyperliquidMMBot)
+    const lt = this.trading as LiveTrading;
+    const binanceConnected = lt.binanceAnchor?.isConnected() || false;
+    const binancePrices = lt.binanceAnchor?.getPriceCount() || 0;
+    const binanceStatus = binanceConnected ? (binancePrices > 0 ? '✅' : '⏳') : '❌';
+    if (lt.vpinAnalyzers && lt.vpinAnalyzers.size > 0) {
+      const vpinStatus = Array.from(lt.vpinAnalyzers.entries())
+        .map(([pair, analyzer]) => {
+          const info = analyzer.getToxicityLevel();
+          return `${pair}:${(info.vpin * 100).toFixed(0)}%`;
+        })
+        .join(' ');
+      this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: ${vpinStatus}`);
+    } else {
+      this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: awaiting (${lt.vpinAnalyzers?.size || 0})`);
+    }
+
     // Log positions
     const posCount = Object.keys(state.positions).length
     if (posCount > 0) {
@@ -6619,6 +7205,7 @@ class HyperliquidMMBot {
 
     try {
       const state = await this.api.getClearinghouseState(this.walletAddress)
+      const [, assetCtxs] = await this.api.getMetaAndAssetCtxs()
 
       for (const pos of state.assetPositions) {
         const size = Number(pos.position.szi)
@@ -6629,15 +7216,11 @@ class HyperliquidMMBot {
         const absSize = Math.abs(size)
 
         try {
-          // Market order to close (IOC = Immediate or Cancel)
-          await this.api.placeOrder({
-            coin: pair,
-            is_buy: side === 'buy',
-            sz: absSize,
-            limit_px: 0, // Market order
-            order_type: { limit: { tif: 'Ioc' } },
-            reduce_only: true
-          })
+          // `HyperliquidAPI` is read-only; execute via the live trading client.
+          const ctx = assetCtxs.find((c: any) => c.coin === pair)
+          const px = Number(ctx?.midPx || 0)
+          const sizeUsd = px > 0 ? absSize * px : absSize
+          await this.trading.placeOrder(pair, side as any, px, sizeUsd, 'market', true)
           console.log(`✅ Emergency liquidated ${pair}: ${side} ${absSize}`)
         } catch (error) {
           console.error(`❌ Failed to liquidate ${pair}:`, error)
@@ -6677,9 +7260,9 @@ class HyperliquidMMBot {
         const pair = pos.position.coin
         const entryPrice = Number(pos.position.entryPx)
 
-        // Get current mark price
+        // Get current mid price
         const assetCtx = assetCtxs.find((ctx) => ctx.coin === pair)
-        const currentPrice = assetCtx ? Number(assetCtx.markPx) : entryPrice
+        const currentPrice = assetCtx ? Number(assetCtx.midPx) : entryPrice
 
         // Calculate unrealized PnL
         const positionValue = Math.abs(size) * currentPrice
@@ -6747,58 +7330,6 @@ class HyperliquidMMBot {
   // INSTITUTIONAL ORDER BOOK INTELLIGENCE MODULES
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * 📊 MODULE 1 & 2: Order Book Intelligence (Imbalance + Wall Detection)
-   * Scans top levels of L2 book to detect momentum and large liquidity walls.
-   */
-  private analyzeOrderBook(pair: string): { imbalance: number; wallDetected: boolean; wallSide: 'bid' | 'ask' | 'none' } {
-    const book = this.l2BookCache.get(pair);
-    if (!book || book.bids.length === 0 || book.asks.length === 0) {
-      return { imbalance: 0, wallDetected: false, wallSide: 'none' };
-    }
-
-    const DEPTH_LEVELS = 5;
-    const WALL_THRESHOLD_USD = 50000; // $50k is a significant wall on most HL pairs
-
-    let bidVol = 0;
-    let askVol = 0;
-    let wallDetected = false;
-    let wallSide: 'bid' | 'ask' | 'none' = 'none';
-
-    // 1. Calculate Imbalance (Top 5 levels)
-    for (let i = 0; i < Math.min(DEPTH_LEVELS, book.bids.length); i++) {
-      const vol = Number(book.bids[i].sz) * Number(book.bids[i].px);
-      bidVol += vol;
-      if (vol > WALL_THRESHOLD_USD) {
-        wallDetected = true;
-        wallSide = 'bid';
-      }
-    }
-
-    for (let i = 0; i < Math.min(DEPTH_LEVELS, book.asks.length); i++) {
-      const vol = Number(book.asks[i].sz) * Number(book.asks[i].px);
-      askVol += vol;
-      if (vol > WALL_THRESHOLD_USD) {
-        wallDetected = true;
-        wallSide = 'ask';
-      }
-    }
-
-    const imbalance = (bidVol - askVol) / (bidVol + askVol); // Range: -1 to +1
-
-    return { imbalance, wallDetected, wallSide };
-  }
-
-  /**
-   * 🛡️ MODULE 3: Deadzone Check (API Economy)
-   * Prevents spamming exchange with micro-updates (< 2bps change).
-   */
-  private shouldUpdateQuote(newPrice: number, oldPrice: number | undefined): boolean {
-    if (!oldPrice) return true;
-    const diffBps = Math.abs(newPrice - oldPrice) / oldPrice * 10000;
-    return diffBps >= 2.0; // 2bps deadzone
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // MULTI-TIER WORKER FUNCTIONS
   // ═══════════════════════════════════════════════════════════════════════════
@@ -6833,7 +7364,7 @@ class HyperliquidMMBot {
    */
   private async runTacticalWorker(): Promise<void> {
     try {
-      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8080'
+      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8081'
       const response = await fetch(`${proxyUrl}/api/latest_trades`)
       if (!response.ok) return;
 
@@ -6881,7 +7412,7 @@ class HyperliquidMMBot {
    */
   private async syncGoldenDuo(): Promise<void> {
     try {
-      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8080'
+      const proxyUrl = process.env.NANSEN_PROXY_URL || 'http://localhost:8081'
       const response = await fetch(`${proxyUrl}/api/golden_duo`)
       if (!response.ok) {
         return;
@@ -6942,6 +7473,9 @@ class HyperliquidMMBot {
       if (count > 0) {
         console.log(`[GoldenDuo] Synced ${count} coins from nansen-bridge`);
       }
+
+      // 🔧 FIX: Also load nansen_bias.json for biasStrength
+      tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
     } catch (e) {
       // Silent fail
     }
@@ -6966,6 +7500,393 @@ class HyperliquidMMBot {
 
   sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
+  }
+
+  // ============================================================
+  // TELEMETRY SERVER HELPERS
+  // ============================================================
+
+  private getTelemetryPositions(): Array<{
+    token: string
+    side: 'LONG' | 'SHORT' | 'NONE'
+    valueUsd: number
+    distToTriggerPct: number | null
+    distToStopPct: number | null
+    severity: string
+  }> {
+    const positions: Array<{
+      token: string
+      side: 'LONG' | 'SHORT' | 'NONE'
+      valueUsd: number
+      distToTriggerPct: number | null
+      distToStopPct: number | null
+      severity: string
+    }> = []
+
+    try {
+      // Get positions from state manager
+      const state = this.stateManager?.getState()
+      if (!state?.positions) return positions
+
+      for (const [pair, pos] of Object.entries(state.positions)) {
+        // Read tuning from NANSEN_TOKENS (DynamicConfigManager updates this directly)
+        const tuning = NANSEN_TOKENS[pair]?.tuning
+        const size = pos.size ?? 0
+        const entryPrice = pos.entryPrice ?? 0
+        // Estimate mark price from entry (we don't have live price here)
+        const valueUsd = Math.abs(size * entryPrice)
+
+        let distToTrigger: number | null = null
+        let distToStop: number | null = null
+
+        if (tuning?.squeezeTriggerPrice && entryPrice > 0) {
+          distToTrigger = Math.abs((tuning.squeezeTriggerPrice - entryPrice) / entryPrice * 100)
+        }
+        if (tuning?.stopLossPrice && entryPrice > 0) {
+          distToStop = Math.abs((entryPrice - tuning.stopLossPrice) / entryPrice * 100)
+        }
+
+        positions.push({
+          token: pair,
+          side: size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'NONE',
+          valueUsd,
+          distToTriggerPct: distToTrigger,
+          distToStopPct: distToStop,
+          severity: tuning?.smConflictSeverity ?? 'NONE'
+        })
+      }
+    } catch {
+      // Silently ignore errors
+    }
+
+    return positions
+  }
+
+  private getTelemetryPerformance(): {
+    dailyPnl: number
+    totalPnl: number
+    successRate: number
+  } {
+    try {
+      const state = this.stateManager?.getState()
+      const execStats = state?.execStats
+      const successRate = execStats
+        ? (execStats.success / Math.max(1, execStats.success + execStats.fail)) * 100
+        : 0
+
+      return {
+        dailyPnl: state?.dailyPnl ?? 0,
+        totalPnl: state?.totalPnl ?? 0,
+        successRate
+      }
+    } catch {
+      return { dailyPnl: 0, totalPnl: 0, successRate: 0 }
+    }
+  }
+
+  private getTelemetryContrarian(): {
+    activeTokens: string[]
+    smConflicts: Record<string, string>
+  } {
+    const activeTokens: string[] = []
+    const smConflicts: Record<string, string> = {}
+
+    try {
+      for (const [token, data] of Object.entries(NANSEN_TOKENS)) {
+        const tuning = data?.tuning
+        if (tuning?.smConflictSeverity && tuning.smConflictSeverity !== 'NONE') {
+          activeTokens.push(token)
+
+          // Try to get SM position from smart_money_data.json
+          try {
+            const fs = require('fs')
+            const smData = JSON.parse(fs.readFileSync('/tmp/smart_money_data.json', 'utf8'))
+            const entry = smData?.data?.[token]
+            if (entry) {
+              const longs = entry.current_longs_usd ?? 0
+              const shorts = entry.current_shorts_usd ?? 0
+              const net = longs - shorts
+              const side = net > 0 ? 'LONG' : 'SHORT'
+              const millions = Math.abs(net) / 1_000_000
+              smConflicts[token] = `$${millions.toFixed(1)}M ${side}`
+            }
+          } catch {
+            smConflicts[token] = tuning.smConflictSeverity
+          }
+        }
+      }
+    } catch {
+      // Silently ignore errors
+    }
+
+    return { activeTokens, smConflicts }
+  }
+
+  private getTelemetryShadow(): {
+    enabled: boolean
+    activeAdjustments: number
+    activeSignals: number
+    tokenSentiment: Record<string, { longs: number; shorts: number; consensus: string }>
+  } | null {
+    try {
+      const lt = this.trading as LiveTrading
+      if (!lt?.shadowTrading) return null
+
+      const status = lt.shadowTrading.getStatus()
+      const tokenSentiment: Record<string, { longs: number; shorts: number; consensus: string }> = {}
+
+      // Get sentiment for tracked tokens
+      for (const token of ['DOGE', 'SUI', 'LIT']) {
+        const sentiment = lt.shadowTrading.getTokenSentiment(token)
+        tokenSentiment[token] = {
+          longs: sentiment.longCount,
+          shorts: sentiment.shortCount,
+          consensus: sentiment.consensus
+        }
+      }
+
+      return {
+        enabled: status.enabled,
+        activeAdjustments: status.activeAdjustments.length,
+        activeSignals: status.signalSummary.activeSignals,
+        tokenSentiment
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private getTelemetryWatchdog(): {
+    lastFillTimestamp: number
+    idleMs: number
+    maxIdleMs: number
+    triggered: boolean
+  } | null {
+    if (!this.lastFillTimestamp) {
+      return null
+    }
+
+    const idleMs = Date.now() - this.lastFillTimestamp
+    return {
+      lastFillTimestamp: this.lastFillTimestamp,
+      idleMs,
+      maxIdleMs: this.fillWatchdogMaxIdleMs,
+      triggered: idleMs >= this.fillWatchdogMaxIdleMs
+    }
+  }
+
+  private initializeShadowTrading(): void {
+    if (!(this.trading instanceof LiveTrading)) {
+      return
+    }
+
+    const lt = this.trading as LiveTrading
+    const status = lt.shadowTrading.getStatus()
+    if (!status.enabled) {
+      this.notifier.info('🔮 Shadow trading module disabled')
+      return
+    }
+
+    this.shadowAlertIntegration = new ShadowAlertIntegration(this.alertManager)
+    this.shadowTradesUrl = process.env.SHADOW_TRADING_TRADES_URL || 'http://127.0.0.1:8081/api/latest_trades'
+    this.shadowPollIntervalMs = Number(process.env.SHADOW_TRADING_POLL_MS || 30_000)
+    this.shadowConsensusIntervalMs = Number(process.env.SHADOW_TRADING_CONSENSUS_MS || 5 * 60 * 1000)
+    this.shadowFetchTimeoutMs = Number(process.env.SHADOW_TRADING_FETCH_TIMEOUT_MS || 5_000)
+
+    this.notifier.info(
+      `🔮 Shadow trading enabled (feed=${this.shadowTradesUrl}, poll=${Math.round(this.shadowPollIntervalMs / 1000)}s, consensus=${Math.round(this.shadowConsensusIntervalMs / 1000)}s)`
+    )
+
+    // Initial poll
+    this.pollShadowTrades().catch((err) => {
+      this.notifier.warn(`🔮 [SHADOW] Initial trade poll failed: ${(err as Error).message}`)
+    })
+
+    this.shadowTradePoller = setInterval(() => {
+      this.pollShadowTrades().catch((err) => {
+        this.notifier.warn(`🔮 [SHADOW] Trade poll failed: ${(err as Error).message}`)
+      })
+    }, this.shadowPollIntervalMs)
+
+    this.shadowConsensusTimer = setInterval(() => {
+      this.runShadowConsensusSweep()
+    }, this.shadowConsensusIntervalMs)
+  }
+
+  private async pollShadowTrades(): Promise<void> {
+    if (!this.shadowTradesUrl || !(this.trading instanceof LiveTrading)) {
+      return
+    }
+
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), this.shadowFetchTimeoutMs)
+
+    try {
+      const response = await fetch(this.shadowTradesUrl, { signal: controller.signal })
+      clearTimeout(timeout)
+
+      if (!response.ok) {
+        this.notifier.warn(`🔮 [SHADOW] Trade feed error: HTTP ${response.status}`)
+        return
+      }
+
+      const payload: any = await response.json()
+      const trades: any[] = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.trades)
+          ? payload.trades
+          : []
+
+      if (trades.length === 0) {
+        return
+      }
+
+      const lt = this.trading as LiveTrading
+      const emittedSignals: TradeSignal[] = []
+
+      for (const raw of trades) {
+        const mapped = this.mapShadowTrade(raw)
+        if (!mapped) continue
+
+        const key = this.makeShadowTradeKey(mapped)
+        if (this.processedShadowTradeSet.has(key)) {
+          continue
+        }
+        this.rememberShadowTrade(key)
+
+        const signal = lt.shadowTrading.processTrade(mapped)
+        if (signal) {
+          emittedSignals.push(signal)
+        }
+      }
+
+      if (emittedSignals.length && this.shadowAlertIntegration) {
+        emittedSignals.forEach((signal) => this.shadowAlertIntegration?.processSignal(signal))
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        this.notifier.warn(`🔮 [SHADOW] Trade poll failed: ${(err as Error).message}`)
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  private runShadowConsensusSweep(): void {
+    if (!(this.trading instanceof LiveTrading)) {
+      return
+    }
+    if (!this.shadowAlertIntegration) {
+      return
+    }
+
+    try {
+      const lt = this.trading as LiveTrading
+      const signals = lt.shadowTrading.checkAllConsensusSignals()
+      if (signals.length === 0) {
+        return
+      }
+      signals.forEach((signal) => this.shadowAlertIntegration?.processSignal(signal))
+    } catch (err) {
+      this.notifier.warn(`🔮 [SHADOW] Consensus sweep failed: ${(err as Error).message}`)
+    }
+  }
+
+  private mapShadowTrade(raw: any): NansenTrade | null {
+    try {
+      const token = (raw.token || raw.symbol || raw.pair)?.toString().toUpperCase()
+      if (!token) return null
+
+      const sideRaw = (raw.side || raw.direction || '').toString().toLowerCase()
+      const actionRaw = (raw.action || raw.type || '').toString().toLowerCase()
+      const traderAddress = (raw.traderAddress || raw.trader || raw.address || '').toString().toLowerCase()
+      if (!traderAddress) return null
+
+      const traderLabel = (raw.traderLabel || raw.label || raw.tag || traderAddress).toString()
+      const valueUsd = Number(raw.valueUsd ?? raw.notionalUsd ?? raw.usdValue ?? raw.sizeUsd ?? 0)
+      if (!Number.isFinite(valueUsd) || valueUsd <= 0) return null
+      const priceUsd = Number(raw.priceUsd ?? raw.price ?? raw.fillPrice ?? 0)
+      const size = Number(raw.size ?? raw.quantity ?? raw.amount ?? 0)
+
+      const side: 'Long' | 'Short' = sideRaw === 'short' ? 'Short' : 'Long'
+      const action: 'Open' | 'Close' | 'Add' | 'Reduce' =
+        actionRaw === 'close'
+          ? 'Close'
+          : actionRaw === 'reduce'
+            ? 'Reduce'
+            : actionRaw === 'add'
+              ? 'Add'
+              : 'Open'
+
+      const timestamp = raw.timestamp
+        ? new Date(raw.timestamp).toISOString()
+        : new Date().toISOString()
+
+      const trade: NansenTrade = {
+        timestamp,
+        traderAddress,
+        traderLabel,
+        token,
+        side,
+        action,
+        valueUsd,
+        priceUsd: Number.isFinite(priceUsd) ? priceUsd : 0,
+        size: Number.isFinite(size) ? size : 0
+      }
+
+      return trade
+    } catch {
+      return null
+    }
+  }
+
+  private makeShadowTradeKey(trade: NansenTrade): string {
+    return `${trade.timestamp}_${trade.traderAddress}_${trade.token}_${trade.action}_${Math.round(trade.valueUsd)}`
+  }
+
+  private rememberShadowTrade(key: string): void {
+    this.processedShadowTradeSet.add(key)
+    this.processedShadowTradeKeys.push(key)
+    const MAX_KEYS = 1000
+    if (this.processedShadowTradeKeys.length > MAX_KEYS) {
+      const stale = this.processedShadowTradeKeys.splice(0, this.processedShadowTradeKeys.length - MAX_KEYS)
+      stale.forEach((k) => this.processedShadowTradeSet.delete(k))
+    }
+  }
+
+  private checkFillWatchdog(): void {
+    if (this.fillWatchdogMaxIdleMs <= 0) return
+    if (this.alertManager?.getPauseStatus().isPaused) return
+    if (!this.lastFillTimestamp) return
+
+    const idleMs = Date.now() - this.lastFillTimestamp
+    if (idleMs < this.fillWatchdogMaxIdleMs) return
+    if (Date.now() - this.lastFillWatchdogAlertAt < this.fillWatchdogCooldownMs) return
+
+    this.lastFillWatchdogAlertAt = Date.now()
+    const idleHours = idleMs / 3_600_000
+    const message =
+      `🕒 [WATCHDOG] No fills detected for ${idleHours.toFixed(1)}h (threshold ${(this.fillWatchdogMaxIdleMs / 3_600_000).toFixed(1)}h). ` +
+      `Verify liquidity, orders, and data feeds.`
+
+    this.notifier.warn(message)
+
+    if (this.alertManager) {
+      this.alertManager.pushAlert({
+        id: crypto.randomUUID(),
+        timestamp: new Date(),
+        token: 'SYSTEM',
+        category: AlertCategory.ERROR,
+        severity: AlertSeverity.WARNING,
+        title: 'Fill watchdog triggered',
+        message,
+        data: {
+          idleHours: Number(idleHours.toFixed(2))
+        },
+        acknowledged: false,
+        actions: []
+      })
+    }
   }
 }
 
