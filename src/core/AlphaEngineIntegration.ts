@@ -69,10 +69,10 @@ export interface CombinedSignal {
 const SAFE_DEFAULTS: SafeDefaults = {
   tradingMode: 'NEUTRAL',
   confidence: 0,
-  maxPositionMultiplier: 0.1,  // Very small positions
+  maxPositionMultiplier: 0.5,  // 50% of normal (was 0.1 - too conservative!)
   allowLongs: true,            // Allow both sides
-  allowShorts: true,           // But with tiny size
-  spreadMultiplier: 1.5,       // Wider spread for protection
+  allowShorts: true,           // With moderate size
+  spreadMultiplier: 1.3,       // Slightly wider spread for protection
 }
 
 /** Time before considering data stale (ms) */
