@@ -5,16 +5,42 @@ import 'dotenv/config'
 // 🛡️ FIX: Node.js 18+ IPv6/IPv4 compatibility issue
 dns.setDefaultResultOrder('ipv4first')
 
+import crypto from 'crypto'
 import { ethers } from 'ethers'
 import fs from 'fs'
+import fetch from 'node-fetch'
 import path from 'path'
+import { AlertManager } from './alerts/AlertManager.js'
 import { HyperliquidAPI } from './api/hyperliquid.js'
-import crypto from 'crypto'
 import { applyBehaviouralRiskToLayers, type BehaviouralRiskMode } from './behaviouralRisk.js'
 import { BinancePriceAnchor } from './integrations/binance_anchor.js'
 import { getGoldenDuoSignal, type GoldenDuoSignal } from './integrations/nansen_hyperliquid.js'
 import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js'
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
+import { BIAS_CONFIGS } from './mm/bias_config.js'
+import { DynamicConfigManager } from './mm/dynamic_config.js'
+import { getAutoEmergencyOverrideSync, MmMode } from './mm/SmAutoDetector.js'
+import { HyperliquidMarketDataProvider } from './mm/market_data.js'
+import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
+// 🚀 AlphaExtractionEngine - Native TypeScript Smart Money tracking (replaces whale_tracker.py)
+import {
+  alphaEngineIntegration,
+  getAlphaEngineBiasCache,
+  getAlphaSizeMultipliers,
+  shouldBypassDelay,
+  type TradingPermissions,
+  type TradingCommand,
+} from './core/AlphaEngineIntegration.js'
+// 🔮 Oracle Vision - Price prediction using SM data + Linear Regression
+import {
+  oracleEngine,
+  generateSignalDashboard,
+  generateDivergenceAlerts,
+  type OracleSignal,
+} from './oracle/index.js'
+import { PositionProtector } from './mm/position_protector.js'
+import type { PositionRiskStatus } from './mm/position_risk_manager.js'
+import { PositionRiskManager } from './mm/position_risk_manager.js'
 import { computeSideAutoSpread } from './risk/auto_spread.js'
 import { createConservativeRiskConfig, RiskAction, RiskManager, type RiskCheckResult } from './risk/RiskManager.js'
 import { createDefaultShadowWatch, ShadowWatch } from './risk/shadowWatch.js'
@@ -24,6 +50,7 @@ import {
   type NansenWhaleRisk,
   type PairAnalysisLite
 } from './rotation/smart_rotation.js'
+import { ShadowAlertIntegration, ShadowTradingIntegration, type NansenTrade, type TradeSignal } from './shadow/index.js'
 import { AdverseSelectionTracker } from './signals/adverse_selection.js'
 import { FundingArbitrage } from './signals/funding_arbitrage.js'
 import { LiquidationShield } from './signals/liquidation_shield.js'
@@ -31,17 +58,10 @@ import { MarketVisionService, NANSEN_TOKENS } from './signals/market_vision.js'
 import { VPINAnalyzer } from './signals/vpin_analyzer.js'
 import { WhaleIntelligence } from './signals/whale_intelligence.js'
 import { Supervisor, SupervisorHooks } from './supervisor/index.js'
-import { BIAS_CONFIGS } from './mm/bias_config.js'
-import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
-import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { HyperliquidMarketDataProvider } from './mm/market_data.js'
-import { TelemetryCollector } from './telemetry/TelemetryCollector.js'
 import { DailySnapshotGenerator } from './telemetry/DailySnapshotGenerator.js'
+import { TelemetryCollector } from './telemetry/TelemetryCollector.js'
 import { TelemetryServer } from './telemetry/TelemetryServer.js'
-import { AlertManager } from './alerts/AlertManager.js'
 import { AlertCategory, AlertSeverity } from './types/alerts.js'
-import fetch from 'node-fetch'
-import { ShadowTradingIntegration, ShadowAlertIntegration, type NansenTrade, type TradeSignal } from './shadow/index.js'
 import {
   calculateInventorySkew,
   ChaseConfig,
@@ -116,18 +136,18 @@ type InstitutionalSizeConfig = {
 }
 
 const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
-  // duże, drogie coiny – chcemy małe liczby coinów, ale sensowne USD
+  // duże, drogie coiny – targetUsd=100 → softCap=$200
   ETH: {
     minUsd: 20,
-    targetUsd: 60,
-    maxUsd: 180,
-    maxUsdAbs: 1800
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
   },
   SOL: {
     minUsd: 20,
-    targetUsd: 60,
-    maxUsd: 180,
-    maxUsdAbs: 1800
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
   },
   ZEC: {
     minUsd: 15,    // zawsze >= 15$
@@ -170,6 +190,61 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
     minUsd: 60,    // Higher minimum due to below_min rejections at ~$40
     targetUsd: 80,
     maxUsd: 150
+  },
+  // Dodane dla większych pozycji - ULTRA DENSE GRID
+  LIT: {
+    minUsd: 15,      // zmniejszone z 20 dla gęstszej siatki
+    targetUsd: 25,   // zmniejszone z 100 dla więcej zleceń
+    maxUsd: 100,
+    maxUsdAbs: 2000
+  },
+  SUI: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  DOGE: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  kPEPE: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  WIF: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  PUMP: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  XRP: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  BTC: {
+    minUsd: 20,
+    targetUsd: 100,
+    maxUsd: 200,
+    maxUsdAbs: 2000
+  },
+  FARTCOIN: {
+    minUsd: 15,      // zmniejszone z 20 dla gęstszej siatki
+    targetUsd: 25,   // zmniejszone z 100 dla więcej zleceń
+    maxUsd: 100,
+    maxUsdAbs: 2000
   }
 }
 
@@ -211,7 +286,16 @@ const MAX_INVENTORY_USD: Record<string, number> = {
   BOME: envNumber("BOME_MAX_POSITION_USD", 5000),
   ETH: envNumber("ETH_MAX_POSITION_USD", 5000),
   FARTCOIN: envNumber("FARTCOIN_MAX_POSITION_USD", 5000),
-  XPL: envNumber("XPL_MAX_POSITION_USD", 5000)
+  XPL: envNumber("XPL_MAX_POSITION_USD", 5000),
+  LIT: envNumber("LIT_MAX_POSITION_USD", 5000),
+  SUI: envNumber("SUI_MAX_POSITION_USD", 5000),
+  DOGE: envNumber("DOGE_MAX_POSITION_USD", 5000),
+  kPEPE: envNumber("kPEPE_MAX_POSITION_USD", 5000),
+  WIF: envNumber("WIF_MAX_POSITION_USD", 5000),
+  PUMP: envNumber("PUMP_MAX_POSITION_USD", 5000),
+  XRP: envNumber("XRP_MAX_POSITION_USD", 5000),
+  BTC: envNumber("BTC_MAX_POSITION_USD", 5000),
+  SOL: envNumber("SOL_MAX_POSITION_USD", 5000)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -931,7 +1015,7 @@ class SignalVerifier {
         // Jeśli Bias był Bearish (<0), a cena spadła -> WIN
         const priceChangePct = (currentPrice - snap.priceAtEntry) / snap.priceAtEntry
         const isWin = (snap.biasAtEntry > 0 && priceChangePct > 0.005) || // +0.5% profit
-                      (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
+          (snap.biasAtEntry < 0 && priceChangePct < -0.005)   // +0.5% profit (na short)
 
         snap.status = isWin ? 'validated_win' : 'validated_loss'
         this.updateScore(pair, isWin)
@@ -2198,10 +2282,10 @@ class LiveTrading implements TradingInterface {
         const coinStep = specs.lotSize || Math.pow(10, -stepDec)
         const clampedSteps = Math.round(clampedSizeCoins / coinStep)
         const clampedSizeFinal = (clampedSteps * coinStep).toFixed(stepDec)
-          currentSizeStr = clampedSizeFinal
-          console.log(
+        currentSizeStr = clampedSizeFinal
+        console.log(
           `🔧 Clamped ${pair} size: ${sizeInCoinsFinal.toFixed(stepDec)} → ${clampedSizeFinal} (notional: $${(Number(clampedSizeFinal) * Number(currentPriceStr)).toFixed(2)})`
-          )
+        )
       }
 
       let attempt = 0
@@ -2574,6 +2658,11 @@ class LiveTrading implements TradingInterface {
 
   /**
    * Cancel all open orders - called on bot startup for clean slate
+   *
+   * Strategy: Use nonce invalidation first (fast, guaranteed, saves rate limits),
+   * then fallback to individual cancels if needed.
+   *
+   * @see https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#invalidate-pending-nonce-noop
    */
   async cancelAllOrders(): Promise<void> {
     try {
@@ -2584,7 +2673,18 @@ class LiveTrading implements TradingInterface {
         return
       }
 
-      console.log(`Canceling ${orders.length} open orders...`)
+      console.log(`⚡ Canceling ${orders.length} orders via nonce invalidation (fast mode)...`)
+
+      // PRIMARY: Use nonce invalidation - single tx, guaranteed, saves rate limits
+      const nonceSuccess = await this.cancelAllOrdersByNonce()
+
+      if (nonceSuccess) {
+        console.log('✅ All orders canceled via nonce invalidation')
+        return
+      }
+
+      // FALLBACK: If nonce invalidation fails, use individual cancels
+      console.log('⚠️ Nonce invalidation failed, falling back to individual cancels...')
 
       for (const order of orders) {
         const assetIndex = this.assetMap.get(order.coin)
@@ -2602,7 +2702,7 @@ class LiveTrading implements TradingInterface {
         }
       }
 
-      console.log('All orders canceled')
+      console.log('All orders canceled (fallback method)')
     } catch (error) {
       console.error(`Error canceling all orders: ${error}`)
       throw error
@@ -2816,6 +2916,46 @@ class LiveTrading implements TradingInterface {
       console.log(`✅ Dead Man's Switch disabled`)
     } catch (error) {
       console.error(`Failed to disable Dead Man's Switch: ${error}`)
+    }
+  }
+
+  /**
+   * EMERGENCY INSTANT CANCEL - Use during high volatility spikes
+   *
+   * This is the FASTEST way to cancel all pending orders:
+   * - Single noop transaction
+   * - No rate limit consumption
+   * - Guaranteed cancellation if tx lands first
+   *
+   * Use cases:
+   * - Flash crash detected
+   * - Unusual spread spike
+   * - Circuit breaker triggered
+   * - Manual panic button
+   *
+   * @returns true if successful, false otherwise
+   */
+  async emergencyInstantCancel(): Promise<boolean> {
+    console.log('🚨🚨🚨 EMERGENCY INSTANT CANCEL TRIGGERED 🚨🚨🚨')
+    const startTime = Date.now()
+
+    try {
+      // Use nonce invalidation for instant cancel
+      const result = await this.exchClient.noop()
+
+      const elapsed = Date.now() - startTime
+
+      if (result && result.status === 'ok') {
+        console.log(`✅ Emergency cancel SUCCESS in ${elapsed}ms - all pending orders invalidated`)
+        return true
+      } else {
+        console.error(`❌ Emergency cancel FAILED in ${elapsed}ms:`, result)
+        return false
+      }
+    } catch (error) {
+      const elapsed = Date.now() - startTime
+      console.error(`❌ Emergency cancel ERROR in ${elapsed}ms:`, error)
+      return false
     }
   }
 
@@ -3252,7 +3392,8 @@ class HyperliquidMMBot {
     ZEC: { min: 35, max: 180 },     // Increased min spread further (sideways market, reducing churn)
     HYPE: { min: 15, max: 140 },    // More aggressive on HYPE
     XPL: { min: 35, max: 200 },     // 🚀 NEW: High volatility protection for XPL
-    VIRTUAL: { min: 18, max: 170 }  // Kept as is (was profitable)
+    VIRTUAL: { min: 30, max: 400 },  // Widened for FORCE_SHORT_ONLY (anti-whipsaw)
+    FARTCOIN: { min: 40, max: 500 } // Reduced from 90-2000 to get more fills
   }
 
   private tuning = {
@@ -3282,6 +3423,9 @@ class HyperliquidMMBot {
     byCoin: Map<string, { size: number; entryPrice: number; side: 'long' | 'short' }>
   } = { ts: 0, byCoin: new Map() }
 
+  private positionRiskManager?: PositionRiskManager
+  private positionProtector?: PositionProtector
+
   private async getLivePositionForPair(pair: string): Promise<{ size: number; entryPrice: number; side: 'long' | 'short' } | null> {
     try {
       const now = Date.now()
@@ -3290,6 +3434,9 @@ class HyperliquidMMBot {
         const walletAddress = (this.trading as any)?.walletAddress || this.walletAddress
         if (!walletAddress) return null
         const userState = await this.api.getClearinghouseState(walletAddress)
+        this.positionRiskManager?.updateAccountValue(
+          Number(userState?.marginSummary?.accountValue || 0)
+        )
         const next = new Map<string, { size: number; entryPrice: number; side: 'long' | 'short' }>()
         for (const ap of userState?.assetPositions ?? []) {
           const p = ap?.position
@@ -3345,8 +3492,43 @@ class HyperliquidMMBot {
     this.marketDataProvider = new HyperliquidMarketDataProvider(this.api)
     this.telemetryCollector = new TelemetryCollector()
     this.alertManager = new AlertManager()
+    const totalCapitalUsd = Number(process.env.RISK_TOTAL_CAPITAL_USD || process.env.ACCOUNT_VALUE_USD || 20000)
+    this.positionRiskManager = new PositionRiskManager({
+      totalCapitalUsd,
+      maxPerTokenUsd: Number(process.env.RISK_MAX_TOKEN_EXPOSURE_USD || 1500),
+      maxTotalExposureUsd: Number(
+        process.env.RISK_MAX_TOTAL_EXPOSURE_USD || totalCapitalUsd * (1 - Number(process.env.RISK_RESERVE_RATIO || 0.2))
+      ),
+      reserveRatio: Number(process.env.RISK_RESERVE_RATIO || 0.2),
+      maxDrawdownPct: Number(process.env.RISK_MAX_DRAWDOWN_PCT || 0.2),
+      notifier: this.notifier,
+      onPause: (reason) => {
+        this.alertManager?.setExternalPause('position-risk', reason)
+      },
+      onResume: () => {
+        this.alertManager?.clearExternalPause('position-risk')
+      }
+    })
 
-    const dynamicConfigTokens = (process.env.DYNAMIC_CONFIG_TOKENS ?? 'DOGE,LIT,SUI')
+    // Initialize PositionProtector for trailing stop / auto-close
+    this.positionProtector = new PositionProtector({
+      trailingStopPct: Number(process.env.TRAILING_STOP_PCT || 0.10),          // 10% trailing stop
+      profitTakeStartPct: Number(process.env.PROFIT_TAKE_START_PCT || 0.05),   // Start trailing after 5% profit
+      hardStopPct: Number(process.env.HARD_STOP_PCT || 0.15),                  // 15% hard stop loss
+      notifier: this.notifier,
+      onClosePosition: async (token, reason, pnlPct) => {
+        try {
+          await (this.trading as any).closePositionForPair?.(token, `position_protector_${reason}`)
+          this.notifier.warn(
+            `[PositionProtector] Closed ${token}: ${reason} | PnL: ${(pnlPct * 100).toFixed(2)}%`
+          )
+        } catch (err: any) {
+          this.notifier.error(`[PositionProtector] Failed to close ${token}: ${err?.message || err}`)
+        }
+      }
+    })
+
+    const dynamicConfigTokens = (process.env.DYNAMIC_CONFIG_TOKENS ?? 'DOGE,LIT,SUI,SOL')
       .split(',')
       .map((s) => s.trim().toUpperCase())
       .filter((s) => s.length > 0)
@@ -3394,7 +3576,9 @@ class HyperliquidMMBot {
         getPerformance: () => this.getTelemetryPerformance(),
         getContrarianData: () => this.getTelemetryContrarian(),
         getShadowData: () => this.getTelemetryShadow(),
-        getWatchdogData: () => this.getTelemetryWatchdog()
+        getSmartSignals: () => this.getTelemetrySmartSignals(),
+        getWatchdogData: () => this.getTelemetryWatchdog(),
+        getPositionRisk: () => this.getTelemetryPositionRisk()
       })
       this.telemetryServer.start()
     }
@@ -3626,8 +3810,8 @@ class HyperliquidMMBot {
           this.notifier.info('   ✅ All orders canceled')
 
           if (!skipClosePositions) {
-          await (this.trading as LiveTrading).closeAllPositions()
-          this.notifier.info('   ✅ All positions closed')
+            await (this.trading as LiveTrading).closeAllPositions()
+            this.notifier.info('   ✅ All positions closed')
           } else {
             this.notifier.info('   ⏭️  Preserved positions on startup')
           }
@@ -3661,6 +3845,60 @@ class HyperliquidMMBot {
     if (this.dailySnapshotGenerator) {
       const runOnStart = process.env.DAILY_SNAPSHOT_RUN_ON_START !== 'false'
       this.dailySnapshotGenerator.start(undefined, runOnStart)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 🚀 AlphaExtractionEngine - Native TypeScript Smart Money tracking
+    // Replaces Python whale_tracker.py JSON file reading with real-time signals
+    // ════════════════════════════════════════════════════════════════════════
+    try {
+      await alphaEngineIntegration.start(30_000) // 30s update interval
+      this.notifier.info('🚀 AlphaExtractionEngine started (30s interval)')
+
+      // Subscribe to immediate signals for fast reaction
+      alphaEngineIntegration.on('immediate_signal', (command: TradingCommand) => {
+        this.handleImmediateSignal(command)
+      })
+
+      // Subscribe to full updates to keep nansenBiasCache in sync
+      alphaEngineIntegration.on('update', (data: { nansenBias: Record<string, NansenBiasEntry> }) => {
+        this.nansenBiasCache = {
+          lastLoad: Date.now(),
+          data: data.nansenBias,
+        }
+      })
+
+      this.notifier.info('✅ AlphaEngine event listeners active')
+    } catch (err) {
+      this.notifier.warn(`⚠️ AlphaEngine failed to start: ${err} - using JSON fallback`)
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // 🔮 Oracle Vision - Price prediction using SM data + Linear Regression
+    // ════════════════════════════════════════════════════════════════════════
+    try {
+      await oracleEngine.start()
+      this.notifier.info('🔮 Oracle Vision started (60s interval)')
+
+      // Subscribe to Oracle signals for enhanced trading decisions
+      oracleEngine.on('signal', (signal: OracleSignal) => {
+        this.handleOracleSignal(signal)
+      })
+
+      // Log Oracle dashboard periodically (every 5 minutes)
+      setInterval(() => {
+        if (oracleEngine.isRunning()) {
+          console.log(generateSignalDashboard())
+          const alerts = generateDivergenceAlerts()
+          if (alerts.includes('DIVERGENCE')) {
+            console.log(alerts)
+          }
+        }
+      }, 5 * 60 * 1000)
+
+      this.notifier.info('✅ Oracle Vision event listeners active')
+    } catch (err) {
+      this.notifier.warn(`⚠️ Oracle Vision failed to start: ${err}`)
     }
   }
 
@@ -3943,7 +4181,23 @@ class HyperliquidMMBot {
           this.notifier.warn('⚠️  NaN dailyPnl detected')
         }
 
-        // Sleep
+        // 🚀 IMMEDIATE SIGNAL: Check if AlphaEngine has high-priority signals
+        // If so, reduce sleep time for faster reaction to whale moves
+        const hasImmediateSignal = alphaEngineIntegration.hasImmediateSignals()
+        if (hasImmediateSignal) {
+          const immediateSignal = alphaEngineIntegration.popImmediateSignal()
+          if (immediateSignal) {
+            this.notifier.info(
+              `🚀 [GRID] FORCE UPDATE: Processing IMMEDIATE signal for ${immediateSignal.coin}! ` +
+              `Action=${immediateSignal.action} Conf=${immediateSignal.confidence}%`
+            )
+            // Fast cycle - only 5s delay instead of normal 60s
+            await this.sleep(5000)
+            continue // Skip to next iteration immediately
+          }
+        }
+
+        // Normal sleep
         await this.sleep(this.intervalSec * 1000)
 
       } catch (error) {
@@ -4079,7 +4333,7 @@ class HyperliquidMMBot {
             if (signals) {
               if (signals.smartMoneyNet > 100000) nansenBias = 'bull'
               else if (signals.smartMoneyNet < -100000) nansenBias = 'bear'
-            else nansenBias = 'neutral'
+              else nansenBias = 'neutral'
 
               const whaleNet = Math.abs(signals.whaleNet)
               if (whaleNet > 5000000) nansenWhaleRisk = 'high'
@@ -4292,7 +4546,7 @@ class HyperliquidMMBot {
 
         for (const p of newPairs) {
           if (!this.rotationSince[p]) this.markRotationEntered(p)
-          }
+        }
         for (const old of Object.keys(this.rotationSince)) {
           if (!newPairs.includes(old)) delete this.rotationSince[old]
         }
@@ -4528,6 +4782,21 @@ class HyperliquidMMBot {
         }
 
         if (shouldClose) {
+          // 🚫 BYPASS AUTO-CLOSE FOR FOLLOW_SM MODES (Unholy Trinity protection)
+          // In high-conviction SM-following mode, we trust on-chain data over bias conflicts
+          // The "conflict" is expected - we're deliberately going against short-term bias
+          const pairConfig = NANSEN_TOKENS[pair.toUpperCase()]?.tuning
+          const isFollowSmMode = pairConfig?.followSmMode === 'FOLLOW_SM_SHORT' ||
+                                  pairConfig?.followSmMode === 'FOLLOW_SM_LONG' ||
+                                  pair === 'FARTCOIN' || pair === 'VIRTUAL' || pair === 'LIT'
+
+          if (isFollowSmMode) {
+            this.notifier.warn(
+              `🛑 BYPASS Nansen conflict auto-close: ${pair} (FOLLOW_SM mode) | Would close: ${closeReason} | IGNORING`
+            )
+            continue // Skip auto-close, keep position
+          }
+
           this.notifier.warn(
             `🛡️  Nansen strong conflict auto-close: ${pair} ${posDir.toUpperCase()} vs bias ${biasDir.toUpperCase()} +${biasBoost.toFixed(2)} | ${closeReason}`
           )
@@ -4876,7 +5145,7 @@ class HyperliquidMMBot {
       if (!gdSignal) {
         // DEBUG: Log when no signal found
         if (pair === 'ZEC' || pair === 'kPEPE') {
-          console.log(`[DEBUG BIAS] ${pair}: No gdSignal found (keys: ${Object.keys(this.goldenDuoData).slice(0,5).join(',')})`)
+          console.log(`[DEBUG BIAS] ${pair}: No gdSignal found (keys: ${Object.keys(this.goldenDuoData).slice(0, 5).join(',')})`)
         }
         return 'neutral'
       }
@@ -4894,6 +5163,166 @@ class HyperliquidMMBot {
     } catch (error) {
       return 'neutral'
     }
+  }
+
+  /**
+   * 🚀 Handle immediate signals from AlphaExtractionEngine
+   * These signals bypass standard delays for faster reaction to whale moves
+   */
+  private handleImmediateSignal(command: TradingCommand): void {
+    const pair = `${command.coin}-PERP`
+    const msg = `🔔 [ALPHA] IMMEDIATE SIGNAL: ${command.coin} → ${command.action} ` +
+      `(${command.confidence}% conf, ${command.urgency} urgency)`
+    this.notifier.info(msg)
+
+    // Update bias cache immediately for this coin
+    const bias = alphaEngineIntegration.getNansenBias(command.coin)
+    if (bias) {
+      this.nansenBiasCache.data[command.coin] = bias
+      this.nansenBiasCache.lastLoad = Date.now()
+    }
+
+    // Log for analysis - actual trading decision happens in main loop
+    // based on permissions from AlphaEngineIntegration
+    if (command.bypassDelay) {
+      console.log(`[ALPHA] ${command.coin}: bypassDelay=true, will execute on next cycle`)
+    }
+
+    // If BLOCKED action, might want to trigger immediate order cancel
+    if (command.action === 'BLOCKED') {
+      this.notifier.warn(`⚠️ [ALPHA] ${command.coin} BLOCKED - consider canceling open orders`)
+    }
+  }
+
+  // Oracle signal cache for grid adjustments
+  private oracleSignalCache: Map<string, OracleSignal> = new Map()
+  // Track previous Oracle actions for Signal Flip detection
+  private oraclePrevAction: Map<string, string> = new Map()
+
+  /**
+   * Handle Oracle Vision signal
+   * Used to adjust grid bias based on price predictions
+   */
+  private handleOracleSignal(signal: OracleSignal): void {
+    const pair = `${signal.coin}-PERP`
+    const prevAction = this.oraclePrevAction.get(signal.coin) || 'NEUTRAL'
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🔔 SIGNAL FLIP DETECTION - Alert when action changes significantly
+    // ═══════════════════════════════════════════════════════════════════════════
+    const isFlip = prevAction !== signal.action && signal.action !== 'NEUTRAL'
+    const isDirectionChange = (
+      (prevAction.includes('LONG') && signal.action.includes('SHORT')) ||
+      (prevAction.includes('SHORT') && signal.action.includes('LONG'))
+    )
+    const isBreakout = prevAction === 'NEUTRAL' && signal.action !== 'NEUTRAL'
+
+    if (isFlip || isDirectionChange || isBreakout) {
+      const flipEmoji = signal.action.includes('LONG') ? '📈' : signal.action.includes('SHORT') ? '📉' : '➡️'
+      const alertType = isDirectionChange ? '🔄 DIRECTION FLIP' : isBreakout ? '💥 BREAKOUT' : '🔔 SIGNAL FLIP'
+
+      const flipMsg = `${alertType} ${flipEmoji} ${signal.coin}: ${prevAction} → ${signal.action} ` +
+        `| Score: ${signal.score} | RSI: ${signal.momentum.rsi.toFixed(0)} | R²: ${signal.regression.r2.toFixed(2)}`
+
+      console.log(`\n${'═'.repeat(80)}`)
+      console.log(`🔮 ORACLE SIGNAL FLIP DETECTED`)
+      console.log(`${'═'.repeat(80)}`)
+      console.log(flipMsg)
+      console.log(`${'═'.repeat(80)}\n`)
+
+      this.notifier.info(flipMsg)
+
+      // Send Telegram alert for significant flips
+      if (isDirectionChange || Math.abs(signal.score) > 30) {
+        mmAlertBot.sendRiskAlert(flipMsg, 'warning').catch(() => {})
+      }
+    }
+
+    // Update previous action tracking
+    this.oraclePrevAction.set(signal.coin, signal.action)
+
+    // Cache the signal
+    this.oracleSignalCache.set(signal.coin, signal)
+
+    // Only log significant signals (|score| > 40)
+    if (Math.abs(signal.score) > 40) {
+      const emoji = signal.score > 0 ? '🟢' : '🔴'
+      const msg = `🔮 [ORACLE] ${signal.coin}: Score=${signal.score} Action=${signal.action} ` +
+        `(Conf: ${signal.confidence}%, RSI: ${signal.momentum.rsi.toFixed(0)})`
+      this.notifier.info(msg)
+
+      // Log divergence alerts
+      if (signal.divergence.hasDivergence) {
+        const divEmoji = signal.divergence.type === 'bullish' ? '🟢' : '🔴'
+        this.notifier.info(`${divEmoji} [ORACLE] ${signal.coin}: ${signal.divergence.description}`)
+      }
+    }
+
+    // Strong signals (|score| > 60) trigger immediate logging
+    if (Math.abs(signal.score) > 60) {
+      console.log(`[ORACLE] STRONG SIGNAL: ${signal.coin}`)
+      console.log(`  Score: ${signal.score}`)
+      console.log(`  Action: ${signal.action}`)
+      console.log(`  Prediction: $${signal.targets.predicted.toFixed(4)} (${signal.regression.trend})`)
+      console.log(`  Support: $${signal.targets.support.toFixed(4)}, Resistance: $${signal.targets.resistance.toFixed(4)}`)
+      console.log(`  Reason: ${signal.reason}`)
+    }
+  }
+
+  /**
+   * Get Oracle signal for grid bias adjustment
+   * Returns multiplier: >1 = bullish bias, <1 = bearish bias, 1 = neutral
+   */
+  getOracleGridBias(coin: string): { bidMult: number; askMult: number; reason: string } {
+    const signal = this.oracleSignalCache.get(coin)
+
+    if (!signal || signal.confidence < 30) {
+      return { bidMult: 1.0, askMult: 1.0, reason: 'Oracle: No signal or low confidence' }
+    }
+
+    // Score ranges:
+    // >60: Strong bullish - increase bids, reduce asks
+    // 30-60: Mild bullish
+    // -30 to 30: Neutral
+    // -60 to -30: Mild bearish
+    // <-60: Strong bearish - reduce bids, increase asks
+
+    let bidMult = 1.0
+    let askMult = 1.0
+    let reason = 'Oracle: '
+
+    if (signal.score > 60) {
+      bidMult = 1.3  // 30% more aggressive on bids
+      askMult = 0.7  // 30% less aggressive on asks
+      reason += `STRONG BULLISH (${signal.score})`
+    } else if (signal.score > 30) {
+      bidMult = 1.15
+      askMult = 0.85
+      reason += `Mild bullish (${signal.score})`
+    } else if (signal.score < -60) {
+      bidMult = 0.7
+      askMult = 1.3
+      reason += `STRONG BEARISH (${signal.score})`
+    } else if (signal.score < -30) {
+      bidMult = 0.85
+      askMult = 1.15
+      reason += `Mild bearish (${signal.score})`
+    } else {
+      reason += `Neutral (${signal.score})`
+    }
+
+    // Boost adjustments if divergence detected
+    if (signal.divergence.hasDivergence) {
+      if (signal.divergence.type === 'bullish') {
+        bidMult *= 1.1
+        reason += ' | DIV: SM accumulating'
+      } else if (signal.divergence.type === 'bearish') {
+        askMult *= 1.1
+        reason += ' | DIV: SM distributing'
+      }
+    }
+
+    return { bidMult, askMult, reason }
   }
 
   /**
@@ -5065,7 +5494,8 @@ class HyperliquidMMBot {
 
     // Per-pair ma pierwszeństwo, ale nie pozwalamy na totalne głupoty
     const minBps = Math.max(perPair.min, 1)
-    const maxBps = Math.max(Math.min(perPair.max, 500), minBps + 1)
+    // Allow wide spreads for FOLLOW_SM strategies (up to globalMax from env or perPair)
+    const maxBps = Math.max(perPair.max, minBps + 1)
 
     let clamped = spreadBps
     if (!Number.isFinite(clamped)) {
@@ -5426,6 +5856,7 @@ class HyperliquidMMBot {
   }
 
   async executeMultiLayerMM(pair: string, assetCtxs?: any[]) {
+    console.log(`[DEBUG ENTRY] executeMultiLayerMM called for ${pair}`)
     // 🔍 LIQUIDITY CHECK (Anti-Rug Pull)
     const liqFlags = loadLiquidityFlags();
     if (isPairBlockedByLiquidity(pair, liqFlags)) {
@@ -5434,7 +5865,16 @@ class HyperliquidMMBot {
     }
 
     // 🛑 AUTO-PAUSE CHECK (Safety Circuit Breaker)
-    if (this.alertManager?.shouldPauseTrading()) {
+    // 🧠 SignalEngine PURE_MM tokens can bypass global pause
+    const SIGNAL_ENGINE_TOKENS_PAUSE = ['LIT', 'VIRTUAL', 'FARTCOIN'];
+    const signalEngineResultPause = SIGNAL_ENGINE_TOKENS_PAUSE.includes(pair)
+      ? getAutoEmergencyOverrideSync(pair)
+      : null;
+    const isSignalEnginePureMmPause = signalEngineResultPause?.signalEngineOverride &&
+      signalEngineResultPause?.mode === MmMode.PURE_MM;
+
+    const shouldPause = this.alertManager?.shouldPauseTrading()
+    if (shouldPause && !isSignalEnginePureMmPause) {
       const status = this.alertManager.getPauseStatus()
       if (!this._autoPauseLogAt || Date.now() - this._autoPauseLogAt > 60_000) {
         this._autoPauseLogAt = Date.now()
@@ -5447,6 +5887,8 @@ class HyperliquidMMBot {
         )
       }
       return // Skip trading while paused
+    } else if (shouldPause && isSignalEnginePureMmPause) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → AUTO-PAUSE bypassed, trading continues`)
     }
 
     const startTime = Date.now()
@@ -5459,6 +5901,7 @@ class HyperliquidMMBot {
     }
 
     // Get current market data
+    console.log(`[DEBUG ENTRY 2] ${pair}: Getting market data...`)
     if (!assetCtxs) {
       const [meta, ctxs] = await this.api.getMetaAndAssetCtxs()
       assetCtxs = ctxs
@@ -5466,9 +5909,11 @@ class HyperliquidMMBot {
     const pairData = assetCtxs.find(ctx => ctx.coin === pair)
 
     if (!pairData) {
+      console.log(`[DEBUG EXIT] ${pair}: No pairData found!`)
       this.notifier.warn(`⚠️  No data for ${pair}`)
       return
     }
+    console.log(`[DEBUG ENTRY 3] ${pair}: Got pairData, midPrice=${pairData.midPx}`)
 
     const midPrice = Number(pairData.midPx || 0)
     const funding = Number(pairData.funding || 0)
@@ -5515,6 +5960,46 @@ class HyperliquidMMBot {
         console.warn(`[EMERGENCY_GUARD] MON position $${monPos.toFixed(2)} > $6000. FORCING NO BIDS.`);
         // Force disable longs for this iteration
         // We need to pass this restriction to generateGridOrders via permissions
+      }
+    }
+
+    // 🛡️ POSITION PROTECTOR: Trailing stop & hard stop check
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🚫 EMERGENCY OVERRIDE BYPASS: Skip TRAILING_STOP for FOLLOW_SM modes
+    // In high-conviction SM-following mode, we trust on-chain data over short-term
+    // price fluctuations. Trailing stop at 8% would cut positions prematurely.
+    // We still honor HARD_STOP as emergency safety net.
+    // ═══════════════════════════════════════════════════════════════════════════
+    const emergencyConfig = NANSEN_TOKENS[symbol.toUpperCase()]?.tuning
+    const isEmergencyOverrideMode = emergencyConfig?.followSmMode === 'FOLLOW_SM_SHORT' ||
+                                     emergencyConfig?.followSmMode === 'FOLLOW_SM_LONG'
+
+    if (this.positionProtector && position && Math.abs(position.size) > 0) {
+      const posSide = position.size > 0 ? 'long' : 'short'
+      const protectorDecision = this.positionProtector.updatePosition(
+        pair,
+        posSide as 'long' | 'short',
+        position.entryPrice,
+        position.size,
+        midPrice
+      )
+      if (protectorDecision.shouldClose) {
+        // 🚫 BYPASS TRAILING_STOP for EMERGENCY_OVERRIDE pairs
+        const isTrailingStop = protectorDecision.reason?.includes('TRAILING_STOP')
+        if (isEmergencyOverrideMode && isTrailingStop) {
+          // Log but DO NOT close - we're following Smart Money conviction
+          console.log(
+            `[PositionProtector] 🛑 BYPASS TRAILING_STOP for ${pair} (FOLLOW_SM mode active) | ` +
+            `Reason: ${protectorDecision.reason} | PnL: ${(protectorDecision.pnlPct * 100).toFixed(2)}%`
+          )
+          // Continue trading - don't close
+        } else {
+          // Execute hard stop or non-emergency trailing stop
+          const executed = await this.positionProtector.executeIfNeeded(pair, protectorDecision)
+          if (executed) {
+            return // Position closed, skip this MM cycle
+          }
+        }
       }
     }
 
@@ -5593,13 +6078,29 @@ class HyperliquidMMBot {
         const positionValueUsd = Math.abs(position.size) * midPrice
 
         // SQUEEZE TRIGGER: Price reached profit target → close all
+        // NOTE: Squeeze trigger is calculated for CONTRARIAN direction (opposite of SM)
+        // Only apply if our position matches the contrarian direction
         if (overridesConfig.squeezeTriggerPrice) {
           const triggerPrice = overridesConfig.squeezeTriggerPrice
-          const shouldTrigger = positionSide === 'long'
-            ? midPrice >= triggerPrice  // Long: close when price goes UP
-            : midPrice <= triggerPrice  // Short: close when price goes DOWN
 
-          if (shouldTrigger) {
+          // Determine expected contrarian direction based on trigger vs entry
+          // If trigger > entry, contrarian expects LONG (profit when price UP)
+          // If trigger < entry, contrarian expects SHORT (profit when price DOWN)
+          const entryPx = position.entryPrice || midPrice
+          const contrarianExpectsLong = triggerPrice > entryPx
+          const positionMatchesContrarian = (contrarianExpectsLong && positionSide === 'long') ||
+                                            (!contrarianExpectsLong && positionSide === 'short')
+
+          // Only apply squeeze trigger if position matches contrarian direction
+          if (!positionMatchesContrarian) {
+            // Position is opposite of contrarian expectation - skip squeeze trigger
+            // This happens when MM fills create opposite position
+          } else {
+            const shouldTrigger = positionSide === 'long'
+              ? midPrice >= triggerPrice  // Long: close when price goes UP
+              : midPrice <= triggerPrice  // Short: close when price goes DOWN
+
+            if (shouldTrigger) {
             const pnlPct = positionSide === 'long'
               ? ((midPrice - (position.entryPrice || midPrice)) / (position.entryPrice || midPrice)) * 100
               : (((position.entryPrice || midPrice) - midPrice) / (position.entryPrice || midPrice)) * 100
@@ -5619,11 +6120,29 @@ class HyperliquidMMBot {
               this.notifier.error(`❌ [SQUEEZE CLOSE FAILED] ${pair}: ${err?.message || err}`)
             }
           }
+          }
         }
 
         // STOP LOSS: Price hit stop → close all
+        // NOTE: Stop loss is calculated for CONTRARIAN direction (opposite of SM)
+        // Only apply if our position matches the contrarian direction
         if (overridesConfig.stopLossPrice) {
           const stopPrice = overridesConfig.stopLossPrice
+
+          // Determine expected contrarian direction based on stop vs entry
+          // If stop < entry, contrarian expects LONG (stop below entry protects LONG)
+          // If stop > entry, contrarian expects SHORT (stop above entry protects SHORT)
+          const entryPx = position.entryPrice || midPrice
+          const contrarianExpectsLong = stopPrice < entryPx
+          const positionMatchesContrarian = (contrarianExpectsLong && positionSide === 'long') ||
+                                            (!contrarianExpectsLong && positionSide === 'short')
+
+          // Only apply stop loss if position matches contrarian direction
+          if (!positionMatchesContrarian) {
+            // Position is opposite of contrarian expectation - skip stop loss
+            // This happens when MM fills create opposite position (e.g., SHORT when expecting LONG)
+            // These positions need manual management or different exit logic
+          } else {
           const shouldStop = positionSide === 'long'
             ? midPrice <= stopPrice   // Long: stop when price goes DOWN
             : midPrice >= stopPrice   // Short: stop when price goes UP
@@ -5645,6 +6164,37 @@ class HyperliquidMMBot {
               return // Exit after closing
             } catch (err: any) {
               this.notifier.error(`❌ [STOP CLOSE FAILED] ${pair}: ${err?.message || err}`)
+            }
+          }
+          }
+        }
+
+        // ============================================================
+        // 💰 SM-ALIGNED TAKE PROFIT: Close profitable SHORT from BULL_TRAP
+        // ============================================================
+        // During BULL_TRAP (bid×0), bot only sells → creates SHORT from MM fills
+        // This SHORT is ALIGNED with SM (both shorting) - NOT contrarian
+        // When profitable, we should take profit by buying back
+        const SM_ALIGNED_TP_THRESHOLD = 0.005  // 0.5% profit to trigger TP
+
+        if (sizeMultipliers.bid === 0 && positionSide === 'short') {
+          const entryPx = position.entryPrice || midPrice
+          const profitPct = (entryPx - midPrice) / entryPx  // SHORT profit when price drops
+
+          if (profitPct >= SM_ALIGNED_TP_THRESHOLD) {
+            const profitUsd = profitPct * positionValueUsd
+
+            this.notifier.info(
+              `💰 [SM-ALIGNED TP] ${pair} SHORT profitable! Entry: $${entryPx.toFixed(4)} → Now: $${midPrice.toFixed(4)} ` +
+              `| Profit: +${(profitPct * 100).toFixed(2)}% ($${profitUsd.toFixed(2)}) | CLOSING TO LOCK PROFIT...`
+            )
+
+            try {
+              await (this.trading as LiveTrading).closePositionForPair(pair, 'sm_aligned_tp')
+              this.notifier.info(`✅ [SM-ALIGNED TP] ${pair} SHORT closed at $${midPrice.toFixed(4)} - profit locked!`)
+              return // Exit after closing
+            } catch (err: any) {
+              this.notifier.error(`❌ [SM-ALIGNED TP FAILED] ${pair}: ${err?.message || err}`)
             }
           }
         }
@@ -5749,19 +6299,51 @@ class HyperliquidMMBot {
     }
 
     const actualSkew = inventorySkew; // Capture real inventory skew BEFORE vision injection
+
+    // 🧠 SignalEngine PURE_MM check for inventory deviation bypass
+    const signalEngineResultInv = getAutoEmergencyOverrideSync(pair);
+    const isSignalEnginePureMmInv = signalEngineResultInv?.signalEngineOverride && signalEngineResultInv?.mode === MmMode.PURE_MM;
+
     const inventoryDeviation = actualSkew - targetInventoryBias
-    if (inventoryDeviation > 0.05) {
+    if (!isSignalEnginePureMmInv && inventoryDeviation > 0.05) {
       sizeMultipliers.bid *= 0.7
       sizeMultipliers.ask *= 1.2
-    } else if (inventoryDeviation < -0.05) {
+    } else if (!isSignalEnginePureMmInv && inventoryDeviation < -0.05) {
       sizeMultipliers.bid *= 1.2
       sizeMultipliers.ask *= 0.7
+    } else if (isSignalEnginePureMmInv) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → inventory deviation adjustment bypassed`)
     }
     // Allow 0 for emergency overrides (SM winning scenario), otherwise clamp to 0.25 minimum
     const bidWasZero = sizeMultipliers.bid === 0
     const askWasZero = sizeMultipliers.ask === 0
     sizeMultipliers.bid = bidWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.bid))
     sizeMultipliers.ask = askWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.ask))
+
+    // 🚀 AlphaEngine Size Multipliers - Apply real-time Smart Money signals
+    // Only apply if AlphaEngine is running and has fresh data
+    // 🧠 Skip for SignalEngine PURE_MM mode - keep multipliers at 1.0
+    if (alphaEngineIntegration.getIsRunning() && !alphaEngineIntegration.isDataStale() && !isSignalEnginePureMmInv) {
+      const alphaMultipliers = getAlphaSizeMultipliers(symbol)
+      // AlphaEngine provides 0-1 multipliers, combine with existing multipliers
+      const prevBid = sizeMultipliers.bid
+      const prevAsk = sizeMultipliers.ask
+      sizeMultipliers.bid *= alphaMultipliers.bid
+      sizeMultipliers.ask *= alphaMultipliers.ask
+
+      // Check for bypassDelay flag (whale sequence detected)
+      const bypass = shouldBypassDelay(symbol)
+      if (bypass) {
+        console.log(`🔔 [ALPHA] ${pair} bypassDelay active - fast execution mode`)
+      }
+
+      // Log significant changes
+      if (Math.abs(prevBid - sizeMultipliers.bid) > 0.1 || Math.abs(prevAsk - sizeMultipliers.ask) > 0.1) {
+        console.log(`🚀 [ALPHA] ${pair} size: bid×${prevBid.toFixed(2)}→${sizeMultipliers.bid.toFixed(2)} ask×${prevAsk.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+      }
+    } else if (isSignalEnginePureMmInv && alphaEngineIntegration.getIsRunning()) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → AlphaEngine multipliers bypassed (kept at bid×1.00 ask×1.00)`)
+    }
 
     // 👁️ MarketVision Skew Injection
     const visionSkew = this.marketVision.getSizeSkew(pair);
@@ -6146,8 +6728,48 @@ class HyperliquidMMBot {
 
     // 🔧 FIX: Calculate gridMult AFTER Nansen factors, so grid layers follow the correct asymmetry
     // For SHORT bias: nansenAskFactor=0.7 (tight asks), nansenBidFactor=1.3 (wide bids)
-    const gridBidMult = currentBaseSpread > 1e-9 ? bidSpreadBps / currentBaseSpread : 1.0;
-    const gridAskMult = currentBaseSpread > 1e-9 ? askSpreadBps / currentBaseSpread : 1.0;
+    let gridBidMult = currentBaseSpread > 1e-9 ? bidSpreadBps / currentBaseSpread : 1.0;
+    let gridAskMult = currentBaseSpread > 1e-9 ? askSpreadBps / currentBaseSpread : 1.0;
+
+    // 🎯 UNHOLY TRINITY INTELLIGENT SPREAD CONTROL
+    // Dynamic Volatility Trigger - expands spread during pumps to avoid getting rekt
+    const unholyTrinity = ['FARTCOIN', 'VIRTUAL', 'LIT'];
+    if (unholyTrinity.includes(pair)) {
+      // 1. Check recent volatility from Oracle price history
+      let isVolatile = false;
+      let volatilityPct = 0;
+      try {
+        const priceHistory = oracleEngine.getPriceHistory(pair);
+        if (priceHistory && priceHistory.length >= 5) {
+          // Get last 5 price points (roughly 5 minutes if updated every minute)
+          const recent = priceHistory.slice(-5);
+          const prices = recent.map(p => p.price);
+          const low = Math.min(...prices);
+          const high = Math.max(...prices);
+          volatilityPct = (high - low) / low;
+
+          // If price moved more than 1.5% in last 5 points -> VOLATILITY SPIKE!
+          if (volatilityPct > 0.015) {
+            isVolatile = true;
+          }
+        }
+      } catch (e) {
+        // Fallback to normal mode if Oracle not available
+      }
+
+      if (isVolatile) {
+        // 🚨 DEFENSE MODE (Volatility Spike) - expand grid to avoid pump trap
+        gridAskMult *= 6.0;  // Wide spread (L1 ~1.2%, L8 ~10%)
+        gridBidMult *= 6.0;
+        if (this.tickCount % 10 === 0) {
+          this.notifier.warn(`[DEFENSE] 🐡 ${pair} Volatility Spike! ${(volatilityPct * 100).toFixed(2)}% move → Grid 6x`);
+        }
+      } else {
+        // 🟢 SNIPER MODE (Calm market) - tight spread for fills
+        gridAskMult *= 2.0;
+        gridBidMult *= 2.0;
+      }
+    }
 
     // 3) Behavioural risk (FOMO / knife) – tylko BUY side
     bidSpreadBps *= behaviouralBidFactor
@@ -6193,16 +6815,37 @@ class HyperliquidMMBot {
       }
     }
 
-    // 🛑 FORCE SHORT ONLY FOR FARTCOIN (User Request)
-    if (pair === 'FARTCOIN') {
-      const currentSz = position ? Number(position.size) : 0;
-      // If not short (i.e. flat or long), forbid new Longs (Bids)
-      // This ensures we only enter via Shorts. Once Short, we can Bid to close.
-      if (currentSz >= 0) {
+    // 🛑 FORCE SHORT ONLY FOR UNHOLY TRINITY (FARTCOIN, VIRTUAL)
+    // ALWAYS block bids AND force enable shorts - override REGIME restrictions
+    // VIRTUAL was whipsawing (buying tops, selling bottoms) due to weak Oracle signal ~0
+    // 🧠 BUT: Skip this block if SignalEngine wants PURE_MM (both sides enabled)
+    const signalEngineResultFso = getAutoEmergencyOverrideSync(pair);
+    const isSignalEnginePureMmFso = signalEngineResultFso?.signalEngineOverride && signalEngineResultFso?.mode === MmMode.PURE_MM;
+
+    if ((pair === 'FARTCOIN' || pair === 'VIRTUAL') && !isSignalEnginePureMmFso) {
+      permissions.allowLongs = false;
+      permissions.allowShorts = true; // 🔓 Override REGIME - we MUST be able to short
+      if (permissions.reason) permissions.reason += ' | ';
+      permissions.reason += `${pair}_FORCE_SHORT_ONLY`;
+      this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: ASK-only grid, BIDs blocked. Shorts ENABLED.`);
+    } else if ((pair === 'FARTCOIN' || pair === 'VIRTUAL') && isSignalEnginePureMmFso) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → FORCE_SHORT_ONLY bypassed, both sides enabled`);
+    }
+
+    // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
+    // This is EMERGENCY priority and should bypass all other regime restrictions
+    if (overridesConfig?.followSmMode) {
+      if (overridesConfig.followSmMode === 'FOLLOW_SM_LONG') {
+        // Force allow longs, block shorts - we're following SM bullish signal
+        permissions.allowLongs = true;
+        permissions.allowShorts = false;
+        permissions.reason = 'FOLLOW_SM_LONG (EMERGENCY OVERRIDE)';
+        this.notifier.warn(`🟢 [EMERGENCY] ${pair}: FOLLOW_SM_LONG overriding REGIME → allowLongs=TRUE`);
+      } else if (overridesConfig.followSmMode === 'FOLLOW_SM_SHORT') {
+        // Force allow shorts, block longs - we're following SM bearish signal
         permissions.allowLongs = false;
-        if (permissions.reason) permissions.reason += ' | ';
-        permissions.reason += 'FARTCOIN_FORCE_SHORT_ONLY';
-        this.notifier.info(`[FORCE_SHORT_ONLY] FARTCOIN: No Short pos (sz=${currentSz}), blocking Bids.`);
+        permissions.allowShorts = true;
+        permissions.reason = 'FOLLOW_SM_SHORT (EMERGENCY OVERRIDE)';
       }
     }
 
@@ -6210,8 +6853,68 @@ class HyperliquidMMBot {
       console.log(`🛡️  [REGIME] ${pair}: ${permissions.reason} (Longs: ${permissions.allowLongs}, Shorts: ${permissions.allowShorts})`);
     }
 
+    // 🧠 SIGNAL ENGINE MASTER OVERRIDE - Bypass REGIME for PURE_MM mode
+    // When SignalEngine says WAIT (no clear signal), allow BOTH sides for proper market making
+    // This prevents REGIME from killing one side when SignalEngine wants neutral positioning
+    const SIGNAL_ENGINE_TOKENS = ['LIT', 'VIRTUAL', 'FARTCOIN'];
+    if (SIGNAL_ENGINE_TOKENS.includes(pair)) {
+      // Get DYNAMIC SignalEngine result from SmAutoDetector (uses cached analysis)
+      const signalEngineResult = getAutoEmergencyOverrideSync(pair);
+      const isPureMmMode = signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.PURE_MM;
+
+      // Check if mode is PURE_MM (SignalEngine said WAIT)
+      // PURE_MM = no clear signal = allow both sides for market making
+      if (isPureMmMode) {
+        // 🎯 MASTER OVERRIDE: Force BOTH sides enabled for PURE_MM
+        const prevLongs = permissions.allowLongs;
+        const prevShorts = permissions.allowShorts;
+
+        permissions.allowLongs = true;
+        permissions.allowShorts = true;
+
+        if (!prevLongs || !prevShorts) {
+          console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode → FORCE BOTH SIDES (was Longs:${prevLongs} Shorts:${prevShorts})`);
+          permissions.reason = 'SIGNAL_ENGINE_PURE_MM (MASTER OVERRIDE)';
+        }
+      }
+    }
+
+    // 🛑 REGIME ENFORCEMENT: Zero out multipliers when permissions block directions
+    // This ensures sizeMultipliers match actual trading permissions (no hidden mismatches)
+    // BUG FIX: Previously tuning could set bid×0.7 ask×1.2 but REGIME block both → should be bid×0 ask×0
+    const prevBidMult = sizeMultipliers.bid;
+    const prevAskMult = sizeMultipliers.ask;
+
+    if (!permissions.allowLongs && sizeMultipliers.bid > 0) {
+      sizeMultipliers.bid = 0;
+    }
+    if (!permissions.allowShorts && sizeMultipliers.ask > 0) {
+      sizeMultipliers.ask = 0;
+    }
+
+    // Detect FLAT mode (both blocked) and log appropriately
+    const isFlatMode = !permissions.allowLongs && !permissions.allowShorts;
+    if (isFlatMode && (prevBidMult > 0 || prevAskMult > 0)) {
+      console.log(`🔒 [FLAT MODE] ${pair}: REGIME blocks BOTH sides → bid×${prevBidMult.toFixed(2)}→0 ask×${prevAskMult.toFixed(2)}→0 | NO NEW ORDERS`);
+    } else if (!permissions.allowLongs && prevBidMult > 0) {
+      console.log(`🛑 [REGIME→MULT] ${pair}: bid×${prevBidMult.toFixed(2)} → bid×0 (Longs blocked)`);
+    } else if (!permissions.allowShorts && prevAskMult > 0) {
+      console.log(`🛑 [REGIME→MULT] ${pair}: ask×${prevAskMult.toFixed(2)} → ask×0 (Shorts blocked)`);
+    }
+
     // Generate grid orders with Nansen bias awareness AND Institutional Permissions
     // Note: GridManager will apply its own clamp internally, but we log our calculation here
+    // 🔍 DEBUG: Track FINAL capitalPerPair right before grid generation
+    console.log(`[DEBUG GRID] ${pair}: capitalPerPair=$${capitalPerPair.toFixed(0)} midPrice=$${midPrice.toFixed(4)}`)
+
+    // 🎯 FARTCOIN GRID EXPANSION (expand grid to allow orders to fit)
+    // Problem: rebucket logic was zeroing out layers due to tight spread
+    // Fix: widen the grid by increasing gridAskMult to 5.0x
+    if (pair === 'FARTCOIN') {
+      gridAskMult = Math.max(gridAskMult, 5.0);
+      console.log(`[FARTCOIN GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
+    }
+
     let gridOrders = this.gridManager!.generateGridOrders(
       pair,
       midPrice,
@@ -6246,6 +6949,20 @@ class HyperliquidMMBot {
       }
     }
 
+    // 🛑 Cancel existing bid orders on exchange when bid×0 (SEPARATE from grid filtering)
+    if (sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading) {
+      try {
+        const existingOrders = await this.trading.getOpenOrders(pair)
+        const existingBids = existingOrders.filter((o: any) => o.side === 'B' || o.side === 'buy')
+        for (const bid of existingBids) {
+          await this.trading.cancelOrder(bid.oid?.toString() || bid.orderId?.toString())
+          this.notifier.warn(`🛑 [BULL_TRAP] ${pair} cancelled existing BID order ${bid.oid || bid.orderId} @ $${bid.limitPx}`)
+        }
+      } catch (e: any) {
+        // Silently ignore - order may have already filled or been cancelled
+      }
+    }
+
     // 🛑 EMERGENCY OVERRIDE: Remove ask orders when SM longs are winning
     if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders)) {
       const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
@@ -6254,6 +6971,20 @@ class HyperliquidMMBot {
         this.notifier.warn(
           `🛑 [EMERGENCY] ${pair} removed ${originalAsks} ASKS - SM longs winning, bids only`
         )
+      }
+    }
+
+    // 🛑 Cancel existing ask orders on exchange when ask×0 (SEPARATE from grid filtering)
+    if (sizeMultipliers.ask === 0 && this.trading instanceof LiveTrading) {
+      try {
+        const existingOrders = await this.trading.getOpenOrders(pair)
+        const existingAsks = existingOrders.filter((o: any) => o.side === 'A' || o.side === 'sell')
+        for (const ask of existingAsks) {
+          await this.trading.cancelOrder(ask.oid?.toString() || ask.orderId?.toString())
+          this.notifier.warn(`🛑 [BEAR_TRAP] ${pair} cancelled existing ASK order ${ask.oid || ask.orderId} @ $${ask.limitPx}`)
+        }
+      } catch (e: any) {
+        // Silently ignore - order may have already filled or been cancelled
       }
     }
 
@@ -6285,7 +7016,46 @@ class HyperliquidMMBot {
       gridOrders,
       { targetUsd: GLOBAL_CLIP, minUsd: MIN_NOTIONAL }
     )
-    const totalAfter = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
+    let totalAfter = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
+
+    if (this.positionRiskManager && gridOrders.length > 0) {
+      const totalBidNotional = gridOrders
+        .filter((o: GridOrder) => o.side === 'bid')
+        .reduce((sum: number, o: GridOrder) => sum + (o.sizeUsd || 0), 0)
+      const totalAskNotional = gridOrders
+        .filter((o: GridOrder) => o.side === 'ask')
+        .reduce((sum: number, o: GridOrder) => sum + (o.sizeUsd || 0), 0)
+
+      const riskDecision = this.positionRiskManager.evaluate({
+        token: pair,
+        midPrice,
+        positions: state.positions,
+        position,
+        totalBidNotional,
+        totalAskNotional
+      })
+
+      const riskReason =
+        riskDecision.reasons.length > 0 ? riskDecision.reasons.join(' | ') : 'exposure limit'
+
+      // 🧠 SignalEngine PURE_MM bypass for position risk
+      if (!riskDecision.allowBid && totalBidNotional > 0 && !isSignalEnginePureMmInv) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
+        this.notifier.warn(`🛑 [POSITION RISK] ${pair} bids disabled: ${riskReason}`)
+      } else if (!riskDecision.allowBid && isSignalEnginePureMmInv) {
+        console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → POSITION RISK bid block bypassed`)
+      }
+      if (!riskDecision.allowAsk && totalAskNotional > 0 && !isSignalEnginePureMmInv) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+        this.notifier.warn(`🛑 [POSITION RISK] ${pair} asks disabled: ${riskReason}`)
+      } else if (!riskDecision.allowAsk && isSignalEnginePureMmInv) {
+        console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → POSITION RISK ask block bypassed`)
+      }
+
+      if (!riskDecision.allowBid || !riskDecision.allowAsk) {
+        totalAfter = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
+      }
+    }
 
     this.notifier.info(
       `🏛️  ${pair} Multi-Layer: ${gridOrders.length} orders | Mid: $${midPrice.toFixed(4)} | ` +
@@ -6464,6 +7234,21 @@ class HyperliquidMMBot {
 
   async executeRegularMM(pair: string, assetCtxs?: any[]) {
     const startTime = Date.now()
+
+    if (this.alertManager?.shouldPauseTrading()) {
+      const status = this.alertManager.getPauseStatus()
+      if (!this._autoPauseLogAt || Date.now() - this._autoPauseLogAt > 60_000) {
+        this._autoPauseLogAt = Date.now()
+        const remainingMin = status.pausedUntil
+          ? Math.ceil((status.pausedUntil.getTime() - Date.now()) / 60_000)
+          : 0
+        console.warn(
+          `🛑 [AUTO-PAUSE] Trading suspended for ${pair} | ` +
+          `Reason: ${status.reason} | Remaining: ${remainingMin} min`
+        )
+      }
+      return
+    }
 
     // Get current market data (use cached if provided)
     if (!assetCtxs) {
@@ -6702,16 +7487,6 @@ class HyperliquidMMBot {
           `[GOLDEN_DUO_BLOCK] ${pair} Short position $${currentPosValue.toFixed(0)} >= limit $${maxShort.toFixed(0)} - blocking sells`
         )
       }
-    }
-
-    // 🛑 EMERGENCY OVERRIDE: Block orders when size multiplier is 0
-    if (sizeMultipliers.bid === 0) {
-      allowBuy = false
-      this.notifier.warn(`🛑 [EMERGENCY] ${pair} BIDS DISABLED - SM shorts winning, no new longs`)
-    }
-    if (sizeMultipliers.ask === 0) {
-      allowSell = false
-      this.notifier.warn(`🛑 [EMERGENCY] ${pair} ASKS DISABLED - SM longs winning, no new shorts`)
     }
 
     // D. EXECUTION LAYER: Calculate Alpha Shift (Front-running)
@@ -7474,8 +8249,21 @@ class HyperliquidMMBot {
         console.log(`[GoldenDuo] Synced ${count} coins from nansen-bridge`);
       }
 
-      // 🔧 FIX: Also load nansen_bias.json for biasStrength
-      tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
+      // 🚀 PRIORITY: Use AlphaEngine for real-time Smart Money data
+      // Falls back to JSON file if AlphaEngine not running or has no data
+      if (alphaEngineIntegration.getIsRunning() && !alphaEngineIntegration.isDataStale()) {
+        const alphaCache = getAlphaEngineBiasCache()
+        if (Object.keys(alphaCache.data).length > 0) {
+          this.nansenBiasCache = alphaCache
+          console.log(`[AlphaEngine] Using real-time SM data for ${Object.keys(alphaCache.data).length} coins`)
+        } else {
+          // AlphaEngine running but no data yet - use JSON fallback
+          tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
+        }
+      } else {
+        // AlphaEngine not running or stale - use JSON fallback
+        tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
+      }
     } catch (e) {
       // Silent fail
     }
@@ -7656,6 +8444,44 @@ class HyperliquidMMBot {
     }
   }
 
+  private getTelemetrySmartSignals(): Record<
+    string,
+    {
+      type: string
+      direction: 'long' | 'short' | 'neutral'
+      confidence: number
+      reasons: string[]
+      warnings: string[]
+      onChainDivergence?: {
+        detected: boolean
+        whaleNetFlow: number
+        cexNetFlow: number
+        freshWalletInflow: number
+        divergenceType?: string
+        warning?: string
+      }
+    }
+  > {
+    const summary: Record<string, any> = {}
+    try {
+      for (const [token, cfg] of Object.entries(NANSEN_TOKENS)) {
+        const tuning = cfg.tuning
+        if (!tuning?.smSignalType) continue
+        summary[token] = {
+          type: tuning.smSignalType,
+          direction: tuning.smSignalDirection ?? 'neutral',
+          confidence: tuning.smSignalConfidence ?? 0,
+          reasons: tuning.smSignalReasons ?? [],
+          warnings: tuning.smSignalWarnings ?? [],
+          onChainDivergence: tuning.onChainDivergence
+        }
+      }
+    } catch {
+      // ignore telemetry errors
+    }
+    return summary
+  }
+
   private getTelemetryWatchdog(): {
     lastFillTimestamp: number
     idleMs: number
@@ -7673,6 +8499,61 @@ class HyperliquidMMBot {
       maxIdleMs: this.fillWatchdogMaxIdleMs,
       triggered: idleMs >= this.fillWatchdogMaxIdleMs
     }
+  }
+
+  private getTelemetryPositionRisk():
+    | {
+      status: PositionRiskStatus
+      exposure?: {
+        totalExposureUsd: number
+        totalLimitUsd: number
+        utilizationPct: number
+        pendingBidUsd: number
+        pendingAskUsd: number
+        byToken: Record<string, number>
+        timestamp: string
+      }
+    }
+    | null {
+    if (!this.positionRiskManager) {
+      return null
+    }
+
+    const status = this.positionRiskManager.getStatus()
+    const snapshot = this.positionRiskManager.getExposureSnapshot()
+
+    return {
+      status,
+      exposure: snapshot
+        ? {
+          totalExposureUsd: snapshot.totalExposureUsd,
+          totalLimitUsd: snapshot.totalLimitUsd,
+          utilizationPct:
+            snapshot.totalLimitUsd > 0
+              ? Number(((snapshot.totalExposureUsd / snapshot.totalLimitUsd) * 100).toFixed(2))
+              : 0,
+          pendingBidUsd: snapshot.pendingBidUsd,
+          pendingAskUsd: snapshot.pendingAskUsd,
+          byToken: snapshot.byToken,
+          timestamp: new Date(snapshot.timestamp).toISOString()
+        }
+        : undefined
+    }
+  }
+
+  private getTelemetryPositionProtector(): Record<string, {
+    side: 'long' | 'short'
+    entryPrice: number
+    highestPrice: number
+    lowestPrice: number
+    trailingActive: boolean
+    ageMs: number
+  }> | null {
+    if (!this.positionProtector) {
+      return null
+    }
+    const status = this.positionProtector.getStatus()
+    return Object.keys(status).length > 0 ? status : null
   }
 
   private initializeShadowTrading(): void {
