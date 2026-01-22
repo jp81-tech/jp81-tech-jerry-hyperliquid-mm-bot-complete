@@ -5,11 +5,125 @@
  * and determines optimal trading mode (FOLLOW_SM_LONG, FOLLOW_SM_SHORT, PURE_MM)
  *
  * Created: 2026-01-19
+ * Updated: 2026-01-21 - Added PERP_TO_ONCHAIN_PROXY for VIRTUAL (Base chain)
  */
 
 import { promises as fsp } from 'fs'
 import { SmartMoneyEntry, SmartMoneyFile } from '../types/smart_money.js'
 import { StrategyPriority } from './dynamic_config.js'
+
+// Signal Engine Integration (v3 - Data Fusion Core with MASTER CONTROL)
+import { SignalEngine, TOKEN_CONFIGS } from '../core/strategy/SignalEngine.js'
+
+// Re-export for backward compatibility
+export { TOKEN_CONFIGS }
+
+// ============================================================
+// PERP TO ON-CHAIN PROXY MAPPING
+// For HL perps without on-chain data, use spot token on other chains
+// ============================================================
+
+export interface OnChainProxy {
+  chain: string
+  tokenAddress: string
+  description: string
+}
+
+/**
+ * Maps Hyperliquid perp symbols to their on-chain token equivalents.
+ * Used to fetch SM data from Nansen for perps that don't have HL-native data.
+ */
+export const PERP_TO_ONCHAIN_PROXY: Record<string, OnChainProxy> = {
+  'VIRTUAL': {
+    chain: 'base',
+    tokenAddress: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b',
+    description: 'Virtual Protocol on Base'
+  }
+  // Add more mappings as needed:
+  // 'AIXBT': { chain: 'base', tokenAddress: '0x...', description: 'aixbt by Virtuals' }
+}
+
+// ============================================================
+// TOKEN-SPECIFIC VOLATILITY THRESHOLDS
+// VIRTUAL/memecoins can move 10%+ in 15 minutes - need wider SL
+// ============================================================
+
+export interface TokenVolatilityConfig {
+  minStopLossPercent: number     // Minimum stop loss (wider for volatile tokens)
+  maxLeverage: number            // Max leverage based on volatility
+  atrMultiplier: number          // Multiplier for ATR-based SL
+  description: string
+}
+
+export const TOKEN_VOLATILITY_CONFIG: Record<string, TokenVolatilityConfig> = {
+  // High volatility memecoins/AI tokens - need 5%+ SL
+  'VIRTUAL': {
+    minStopLossPercent: 5.0,
+    maxLeverage: 3,
+    atrMultiplier: 2.5,
+    description: 'AI/meme token - extreme volatility, 10%+ swings in 15min'
+  },
+  'FARTCOIN': {
+    minStopLossPercent: 5.0,
+    maxLeverage: 3,
+    atrMultiplier: 2.5,
+    description: 'Memecoin - high volatility'
+  },
+  'WIF': {
+    minStopLossPercent: 4.0,
+    maxLeverage: 3,
+    atrMultiplier: 2.0,
+    description: 'Memecoin - high volatility'
+  },
+  'PEPE': {
+    minStopLossPercent: 4.0,
+    maxLeverage: 3,
+    atrMultiplier: 2.0,
+    description: 'Memecoin - high volatility'
+  },
+  // Medium volatility altcoins
+  'LIT': {
+    minStopLossPercent: 4.0,
+    maxLeverage: 5,
+    atrMultiplier: 1.8,
+    description: 'Altcoin - medium-high volatility'
+  },
+  'HYPE': {
+    minStopLossPercent: 4.0,
+    maxLeverage: 5,
+    atrMultiplier: 1.8,
+    description: 'Hyperliquid token - medium volatility'
+  },
+  // Default for other tokens
+  'DEFAULT': {
+    minStopLossPercent: 3.0,
+    maxLeverage: 10,
+    atrMultiplier: 1.5,
+    description: 'Standard volatility'
+  }
+}
+
+/**
+ * Gets volatility config for a token, falling back to DEFAULT
+ */
+export function getTokenVolatilityConfig(token: string): TokenVolatilityConfig {
+  return TOKEN_VOLATILITY_CONFIG[token] || TOKEN_VOLATILITY_CONFIG['DEFAULT']
+}
+
+/**
+ * Validates and adjusts stop loss for token volatility
+ * @param token Token symbol
+ * @param proposedSlPercent Proposed stop loss percentage
+ * @returns Adjusted stop loss (at least minStopLossPercent)
+ */
+export function adjustStopLossForVolatility(token: string, proposedSlPercent: number): number {
+  const config = getTokenVolatilityConfig(token)
+  if (proposedSlPercent < config.minStopLossPercent) {
+    console.log(`⚠️ [VOLATILITY] ${token}: SL ${proposedSlPercent}% too tight, adjusting to ${config.minStopLossPercent}%`)
+    return config.minStopLossPercent
+  }
+  return proposedSlPercent
+}
 
 // ============================================================
 // ENUMS & TYPES
@@ -66,6 +180,10 @@ export interface TokenSmAnalysis {
   shortsUpnl: number
   trend: string
   trendStrength: string
+  // 🧠 SIGNAL ENGINE MASTER CONTROL
+  signalEngineAllowLongs: boolean   // SignalEngine says LONGS are OK
+  signalEngineAllowShorts: boolean  // SignalEngine says SHORTS are OK
+  signalEngineOverride: boolean     // SignalEngine wants to override REGIME
 }
 
 // ============================================================
@@ -238,7 +356,139 @@ const THRESHOLDS = {
   minProfitablePnl: 50_000,         // $50k min profit to boost signal
 
   // Max inventory for directional trades
-  defaultMaxInventoryUsd: 5000  // Increased from 1500 for better capital utilization
+  defaultMaxInventoryUsd: 5000,  // Increased from 1500 for better capital utilization
+
+  // Net Scoring thresholds for signal conflict resolution
+  netScoreThreshold: 2,          // Min net score to take directional trade
+  netScoreStrongThreshold: 4     // Strong conviction threshold
+}
+
+// ============================================================
+// NET SCORING SYSTEM FOR SIGNAL CONFLICTS
+// Resolves conflicting signals (e.g., CEX deposit SHORT vs ST buy LONG)
+// ============================================================
+
+export interface SignalSource {
+  name: string
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL'
+  weight: number  // 1-3 based on signal strength
+  confidence: number  // 0-1
+  timestamp?: number
+}
+
+export interface NetScoreResult {
+  netScore: number           // Positive = LONG, Negative = SHORT
+  direction: 'LONG' | 'SHORT' | 'NEUTRAL'
+  conviction: 'HIGH' | 'MODERATE' | 'LOW' | 'CONFLICT'
+  signals: SignalSource[]
+  reason: string
+}
+
+/**
+ * Calculates net score from multiple signal sources.
+ * Used to resolve conflicts like "CEX deposit (SHORT) vs All-Time ST Buy (LONG)"
+ *
+ * @param signals Array of signal sources
+ * @returns Net score result with direction and conviction
+ */
+export function calculateNetScore(signals: SignalSource[]): NetScoreResult {
+  let longScore = 0
+  let shortScore = 0
+  const activeSignals: SignalSource[] = []
+
+  for (const signal of signals) {
+    if (signal.direction === 'NEUTRAL') continue
+
+    const weightedScore = signal.weight * signal.confidence
+    activeSignals.push(signal)
+
+    if (signal.direction === 'LONG') {
+      longScore += weightedScore
+    } else {
+      shortScore += weightedScore
+    }
+  }
+
+  const netScore = longScore - shortScore
+  const absScore = Math.abs(netScore)
+
+  // Determine direction and conviction
+  let direction: 'LONG' | 'SHORT' | 'NEUTRAL' = 'NEUTRAL'
+  let conviction: 'HIGH' | 'MODERATE' | 'LOW' | 'CONFLICT' = 'CONFLICT'
+
+  if (absScore >= THRESHOLDS.netScoreStrongThreshold) {
+    direction = netScore > 0 ? 'LONG' : 'SHORT'
+    conviction = 'HIGH'
+  } else if (absScore >= THRESHOLDS.netScoreThreshold) {
+    direction = netScore > 0 ? 'LONG' : 'SHORT'
+    conviction = 'MODERATE'
+  } else if (absScore > 0.5) {
+    direction = netScore > 0 ? 'LONG' : 'SHORT'
+    conviction = 'LOW'
+  }
+
+  // Build reason string
+  const longSignals = activeSignals.filter(s => s.direction === 'LONG').map(s => s.name)
+  const shortSignals = activeSignals.filter(s => s.direction === 'SHORT').map(s => s.name)
+  const reason = `Net=${netScore.toFixed(1)} | LONG[${longSignals.join(',')}]=${longScore.toFixed(1)} vs SHORT[${shortSignals.join(',')}]=${shortScore.toFixed(1)}`
+
+  return {
+    netScore,
+    direction,
+    conviction,
+    signals: activeSignals,
+    reason
+  }
+}
+
+/**
+ * Converts SmartMoneyEntry flow data to SignalSource for net scoring
+ */
+export function smEntryToSignals(token: string, entry: SmartMoneyEntry): SignalSource[] {
+  const signals: SignalSource[] = []
+
+  // SM Position signal
+  const longs = entry.current_longs_usd || 0
+  const shorts = entry.current_shorts_usd || 0
+  if (longs > 0 || shorts > 0) {
+    const ratio = shorts > 0 ? longs / shorts : (longs > 0 ? Infinity : 1)
+    const direction = ratio > 1.5 ? 'LONG' : ratio < 0.67 ? 'SHORT' : 'NEUTRAL'
+    signals.push({
+      name: 'SM_POSITION',
+      direction,
+      weight: 2,
+      confidence: Math.min(Math.abs(Math.log(ratio + 0.01)) / 3, 1)
+    })
+  }
+
+  // SM PnL signal (profitable side has stronger signal)
+  const longsUpnl = entry.longs_upnl || 0
+  const shortsUpnl = entry.shorts_upnl || 0
+  if (Math.abs(longsUpnl) > 50000 || Math.abs(shortsUpnl) > 50000) {
+    const direction = longsUpnl > shortsUpnl ? 'LONG' : 'SHORT'
+    signals.push({
+      name: 'SM_PNL',
+      direction,
+      weight: 1,
+      confidence: Math.min(Math.abs(longsUpnl - shortsUpnl) / 500000, 1)
+    })
+  }
+
+  // Trend signal
+  if (entry.trend && entry.trend !== 'stable') {
+    const direction = entry.trend.includes('long') ? 'LONG' :
+                      entry.trend.includes('short') ? 'SHORT' : 'NEUTRAL'
+    const strength = entry.trend_strength === 'strong' ? 0.9 :
+                     entry.trend_strength === 'moderate' ? 0.6 : 0.3
+    signals.push({
+      name: 'SM_TREND',
+      direction,
+      weight: 1,
+      confidence: strength
+    })
+  }
+
+  return signals
 }
 
 // ============================================================
@@ -304,6 +554,11 @@ export function analyzeTokenSm(
   // ============================================================
   let convictionScore = 0
 
+  // 🧠 SIGNAL ENGINE MASTER FLAGS (defaults: allow both sides for PURE_MM)
+  let signalEngineAllowLongs = true;
+  let signalEngineAllowShorts = true;
+  let signalEngineOverride = false;
+
   // Check if whale_tracker.py provided confidence (includes momentum penalty)
   const whaleTrackerConfidence = smData.trading_mode_confidence
   const whaleTrackerMode = smData.trading_mode
@@ -322,6 +577,56 @@ export function analyzeTokenSm(
     }
 
     console.log(`🎯 [${token}] Using whale_tracker confidence: ${whaleTrackerConfidence}% (${whaleTrackerMode})`)
+
+    // 🧠 SIGNAL ENGINE v3 - Data Fusion Analysis (MASTER CONTROL)
+    const engineSignal = SignalEngine.analyze(
+      token,
+      {
+        flow_1h: smData.flow_1h ?? smData.netflow_1h ?? 0,
+        flow_24h: smData.netflow_24h ?? smData.flow_24h ?? 0,
+        flow_7d: smData.netflow_7d ?? smData.flow_7d ?? 0,
+        cex_flow: smData.cex_netflow_7d ?? 0
+      },
+      {
+        ratio: ratio,
+        whaleConviction: whaleTrackerConfidence ? whaleTrackerConfidence / 100 : 0,
+        whaleDirection: dominantSide
+      }
+    );
+
+    // 🎮 MASTER OVERRIDE - SignalEngine controls trading mode AND permissions
+    let engineOverrideMode = whaleTrackerMode;
+    let engineOverrideConfidence = whaleTrackerConfidence;
+
+    // Capture SignalEngine's MASTER permissions (for REGIME bypass)
+    signalEngineAllowLongs = engineSignal.allowLongs;
+    signalEngineAllowShorts = engineSignal.allowShorts;
+    signalEngineOverride = engineSignal.overrideRegime;
+
+    if (engineSignal.action === 'WAIT') {
+      // Not confident enough - go neutral/PURE_MM with BOTH sides enabled
+      engineOverrideMode = 'PURE_MM';
+      engineOverrideConfidence = Math.abs(engineSignal.score);
+      dominantSide = 'NEUTRAL';  // 🔑 KEY: Force NEUTRAL to trigger PURE_MM path
+      console.log(`🧠 [${token}] Engine OVERRIDE: ${engineSignal.score.toFixed(0)} -> PURE_MM (allowLongs=${signalEngineAllowLongs}, allowShorts=${signalEngineAllowShorts})`);
+    } else if (engineSignal.action === 'SHORT') {
+      engineOverrideMode = 'FOLLOW_SM_SHORT';
+      engineOverrideConfidence = Math.abs(engineSignal.score);
+      dominantSide = 'SHORT';
+      console.log(`🧠 [${token}] Engine CONFIRMS: ${engineSignal.score.toFixed(0)} -> FOLLOW_SM_SHORT`);
+    } else if (engineSignal.action === 'LONG') {
+      engineOverrideMode = 'FOLLOW_SM_LONG';
+      engineOverrideConfidence = Math.abs(engineSignal.score);
+      dominantSide = 'LONG';
+      console.log(`🧠 [${token}] Engine CONFIRMS: ${engineSignal.score.toFixed(0)} -> FOLLOW_SM_LONG`);
+    }
+
+    // Apply override to conviction score
+    convictionScore = engineOverrideConfidence / 100;
+
+    // Log the decision with permissions
+    console.log(`🧠 [${token}] Engine: ${engineSignal.score.toFixed(0)} (${engineSignal.action}) | ${engineSignal.reason.join(", ")} | Mode: ${engineOverrideMode} | Longs:${signalEngineAllowLongs} Shorts:${signalEngineAllowShorts}`);
+
   } else if (totalExposure >= THRESHOLDS.minSmExposureUsd) {
     // FALLBACK: Calculate own conviction score (no momentum protection)
     console.log(`⚠️ [${token}] No whale_tracker confidence, using calculated score`)
@@ -387,7 +692,11 @@ export function analyzeTokenSm(
     longsUpnl,
     shortsUpnl,
     trend,
-    trendStrength
+    trendStrength,
+    // 🧠 SIGNAL ENGINE MASTER CONTROL
+    signalEngineAllowLongs,
+    signalEngineAllowShorts,
+    signalEngineOverride
   }
 }
 
@@ -658,6 +967,10 @@ export function getAutoEmergencyOverrideSync(token: string): {
   reason: string
   mode: MmMode
   convictionScore: number
+  // 🧠 SIGNAL ENGINE MASTER FLAGS
+  signalEngineOverride: boolean
+  signalEngineAllowLongs: boolean
+  signalEngineAllowShorts: boolean
 } | undefined {
   const analysis = cachedAnalysis.get(token)
 
@@ -665,8 +978,31 @@ export function getAutoEmergencyOverrideSync(token: string): {
     return undefined
   }
 
-  // Only return override for FOLLOW_SM modes
-  if (analysis.mode === MmMode.PURE_MM || analysis.mode === MmMode.FLAT) {
+  // 🧠 SIGNAL ENGINE: For PURE_MM mode with SignalEngine override, return BOTH sides enabled
+  // This prevents whale_tracker.py from overriding SignalEngine's decision
+  if (analysis.signalEngineOverride && analysis.mode === MmMode.PURE_MM) {
+    return {
+      bidEnabled: true,  // FORCE both sides for PURE_MM
+      askEnabled: true,
+      bidMultiplier: 1.0,
+      askMultiplier: 1.0,
+      maxInventoryUsd: analysis.multipliers.maxInventoryUsd,
+      reason: `[SIGNAL_ENGINE] PURE_MM - both sides enabled (score in WAIT zone)`,
+      mode: MmMode.PURE_MM,
+      convictionScore: analysis.convictionScore,
+      signalEngineOverride: true,
+      signalEngineAllowLongs: true,
+      signalEngineAllowShorts: true
+    }
+  }
+
+  // Skip FLAT mode (no trading)
+  if (analysis.mode === MmMode.FLAT) {
+    return undefined
+  }
+
+  // Skip regular PURE_MM (without SignalEngine override) - let whale_tracker.py handle it
+  if (analysis.mode === MmMode.PURE_MM && !analysis.signalEngineOverride) {
     return undefined
   }
 
@@ -678,7 +1014,10 @@ export function getAutoEmergencyOverrideSync(token: string): {
     maxInventoryUsd: analysis.multipliers.maxInventoryUsd,
     reason: analysis.multipliers.reason,
     mode: analysis.mode,
-    convictionScore: analysis.convictionScore
+    convictionScore: analysis.convictionScore,
+    signalEngineOverride: analysis.signalEngineOverride ?? false,
+    signalEngineAllowLongs: analysis.signalEngineAllowLongs ?? true,
+    signalEngineAllowShorts: analysis.signalEngineAllowShorts ?? true
   }
 }
 
@@ -696,6 +1035,99 @@ export function updateCacheFromSmData(smData: Record<string, SmartMoneyEntry>): 
 
   cachedAnalysis = newAnalysis
   lastLoadTime = Date.now()
+}
+
+// ============================================================
+// PROXY DATA FETCHING (For perps without HL-native data)
+// ============================================================
+
+/**
+ * Fetches SM data from Nansen for proxy tokens (on-chain equivalents of HL perps).
+ * This allows us to get SM signals for VIRTUAL (Base) to trade VIRTUAL perp on HL.
+ */
+export async function fetchProxySmData(
+  perpSymbol: string,
+  nansenClient?: any  // NansenProAPI instance
+): Promise<SmartMoneyEntry | null> {
+  const proxy = PERP_TO_ONCHAIN_PROXY[perpSymbol]
+  if (!proxy || !nansenClient) {
+    return null
+  }
+
+  try {
+    console.log(`🔗 [PROXY] Fetching ${perpSymbol} SM data from ${proxy.chain} (${proxy.tokenAddress.slice(0, 10)}...)`)
+
+    // Fetch token flow signals from Nansen
+    const flowSignals = await nansenClient.getTokenFlowSignals(proxy.tokenAddress, proxy.chain)
+    if (!flowSignals) {
+      console.warn(`⚠️ [PROXY] No flow signals for ${perpSymbol} on ${proxy.chain}`)
+      return null
+    }
+
+    // Convert Nansen flow signals to SmartMoneyEntry format
+    const smEntry: SmartMoneyEntry = {
+      // Nansen flows: positive = buying (LONG bias), negative = selling (SHORT bias)
+      current_longs_usd: flowSignals.smartMoneyNet > 0 ? Math.abs(flowSignals.smartMoneyNet) : 0,
+      current_shorts_usd: flowSignals.smartMoneyNet < 0 ? Math.abs(flowSignals.smartMoneyNet) : 0,
+      longs_count: flowSignals.buyCount || 0,
+      shorts_count: flowSignals.sellCount || 0,
+      longs_upnl: 0,  // Not available from on-chain data
+      shorts_upnl: 0,
+
+      // Calculate bias from net flows (-1 to +1, where +1 = all buying)
+      bias: flowSignals.confidence * (flowSignals.smartMoneyNet > 0 ? 1 : -1),
+      flow: flowSignals.smartMoneyNet,
+
+      // Trend detection from whale + smart money combined
+      trend: flowSignals.smartMoneyNet > 0 ? 'increasing_longs' :
+             flowSignals.smartMoneyNet < 0 ? 'increasing_shorts' : 'stable',
+      trend_strength: flowSignals.confidence > 0.7 ? 'strong' :
+                      flowSignals.confidence > 0.4 ? 'moderate' : 'weak',
+
+      // Use Nansen confidence directly
+      trading_mode_confidence: flowSignals.confidence * 100,
+      trading_mode: flowSignals.smartMoneyNet > 0 ? 'FOLLOW_SM_LONG' :
+                    flowSignals.smartMoneyNet < 0 ? 'FOLLOW_SM_SHORT' : 'PURE_MM'
+    }
+
+    console.log(`✅ [PROXY] ${perpSymbol}: SM Net=$${(flowSignals.smartMoneyNet/1000).toFixed(0)}k, ` +
+                `Whale=$${(flowSignals.whaleNet/1000).toFixed(0)}k, Conf=${(flowSignals.confidence*100).toFixed(0)}%`)
+
+    return smEntry
+
+  } catch (err) {
+    console.error(`❌ [PROXY] Failed to fetch ${perpSymbol} from ${proxy.chain}:`, err)
+    return null
+  }
+}
+
+/**
+ * Injects proxy token data into the SM data map.
+ * Call this after loading whale_tracker data but before analysis.
+ */
+export async function injectProxyData(
+  smData: Record<string, SmartMoneyEntry>,
+  nansenClient?: any
+): Promise<Record<string, SmartMoneyEntry>> {
+  if (!nansenClient) {
+    console.log(`⚠️ [PROXY] No Nansen client provided, skipping proxy injection`)
+    return smData
+  }
+
+  const enrichedData = { ...smData }
+
+  for (const [perpSymbol, proxy] of Object.entries(PERP_TO_ONCHAIN_PROXY)) {
+    // Only inject if no data exists for this perp
+    if (!enrichedData[perpSymbol] || !enrichedData[perpSymbol].current_longs_usd) {
+      const proxyData = await fetchProxySmData(perpSymbol, nansenClient)
+      if (proxyData) {
+        enrichedData[perpSymbol] = proxyData
+        console.log(`✅ [PROXY] Injected ${perpSymbol} data from ${proxy.chain}`)
+      }
+    }
+  }
+
+  return enrichedData
 }
 
 // Export known traders for reference

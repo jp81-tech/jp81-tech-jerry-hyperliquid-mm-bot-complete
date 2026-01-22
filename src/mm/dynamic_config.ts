@@ -17,8 +17,9 @@ import { ConsoleNotifier } from '../utils/notifier.js'
 import { telegramBot } from '../utils/telegram_bot.js'
 import { HyperliquidMarketData } from './market_data.js'
 import { AlphaSignalAggregator, CombinedAlphaSignal } from '../signals/AlphaSignals.js'
-import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData } from './SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY } from './SmAutoDetector.js'
 import { readNansenBiasJson, NansenBiasEntry, NansenTradingMode } from './nansen_bias_cache.js'
+import { getNansenProAPI } from '../integrations/nansen_pro.js'
 import fs from 'fs'
 
 type BiasDirection = 'LONG' | 'SHORT' | 'NEUTRAL'
@@ -545,8 +546,10 @@ function detectSMConflict(
     }
   }
 
-  // Calculate severity based on SM position size
+  // Calculate severity based on SM position size AND bot inventory usage
   const absSmPosition = Math.abs(smNetPositionUsd)
+  const botInventoryUsage = Math.abs(targetInventory)  // 0-1 scale, how much of max inventory bot is using
+
   let severity: SMConflictSeverity
   let recommendation: string
   let bidMult: number
@@ -558,20 +561,25 @@ function detectSMConflict(
   // - Wider spreads on the side we're accumulating
   // - Tighter spreads on the side we'd exit (to profit from squeeze)
 
+  // FIX: Downgrade severity if bot has small position (< 30% of max inventory)
+  // This prevents AUTO-PAUSE from triggering on tiny leftover positions
+  const inventoryDowngrade = botInventoryUsage < 0.30
+
   if (absSmPosition > 1_000_000) {
-    severity = 'CRITICAL'
-    recommendation = `🎲 CONTRARIAN CRITICAL: SM has $${(absSmPosition / 1e6).toFixed(1)}M ${smSide}. Playing squeeze with TINY size.`
+    // Only CRITICAL if bot has significant position (>30% inventory)
+    severity = inventoryDowngrade ? 'HIGH' : 'CRITICAL'
+    recommendation = `🎲 CONTRARIAN ${severity}: SM has $${(absSmPosition / 1e6).toFixed(1)}M ${smSide}. ${inventoryDowngrade ? 'Small bot position - reduced severity.' : 'Playing squeeze with TINY size.'}`
     bidMult = botSide === 'long' ? 0.40 : 1.20   // Very far bids if accumulating long
     askMult = botSide === 'long' ? 1.20 : 0.40   // Wide asks to profit from spike
     invMult = 0.25  // Only 25% of normal inventory
   } else if (absSmPosition > 500_000) {
-    severity = 'HIGH'
-    recommendation = `🎲 CONTRARIAN HIGH: SM ${smSide} $${(absSmPosition / 1e3).toFixed(0)}k. Conservative squeeze play.`
+    severity = inventoryDowngrade ? 'MEDIUM' : 'HIGH'
+    recommendation = `🎲 CONTRARIAN ${severity}: SM ${smSide} $${(absSmPosition / 1e3).toFixed(0)}k. ${inventoryDowngrade ? 'Small bot position.' : 'Conservative squeeze play.'}`
     bidMult = botSide === 'long' ? 0.50 : 1.15
     askMult = botSide === 'long' ? 1.15 : 0.50
     invMult = 0.40
   } else if (absSmPosition > 100_000) {
-    severity = 'MEDIUM'
+    severity = inventoryDowngrade ? 'LOW' : 'MEDIUM'
     recommendation = `🎲 CONTRARIAN: SM ${smSide} $${(absSmPosition / 1e3).toFixed(0)}k. Moderate squeeze play.`
     bidMult = botSide === 'long' ? 0.65 : 1.08
     askMult = botSide === 'long' ? 1.08 : 0.65
@@ -824,9 +832,13 @@ export class DynamicConfigManager {
       const file = await this.loadSmartMoneyFile()
       if (!file) return
 
+      // Inject proxy data for perps without HL-native SM data (e.g., VIRTUAL from Base)
+      const nansenClient = getNansenProAPI()
+      const enrichedData = await injectProxyData(file.data, nansenClient)
+
       // Update SmAutoDetector cache BEFORE processing tokens
       // This allows deriveTuning to use auto-detected SM directions
-      updateCacheFromSmData(file.data)
+      updateCacheFromSmData(enrichedData)
 
       // Load nansen_bias.json for Contrarian Logic (tradingMode from whale_tracker.py)
       this.loadNansenBiasData()
@@ -1431,6 +1443,28 @@ export class DynamicConfigManager {
     )
 
     // ============================================================
+    // HARD TOKEN BLOCKS (EMERGENCY priority - cannot be overridden)
+    // 🧠 SIGNAL ENGINE CAN BYPASS: When SignalEngine says PURE_MM, skip hard blocks
+    // ============================================================
+    const signalEnginePureMm = getAutoEmergencyOverrideSync(token)
+    const isSignalEnginePureMmMode = signalEnginePureMm?.signalEngineOverride && signalEnginePureMm?.mode === MmMode.PURE_MM
+
+    if (token === 'LIT' && !isSignalEnginePureMmMode) {
+      // Block LIT shorts - user requested "przestan dokladac shorty do LIT"
+      // BUT: Skip this block if SignalEngine wants PURE_MM (both sides enabled)
+      multState = applyMultiplier(multState, {
+        askMultiplier: 0,      // No new shorts (asks = selling = shorting)
+        askLocked: true,       // Lock asks so no strategy can override
+        priority: StrategyPriority.EMERGENCY,
+        source: 'HARD_BLOCK_LIT',
+        reason: 'LIT shorts blocked - stop adding shorts per user request'
+      })
+      this.notifier.warn(`🛑 [HARD BLOCK] LIT: askLocked=true - NO NEW SHORTS`)
+    } else if (token === 'LIT' && isSignalEnginePureMmMode) {
+      console.log(`🧠 [SIGNAL_ENGINE] LIT: PURE_MM mode → HARD_BLOCK bypassed, both sides enabled`)
+    }
+
+    // ============================================================
     // APPLY REVERSAL BLOCKS FIRST (REVERSAL priority)
     // ============================================================
     if (smReversal.type !== 'NONE') {
@@ -1465,10 +1499,11 @@ export class DynamicConfigManager {
     // FOLLOW SM from whale_tracker.py tradingMode (NEW - prioritizes PnL-based signals!)
     // This handles FOLLOW_SM_LONG/SHORT from nansen_bias.json BEFORE contrarian check
     // Catches cases like SOL where position ratio is neutral but PnL ratio is dominant
+    // 🧠 SIGNAL ENGINE: Skip this block if SignalEngine says PURE_MM for this token
     // ============================================================
     const isFollowSmMode = tradingMode === 'FOLLOW_SM_LONG' || tradingMode === 'FOLLOW_SM_SHORT'
 
-    if (isFollowSmMode && tradingModeConfidence >= 60) {
+    if (isFollowSmMode && tradingModeConfidence >= 60 && !isSignalEnginePureMmMode) {
       // Apply FOLLOW SM from whale_tracker.py tradingMode
       const followDirection = tradingMode === 'FOLLOW_SM_SHORT' ? 'SHORT' : 'LONG'
       const followBid = followDirection === 'SHORT' ? 0 : 2.0       // No bids if SHORT, aggressive if LONG
@@ -1792,10 +1827,14 @@ export class DynamicConfigManager {
       }
 
       // BULL_TRAP: Reinforce emergency override! (EMERGENCY priority)
-      else if (bottomSignal.signalType === 'BULL_TRAP') {
+      // NOTE: Changed from hardcoded $200 to 15% of base maxPositionUsd (min $2,000)
+      // $200 was too aggressive and crippled normal trading
+      // 🧠 SIGNAL ENGINE: Skip this block if SignalEngine says PURE_MM for this token
+      else if (bottomSignal.signalType === 'BULL_TRAP' && !isSignalEnginePureMmMode) {
+        const bullTrapMaxPos = Math.max(2000, (base.maxPositionUsd ?? DEFAULT_TUNING.maxPositionUsd) * 0.15)
         multState = applyMultiplier(multState, {
           bidMultiplier: 0,
-          maxPosition: Math.min(multState.maxPosition, 200),
+          maxPosition: Math.min(multState.maxPosition, bullTrapMaxPos),
           targetInventory: 0.1,  // Slight short bias
           priority: StrategyPriority.EMERGENCY,
           bidLocked: true,
@@ -1807,10 +1846,14 @@ export class DynamicConfigManager {
           `⚠️🔺 [BULL TRAP] ${token} | Fake bounce detected! ` +
           `SM shorts still winning | Bid×0 | DO NOT BUY!`
         )
+      } else if (bottomSignal.signalType === 'BULL_TRAP' && isSignalEnginePureMmMode) {
+        this.notifier.warn(`⚠️🔺 [BULL TRAP WARNING] ${token} | SM shorts still winning - CAUTION`)
+        console.log(`🧠 [SIGNAL_ENGINE] ${token}: PURE_MM mode → BULL_TRAP bypassed, both sides enabled`)
       }
 
       // DEAD_CAT_BOUNCE: Stay out completely (EMERGENCY priority)
-      else if (bottomSignal.signalType === 'DEAD_CAT_BOUNCE') {
+      // 🧠 SIGNAL ENGINE: Skip this block if SignalEngine says PURE_MM for this token
+      else if (bottomSignal.signalType === 'DEAD_CAT_BOUNCE' && !isSignalEnginePureMmMode) {
         multState = applyMultiplier(multState, {
           bidMultiplier: 0,
           maxPosition: 0,
@@ -1825,13 +1868,17 @@ export class DynamicConfigManager {
           `🔻 [DEAD CAT] ${token} | Dead cat bounce detected! ` +
           `No buying, no positions`
         )
+      } else if (bottomSignal.signalType === 'DEAD_CAT_BOUNCE' && isSignalEnginePureMmMode) {
+        this.notifier.warn(`🔻 [DEAD CAT WARNING] ${token} | Dead cat bounce detected - CAUTION`)
+        console.log(`🧠 [SIGNAL_ENGINE] ${token}: PURE_MM mode → DEAD_CAT bypassed, both sides enabled`)
       }
     }
 
     // ============================================================
     // SM SIGNAL ADJUSTMENTS (respects bidLocked)
     // ============================================================
-    if (smSignal) {
+    // 🧠 SIGNAL ENGINE: Skip SM_SIGNAL adjustments for PURE_MM tokens (want both sides equal)
+    if (smSignal && !isSignalEnginePureMmMode) {
       if (smSignal.type === 'BLOCKED') {
         multState = adjustMultiplier(multState, {
           bidFactor: 0.7,
@@ -1865,6 +1912,8 @@ export class DynamicConfigManager {
         }
         finalCapitalMult = this.clamp(finalCapitalMult * (0.85 + signalConfidence * 0.5), 0.2, 2.0)
       }
+    } else if (smSignal && isSignalEnginePureMmMode) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${token}: PURE_MM mode → SM_SIGNAL adjustments bypassed`)
     }
 
     // ============================================================
