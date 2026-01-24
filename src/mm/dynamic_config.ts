@@ -20,7 +20,208 @@ import { AlphaSignalAggregator, CombinedAlphaSignal } from '../signals/AlphaSign
 import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY } from './SmAutoDetector.js'
 import { readNansenBiasJson, NansenBiasEntry, NansenTradingMode } from './nansen_bias_cache.js'
 import { getNansenProAPI } from '../integrations/nansen_pro.js'
+import { nansenIntegration, shouldBlockBids, shouldBlockAsks, getMMSignalStatus, shouldStartMM, shouldStopMM } from '../signals/nansen_alert_integration.js'
 import fs from 'fs'
+
+// ============================================================
+// NANSEN ALERT BOOST FOR CONTRARIAN STRATEGY
+// Real-time alerts can boost contrarian conviction when SM opens shorts
+// ============================================================
+interface NansenAlertBoost {
+  hasActiveAlert: boolean
+  alertType: string | null
+  alertValue: number
+  boostMultiplier: number  // 1.0 = no boost, 1.5 = 50% boost
+  alertAge: number         // minutes since alert
+}
+
+function getNansenAlertBoostForContrarian(token: string): NansenAlertBoost {
+  const noBoost: NansenAlertBoost = {
+    hasActiveAlert: false,
+    alertType: null,
+    alertValue: 0,
+    boostMultiplier: 1.0,
+    alertAge: 999
+  }
+
+  try {
+    const status = nansenIntegration.getStatus()
+    const lastDecision = (nansenIntegration as any).state?.last_decision
+    const lastAlert = (nansenIntegration as any).state?.last_alert
+
+    if (!lastAlert || lastAlert.token !== token.toUpperCase()) {
+      return noBoost
+    }
+
+    // Calculate alert age
+    const alertTime = new Date(lastAlert.timestamp).getTime()
+    const ageMinutes = (Date.now() - alertTime) / (1000 * 60)
+
+    // Alert older than 30 min = no boost
+    if (ageMinutes > 30) {
+      return noBoost
+    }
+
+    const alertValue = lastAlert.data?.value_usd || 0
+
+    // Calculate boost based on value and alert type
+    // Larger SM moves = stronger contrarian signal
+    let boostMultiplier = 1.0
+    if (alertValue >= 500_000) {
+      boostMultiplier = 2.0  // $500K+ = 2x boost
+    } else if (alertValue >= 200_000) {
+      boostMultiplier = 1.5  // $200K+ = 1.5x boost
+    } else if (alertValue >= 100_000) {
+      boostMultiplier = 1.25 // $100K+ = 1.25x boost
+    } else if (alertValue >= 50_000) {
+      boostMultiplier = 1.1  // $50K+ = 1.1x boost
+    }
+
+    // Fresh alerts get extra boost (< 5 min)
+    if (ageMinutes < 5) {
+      boostMultiplier *= 1.2
+    }
+
+    return {
+      hasActiveAlert: true,
+      alertType: lastAlert.type,
+      alertValue,
+      boostMultiplier,
+      alertAge: ageMinutes
+    }
+  } catch (e) {
+    return noBoost
+  }
+}
+
+// ============================================================
+// MM SIGNAL CHECK - Sprawdza sygnały Nansen dla decyzji MM
+// GREEN = SM Accumulation + AI Trend Reversal = start MM
+// YELLOW = partial signal = ostrożność
+// RED = no alerts 48h+ = stop MM
+// ============================================================
+interface MMSignalCheck {
+  signal: 'GREEN' | 'YELLOW' | 'RED' | 'NONE'
+  shouldTrade: boolean
+  spreadMultiplier: number   // 1.0 = normal, 1.5 = wider (cautious)
+  depthMultiplier: number    // 1.0 = 100%, 0.5 = 50% depth
+  sizeMultiplier: number     // Overall position size multiplier
+  reason: string
+  mode: 'FULL_MM' | 'START_MM' | 'TIGHTEN' | 'STOP_MM' | 'NORMAL'
+}
+
+function checkMMSignalForToken(token: string): MMSignalCheck {
+  const MM_TOKENS = ['VIRTUAL', 'LIT', 'FARTCOIN']
+  if (!MM_TOKENS.includes(token.toUpperCase())) {
+    return {
+      signal: 'NONE',
+      shouldTrade: true,
+      spreadMultiplier: 1.0,
+      depthMultiplier: 1.0,
+      sizeMultiplier: 1.0,
+      reason: 'Not an MM token',
+      mode: 'NORMAL'
+    }
+  }
+
+  try {
+    const status = getMMSignalStatus(token)
+    const state = status.state
+
+    switch (status.signal) {
+      case 'GREEN':
+        // ✅ FULL MM MODE - Both signals within 24h
+        // Normal spread, 100% depth, position boost
+        console.log(`🟢 [MM_SIGNAL] ${token}: GREEN - FULL MM MODE - ${status.recommendation}`)
+        return {
+          signal: 'GREEN',
+          shouldTrade: true,
+          spreadMultiplier: 1.0,   // Normal spread
+          depthMultiplier: 1.0,    // 100% depth
+          sizeMultiplier: 1.2,     // 20% position boost
+          reason: status.recommendation,
+          mode: 'FULL_MM'
+        }
+
+      case 'YELLOW':
+        // Check which partial signal we have
+        const hasSmAccumulation = state?.lastSmAccumulation !== null
+        const hasAiTrendReversal = state?.lastAiTrendReversal !== null
+
+        if (hasSmAccumulation && !hasAiTrendReversal) {
+          // 📊 SM Accumulation only → START MM (wider spread, 50% depth)
+          console.log(`🟡 [MM_SIGNAL] ${token}: YELLOW (SM Accumulation) - START MM cautious - ${status.recommendation}`)
+          return {
+            signal: 'YELLOW',
+            shouldTrade: true,
+            spreadMultiplier: 1.5,   // 50% wider spread (cautious entry)
+            depthMultiplier: 0.5,    // 50% depth
+            sizeMultiplier: 0.8,     // 20% smaller positions
+            reason: `SM Accumulation detected - START MM with caution`,
+            mode: 'START_MM'
+          }
+        } else if (hasAiTrendReversal && !hasSmAccumulation) {
+          // 📈 AI Trend Reversal only → TIGHTEN (normal spread, 100% depth)
+          console.log(`🟡 [MM_SIGNAL] ${token}: YELLOW (AI Trend) - TIGHTEN spreads - ${status.recommendation}`)
+          return {
+            signal: 'YELLOW',
+            shouldTrade: true,
+            spreadMultiplier: 1.0,   // Normal spread
+            depthMultiplier: 1.0,    // 100% depth
+            sizeMultiplier: 1.0,     // Normal position size
+            reason: `AI Trend Reversal - TIGHTEN spreads`,
+            mode: 'TIGHTEN'
+          }
+        } else {
+          // Fallback - should not happen but be safe
+          console.log(`🟡 [MM_SIGNAL] ${token}: YELLOW - Partial signal - ${status.recommendation}`)
+          return {
+            signal: 'YELLOW',
+            shouldTrade: true,
+            spreadMultiplier: 1.2,   // Slightly wider
+            depthMultiplier: 0.75,   // 75% depth
+            sizeMultiplier: 0.9,
+            reason: status.recommendation,
+            mode: 'START_MM'
+          }
+        }
+
+      case 'RED':
+        // 🛑 STOP MM - No signals for 48h+
+        console.log(`🔴 [MM_SIGNAL] ${token}: RED - STOP MM - ${status.recommendation}`)
+        return {
+          signal: 'RED',
+          shouldTrade: false,        // STOP trading
+          spreadMultiplier: 2.0,     // Very wide if still active
+          depthMultiplier: 0.25,     // Minimal depth
+          sizeMultiplier: 0.25,      // Minimal positions
+          reason: status.recommendation,
+          mode: 'STOP_MM'
+        }
+
+      default:
+        return {
+          signal: 'NONE',
+          shouldTrade: true,
+          spreadMultiplier: 1.0,
+          depthMultiplier: 1.0,
+          sizeMultiplier: 1.0,
+          reason: 'No signal data - trading normally',
+          mode: 'NORMAL'
+        }
+    }
+  } catch (e) {
+    return {
+      signal: 'NONE',
+      shouldTrade: true,
+      spreadMultiplier: 1.0,
+      depthMultiplier: 1.0,
+      sizeMultiplier: 1.0,
+      reason: 'Error checking signal',
+      mode: 'NORMAL'
+    }
+  }
+}
 
 type BiasDirection = 'LONG' | 'SHORT' | 'NEUTRAL'
 
@@ -844,7 +1045,8 @@ export class DynamicConfigManager {
       this.loadNansenBiasData()
 
       for (const token of this.tokens) {
-        const entry = file.data[token]
+        // Use enrichedData (includes proxy data for VIRTUAL etc.) instead of file.data
+        const entry = enrichedData[token]
         if (!entry) continue
         await this.applyTuningForToken(token, entry)
       }
@@ -1444,14 +1646,15 @@ export class DynamicConfigManager {
 
     // ============================================================
     // HARD TOKEN BLOCKS (EMERGENCY priority - cannot be overridden)
-    // 🧠 SIGNAL ENGINE CAN BYPASS: When SignalEngine says PURE_MM, skip hard blocks
+    // 🧠 SIGNAL ENGINE CAN BYPASS: When SignalEngine says PURE_MM or FOLLOW_SM_SHORT, skip hard blocks
     // ============================================================
     const signalEnginePureMm = getAutoEmergencyOverrideSync(token)
     const isSignalEnginePureMmMode = signalEnginePureMm?.signalEngineOverride && signalEnginePureMm?.mode === MmMode.PURE_MM
+    const isFollowSmShort = signalEnginePureMm?.mode === MmMode.FOLLOW_SM_SHORT  // 🦅 Generał może obejść Strażnika
 
-    if (token === 'LIT' && !isSignalEnginePureMmMode) {
+    if (token === 'LIT' && !isSignalEnginePureMmMode && !isFollowSmShort) {
       // Block LIT shorts - user requested "przestan dokladac shorty do LIT"
-      // BUT: Skip this block if SignalEngine wants PURE_MM (both sides enabled)
+      // BUT: Skip this block if SignalEngine wants PURE_MM or FOLLOW_SM_SHORT (whale override)
       multState = applyMultiplier(multState, {
         askMultiplier: 0,      // No new shorts (asks = selling = shorting)
         askLocked: true,       // Lock asks so no strategy can override
@@ -1462,6 +1665,8 @@ export class DynamicConfigManager {
       this.notifier.warn(`🛑 [HARD BLOCK] LIT: askLocked=true - NO NEW SHORTS`)
     } else if (token === 'LIT' && isSignalEnginePureMmMode) {
       console.log(`🧠 [SIGNAL_ENGINE] LIT: PURE_MM mode → HARD_BLOCK bypassed, both sides enabled`)
+    } else if (token === 'LIT' && isFollowSmShort) {
+      console.log(`🦅 [SIGNAL_ENGINE] LIT: FOLLOW_SM_SHORT → HARD_BLOCK bypassed, Generał rozkazuje shortować!`)
     }
 
     // ============================================================
@@ -1514,16 +1719,45 @@ export class DynamicConfigManager {
       const followMaxPos = multState.maxPosition * tradingModeMaxPosMult
 
       // Apply with FOLLOW_SM priority (same as EMERGENCY)
+      // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions - hold for TP
+      const HOLD_FOR_TP_TOKENS = ['VIRTUAL', 'LIT', 'FARTCOIN']
+      const isHoldForTp = HOLD_FOR_TP_TOKENS.includes(token)
+
+      // For HOLD_FOR_TP: Block bids completely, aggressive asks for TP
+      // For normal tokens: Small bids allowed for position reduction
+      let reducedBid: number
+      let reducedAsk: number
+      let bidLocked: boolean
+
+      if (isHoldForTp && followDirection === 'SHORT') {
+        // 💎 HOLD_FOR_TP SHORT: No bids, aggressive asks
+        reducedBid = 0.05  // Minimal bids (from nansen boost)
+        reducedAsk = 1.5   // Aggressive asks for TP
+        bidLocked = true   // 🔒 LOCK BIDS - don't reduce position!
+        console.log(`💎 [HOLD_FOR_TP] ${token}: Holding SHORT for TP - BIDs LOCKED, ASKs aggressive`)
+      } else if (isHoldForTp && followDirection === 'LONG') {
+        // 💎 HOLD_FOR_TP LONG: No asks, aggressive bids
+        reducedBid = 1.5   // Aggressive bids for TP
+        reducedAsk = 0.05  // Minimal asks
+        bidLocked = false
+        console.log(`💎 [HOLD_FOR_TP] ${token}: Holding LONG for TP - ASKs LOCKED, BIDs aggressive`)
+      } else {
+        // Normal FOLLOW_SM: Allow position reduction
+        reducedBid = followDirection === 'SHORT' ? 0.1 : followBid
+        reducedAsk = followDirection === 'LONG' ? 0.1 : followAsk
+        bidLocked = false
+      }
+
       multState = applyMultiplier(multState, {
-        bidMultiplier: followBid,
-        askMultiplier: followAsk,
+        bidMultiplier: reducedBid,
+        askMultiplier: reducedAsk,
         maxPosition: followMaxPos,
         targetInventory: followTargetInv,
         priority: StrategyPriority.FOLLOW_SM,  // Higher than CONTRARIAN
-        bidLocked: followDirection === 'SHORT',   // Lock bids if shorting
-        askLocked: followDirection === 'LONG',    // Lock asks if longing
-        source: `NANSEN_${tradingMode}`,
-        reason: `[NANSEN] ${tradingModeInfo?.reason} [conf:${tradingModeConfidence}%]`
+        bidLocked: bidLocked,
+        askLocked: isHoldForTp && followDirection === 'LONG',  // Lock asks for HOLD_FOR_TP LONG
+        source: `NANSEN_${tradingMode}${isHoldForTp ? '_HOLD_TP' : ''}`,
+        reason: `[NANSEN] ${tradingModeInfo?.reason} [conf:${tradingModeConfidence}%]${isHoldForTp ? ' [HOLD_FOR_TP]' : ''}`
       })
 
       // Track FOLLOW SM mode
@@ -1531,22 +1765,37 @@ export class DynamicConfigManager {
 
       this.notifier.warn(
         `🛑 [FOLLOW SM] ${token} | ${tradingModeInfo?.reason} ` +
-        `| Bid×${followBid.toFixed(2)} Ask×${followAsk.toFixed(2)} MaxPos: $${followMaxPos.toFixed(0)} Target: ${(followTargetInv * 100).toFixed(0)}% ` +
+        `| Bid×${reducedBid.toFixed(2)} Ask×${reducedAsk.toFixed(2)} MaxPos: $${followMaxPos.toFixed(0)} Target: ${(followTargetInv * 100).toFixed(0)}% ` +
         `| 🔒 BidLocked: ${multState.bidLocked} AskLocked: ${multState.askLocked} ` +
-        `| 🤖 NANSEN: ${tradingMode}`
+        `| 🤖 NANSEN: ${tradingMode}${isHoldForTp ? ' (HOLD_FOR_TP)' : ' (position reduce enabled)'}`
       )
     }
 
     // ============================================================
     // CONTRARIAN SQUEEZE PLAY (CONTRARIAN priority - lower than REVERSAL & FOLLOW_SM)
     // Enhanced with uPnL-based tradingMode from whale_tracker.py!
+    // 🔔 NEW: Integrated with real-time Nansen alerts!
     //
     // NEW LOGIC:
     // - CONTRARIAN_LONG: SM is SHORT but underwater → squeeze potential, go LONG with TINY size
     // - CONTRARIAN_SHORT: SM is LONG but underwater → reversal potential, go SHORT with TINY size
     // - FOLLOW_SM_*: Already handled above with higher priority
+    // - NANSEN ALERT BOOST: Recent SM flow alerts boost contrarian conviction
     // ============================================================
     const isContrarianMode = tradingMode === 'CONTRARIAN_LONG' || tradingMode === 'CONTRARIAN_SHORT'
+
+    // 🔔 NANSEN ALERT INTEGRATION: Check for active alerts that boost contrarian
+    const nansenBoost = getNansenAlertBoostForContrarian(token)
+    if (nansenBoost.hasActiveAlert && nansenBoost.boostMultiplier > 1.0) {
+      console.log(
+        `🔔 [NANSEN→CONTRARIAN] ${token} | Alert: ${nansenBoost.alertType} $${(nansenBoost.alertValue/1000).toFixed(0)}K ` +
+        `| Age: ${nansenBoost.alertAge.toFixed(0)}min | Boost: ${nansenBoost.boostMultiplier.toFixed(2)}x`
+      )
+    }
+
+    // Check if Nansen alerts are blocking bids/asks
+    const nansenBidBlock = shouldBlockBids(token)
+    const nansenAskBlock = shouldBlockAsks(token)
 
     // ============================================================
     // SQUEEZE TIMEOUT PROTECTION - Force exit if squeeze didn't materialize
@@ -1577,17 +1826,26 @@ export class DynamicConfigManager {
 
     // Skip contrarian section if already applied FOLLOW_SM from nansen (conf >= 60)
     const alreadyAppliedFollowSm = isFollowSmMode && tradingModeConfidence >= 60
-    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed) {
-      // Calculate contrarian multipliers
+
+    // 🔔 NANSEN ALERT can activate contrarian even if smConflict is NONE
+    const nansenActivatesContrarian = nansenBoost.hasActiveAlert &&
+      nansenBoost.alertValue >= 50_000 &&
+      (nansenBoost.alertType === 'SM_DISTRIBUTION' || nansenBoost.alertType === 'WHALE_ACTIVITY')
+
+    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed) {
+      // Calculate contrarian multipliers with Nansen boost
+      // 🔔 Apply Nansen boost to make contrarian more aggressive when we have SM alert confirmation
+      const boostFactor = nansenBoost.boostMultiplier
+
       const contrarianBid = this.clamp(
-        bidSizeMultiplier * smConflict.contrarian.bidMultiplier,
-        0.2,
+        bidSizeMultiplier * smConflict.contrarian.bidMultiplier / boostFactor,  // Reduce bids when SM is shorting
+        0.1,  // Lower floor when Nansen confirms
         2.5
       )
       const contrarianAsk = this.clamp(
-        askSizeMultiplier * smConflict.contrarian.askMultiplier,
+        askSizeMultiplier * smConflict.contrarian.askMultiplier * boostFactor,  // Boost asks when SM is shorting
         0.2,
-        2.5
+        3.0   // Higher ceiling with Nansen confirmation
       )
       finalCapitalMult = this.clamp(
         capitalMultiplier * smConflict.contrarian.maxInventoryMultiplier,
@@ -1631,31 +1889,150 @@ export class DynamicConfigManager {
         )
       }
 
-      // Build reason string with tradingMode info
-      const reason = isContrarianMode
+      // Build reason string with tradingMode info and Nansen alert info
+      let reason = isContrarianMode
         ? `${tradingModeInfo?.reason || smConflict.recommendation} [${tradingMode} conf:${tradingModeConfidence}%]`
         : smConflict.recommendation
 
+      // 🔔 Add Nansen alert info to reason
+      if (nansenBoost.hasActiveAlert && nansenBoost.boostMultiplier > 1.0) {
+        reason += ` | 🔔NANSEN: ${nansenBoost.alertType} $${(nansenBoost.alertValue/1000).toFixed(0)}K (${nansenBoost.alertAge.toFixed(0)}min ago, ${nansenBoost.boostMultiplier.toFixed(1)}x boost)`
+      }
+
+      // 🔔 Apply Nansen bid/ask blocking
+      let finalContrarianBid = token === 'LIT' && smConflict.conflictSeverity === 'CRITICAL' ? litBid : contrarianBid
+      let finalContrarianAsk = token === 'LIT' && smConflict.conflictSeverity === 'CRITICAL' ? litAsk : contrarianAsk
+
+      if (nansenBidBlock.locked) {
+        finalContrarianBid = Math.min(finalContrarianBid, 0.1)  // Near-zero bids
+        reason += ` | 🔒BID_LOCKED: ${nansenBidBlock.reason}`
+      }
+      if (nansenAskBlock.locked) {
+        finalContrarianAsk = Math.min(finalContrarianAsk, 0.1)  // Near-zero asks
+        reason += ` | 🔒ASK_LOCKED: ${nansenAskBlock.reason}`
+      }
+
       // Apply CONTRARIAN with proper priority (lower than REVERSAL and EMERGENCY)
       multState = applyMultiplier(multState, {
-        bidMultiplier: token === 'LIT' && smConflict.conflictSeverity === 'CRITICAL' ? litBid : contrarianBid,
-        askMultiplier: token === 'LIT' && smConflict.conflictSeverity === 'CRITICAL' ? litAsk : contrarianAsk,
+        bidMultiplier: finalContrarianBid,
+        askMultiplier: finalContrarianAsk,
         maxPosition: contrarianMaxPos,
         targetInventory: token === 'LIT' && smConflict.conflictSeverity === 'CRITICAL' ? litTargetInv : contrarianTargetInv,
         priority: StrategyPriority.CONTRARIAN,
-        source: isContrarianMode ? `CONTRARIAN_${tradingMode}` : 'CONTRARIAN',
+        source: isContrarianMode ? `CONTRARIAN_${tradingMode}` : (nansenActivatesContrarian ? 'CONTRARIAN_NANSEN' : 'CONTRARIAN'),
         reason
       })
 
-      // Log contrarian alert with tradingMode info
-      this.notifier.warn(
-        `🎲 [CONTRARIAN] ${token} | ${reason} ` +
+      // Log contrarian alert (console only, not Telegram)
+      // 🔔 Includes Nansen alert integration info
+      console.log(
+        `🎲 [CONTRARIAN] ${token} | ${reason.substring(0, 150)}... ` +
         `| Final Bid×${multState.bidMultiplier.toFixed(2)} Ask×${multState.askMultiplier.toFixed(2)} ` +
         `| MaxPos: $${multState.maxPosition.toFixed(0)} (${(tradingModeMaxPosMult * 100).toFixed(0)}% of normal)` +
         `| TargetInv: ${contrarianTargetInv.toFixed(2)} ` +
+        `| NansenBoost: ${nansenBoost.boostMultiplier.toFixed(2)}x ` +
         `| SqueezeTrigger: ${smConflict.contrarian.squeezeTriggerPrice ? '$' + smConflict.contrarian.squeezeTriggerPrice.toFixed(4) : 'n/a'} ` +
         `| StopLoss: ${smConflict.contrarian.stopLossPrice ? '$' + smConflict.contrarian.stopLossPrice.toFixed(4) : 'n/a'}`
       )
+
+      // 🔔 Send Telegram alert ONLY when Nansen boost is significant (>1.2x)
+      if (nansenBoost.hasActiveAlert && nansenBoost.boostMultiplier >= 1.2) {
+        this.notifier.info(
+          `🎲🔔 [CONTRARIAN+NANSEN] ${token} | SM Alert: ${nansenBoost.alertType} $${(nansenBoost.alertValue/1000).toFixed(0)}K ` +
+          `| Boost: ${nansenBoost.boostMultiplier.toFixed(1)}x | Bid×${multState.bidMultiplier.toFixed(2)} Ask×${multState.askMultiplier.toFixed(2)}`
+        )
+      }
+    }
+
+    // ============================================================
+    // 🎯 MM SIGNAL CHECK - Nansen SM Accumulation + AI Trend Reversal
+    // GREEN = both signals within 24h → boost MM
+    // YELLOW = partial signal → depends on which signal (SM Accum vs AI Trend)
+    // RED = no alerts 48h+ → STOP MM
+    // ============================================================
+    const mmSignalCheck = checkMMSignalForToken(token)
+    if (mmSignalCheck.signal !== 'NONE') {
+      // Apply MM signal adjustments based on mode
+      switch (mmSignalCheck.mode) {
+        case 'FULL_MM':
+          // 🟢 FULL MM MODE - Both signals within 24h
+          // Normal spread, 100% depth, position boost
+          multState = applyMultiplier(multState, {
+            bidMultiplier: multState.bidMultiplier * mmSignalCheck.sizeMultiplier,
+            askMultiplier: multState.askMultiplier * mmSignalCheck.sizeMultiplier,
+            maxPosition: multState.maxPosition * mmSignalCheck.sizeMultiplier,
+            targetInventory: multState.targetInventory,
+            priority: StrategyPriority.NANSEN_ALERT,
+            source: 'MM_SIGNAL_FULL_MM',
+            reason: mmSignalCheck.reason
+          })
+          console.log(`🚀 [MM_MODE] ${token}: FULL MM | Spread×${mmSignalCheck.spreadMultiplier.toFixed(2)} Depth×${mmSignalCheck.depthMultiplier.toFixed(2)} Size×${mmSignalCheck.sizeMultiplier.toFixed(2)}`)
+          break
+
+        case 'START_MM':
+          // 🟡 START MM - SM Accumulation only → wider spread, 50% depth
+          multState = applyMultiplier(multState, {
+            bidMultiplier: multState.bidMultiplier * mmSignalCheck.sizeMultiplier * mmSignalCheck.depthMultiplier,
+            askMultiplier: multState.askMultiplier * mmSignalCheck.sizeMultiplier * mmSignalCheck.depthMultiplier,
+            maxPosition: multState.maxPosition * mmSignalCheck.sizeMultiplier,
+            targetInventory: multState.targetInventory,
+            priority: StrategyPriority.NANSEN_ALERT,
+            source: 'MM_SIGNAL_START_MM',
+            reason: mmSignalCheck.reason
+          })
+          // Store spread multiplier for use in order placement
+          ;(multState as any).mmSpreadMultiplier = mmSignalCheck.spreadMultiplier
+          console.log(`📊 [MM_MODE] ${token}: START MM (cautious) | Spread×${mmSignalCheck.spreadMultiplier.toFixed(2)} Depth×${mmSignalCheck.depthMultiplier.toFixed(2)} Size×${mmSignalCheck.sizeMultiplier.toFixed(2)}`)
+          break
+
+        case 'TIGHTEN':
+          // 🟡 TIGHTEN - AI Trend Reversal only → normal spread, 100% depth
+          multState = applyMultiplier(multState, {
+            bidMultiplier: multState.bidMultiplier * mmSignalCheck.sizeMultiplier,
+            askMultiplier: multState.askMultiplier * mmSignalCheck.sizeMultiplier,
+            maxPosition: multState.maxPosition,
+            targetInventory: multState.targetInventory,
+            priority: StrategyPriority.NANSEN_ALERT,
+            source: 'MM_SIGNAL_TIGHTEN',
+            reason: mmSignalCheck.reason
+          })
+          console.log(`📈 [MM_MODE] ${token}: TIGHTEN spreads | Spread×${mmSignalCheck.spreadMultiplier.toFixed(2)} Depth×${mmSignalCheck.depthMultiplier.toFixed(2)}`)
+          break
+
+        case 'STOP_MM':
+          // 🔴 STOP MM - No signals for 48h+
+          if (!mmSignalCheck.shouldTrade) {
+            multState = applyMultiplier(multState, {
+              bidMultiplier: 0,  // Stop bids
+              askMultiplier: 0,  // Stop asks
+              maxPosition: 0,
+              targetInventory: 0,
+              priority: StrategyPriority.EMERGENCY,  // Highest priority
+              source: 'MM_SIGNAL_STOP',
+              reason: mmSignalCheck.reason
+            })
+            this.notifier.warn(
+              `🛑 [MM_MODE] ${token}: STOP MM - No Nansen alerts for 48h+ | All orders BLOCKED`
+            )
+          } else {
+            // If still trading despite RED, use minimal exposure
+            multState = applyMultiplier(multState, {
+              bidMultiplier: multState.bidMultiplier * mmSignalCheck.sizeMultiplier,
+              askMultiplier: multState.askMultiplier * mmSignalCheck.sizeMultiplier,
+              maxPosition: multState.maxPosition * mmSignalCheck.sizeMultiplier,
+              targetInventory: 0,
+              priority: StrategyPriority.NANSEN_ALERT,
+              source: 'MM_SIGNAL_RED_MINIMAL',
+              reason: mmSignalCheck.reason
+            })
+          }
+          console.log(`🔴 [MM_MODE] ${token}: STOP/MINIMAL MM | Trade=${mmSignalCheck.shouldTrade} Size×${mmSignalCheck.sizeMultiplier.toFixed(2)}`)
+          break
+
+        default:
+          // NORMAL mode - no adjustments needed
+          break
+      }
     }
 
     // ============================================================
@@ -1685,18 +2062,30 @@ export class DynamicConfigManager {
     }
 
     if (emergencyOverride) {
+      // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT allow position reduction
+      const HOLD_FOR_TP_EMERGENCY = ['VIRTUAL', 'LIT', 'FARTCOIN']
+      const isHoldForTpEmergency = HOLD_FOR_TP_EMERGENCY.includes(token)
+      const isFollowShort = autoDetectedMode === 'FOLLOW_SM_SHORT'
+
       // Determine multipliers - EMERGENCY uses override values directly!
       // For SHORT mode: bid=0, ask=override (aggressive selling)
       // For LONG mode: bid=override (aggressive buying), ask=0
-      const emergencyBid = !emergencyOverride.bidEnabled ? 0 : emergencyOverride.bidMultiplier
-      const emergencyAsk = !emergencyOverride.askEnabled ? 0 : emergencyOverride.askMultiplier
+      // 💎 HOLD_FOR_TP: Override bidEnabled to FALSE (block position reduction)
+      let effectiveBidEnabled = emergencyOverride.bidEnabled
+      if (isHoldForTpEmergency && isFollowShort) {
+        effectiveBidEnabled = false  // Block bids for HOLD_FOR_TP SHORT
+        console.log(`💎 [HOLD_FOR_TP] ${token}: Blocking bids in emergency override - hold SHORT for TP`)
+      }
+
+      const emergencyBid = !effectiveBidEnabled ? 0 : emergencyOverride.bidMultiplier
+      const emergencyAsk = !emergencyOverride.askEnabled ? 0 : (isHoldForTpEmergency ? 1.5 : emergencyOverride.askMultiplier)
 
       // Set inventory target based on direction
       let emergencyTargetInventory = 0
-      if (!emergencyOverride.bidEnabled && emergencyOverride.askEnabled) {
+      if (!effectiveBidEnabled && emergencyOverride.askEnabled) {
         emergencyTargetInventory = -0.3  // Follow SM SHORT
         followSmMode = 'FOLLOW_SM_SHORT'
-      } else if (emergencyOverride.bidEnabled && !emergencyOverride.askEnabled) {
+      } else if (effectiveBidEnabled && !emergencyOverride.askEnabled) {
         emergencyTargetInventory = 0.3   // Follow SM LONG
         followSmMode = 'FOLLOW_SM_LONG'
       }
@@ -1708,10 +2097,10 @@ export class DynamicConfigManager {
         maxPosition: emergencyOverride.maxInventoryUsd,
         targetInventory: emergencyTargetInventory,
         priority: StrategyPriority.EMERGENCY,
-        bidLocked: !emergencyOverride.bidEnabled,  // Lock bid if disabled
-        askLocked: !emergencyOverride.askEnabled,  // Lock ask if disabled
-        source: autoDetectedMode ? `AUTO_${autoDetectedMode}` : 'FOLLOW_SM',
-        reason: emergencyOverride.reason
+        bidLocked: !effectiveBidEnabled,  // Lock bid if disabled (or HOLD_FOR_TP)
+        askLocked: !emergencyOverride.askEnabled,
+        source: autoDetectedMode ? `AUTO_${autoDetectedMode}${isHoldForTpEmergency ? '_HOLD_TP' : ''}` : 'FOLLOW_SM',
+        reason: emergencyOverride.reason + (isHoldForTpEmergency ? ' [HOLD_FOR_TP]' : '')
       })
 
       emergencyOverrideApplied = true
@@ -1721,7 +2110,8 @@ export class DynamicConfigManager {
         `Bid×${multState.bidMultiplier.toFixed(2)} Ask×${multState.askMultiplier.toFixed(2)} ` +
         `MaxPos: $${multState.maxPosition} Target: ${(multState.targetInventory * 100).toFixed(0)}% ` +
         `| 🔒 BidLocked: ${multState.bidLocked} AskLocked: ${multState.askLocked}` +
-        (autoDetectedMode ? ` | 🤖 AUTO: ${autoDetectedMode}` : '')
+        (autoDetectedMode ? ` | 🤖 AUTO: ${autoDetectedMode}` : '') +
+        (isHoldForTpEmergency ? ' 💎HOLD_FOR_TP' : '')
       )
     }
 
@@ -1830,21 +2220,25 @@ export class DynamicConfigManager {
       // NOTE: Changed from hardcoded $200 to 15% of base maxPositionUsd (min $2,000)
       // $200 was too aggressive and crippled normal trading
       // 🧠 SIGNAL ENGINE: Skip this block if SignalEngine says PURE_MM for this token
+      // 🛠️ 2026-01-22: DISABLED - BULL_TRAP was blocking position reduction
+      // Bot was unable to close SHORT positions because bid=0 prevented BUYs
+      // TODO: Re-enable with position-aware logic (allow bids when SHORT exists)
       else if (bottomSignal.signalType === 'BULL_TRAP' && !isSignalEnginePureMmMode) {
-        const bullTrapMaxPos = Math.max(2000, (base.maxPositionUsd ?? DEFAULT_TUNING.maxPositionUsd) * 0.15)
-        multState = applyMultiplier(multState, {
-          bidMultiplier: 0,
-          maxPosition: Math.min(multState.maxPosition, bullTrapMaxPos),
-          targetInventory: 0.1,  // Slight short bias
-          priority: StrategyPriority.EMERGENCY,
-          bidLocked: true,
-          source: 'BULL_TRAP',
-          reason: 'Fake bounce detected - SM shorts still winning'
-        })
+        // DISABLED - causing position deadlock
+        // const bullTrapMaxPos = Math.max(2000, (base.maxPositionUsd ?? DEFAULT_TUNING.maxPositionUsd) * 0.15)
+        // multState = applyMultiplier(multState, {
+        //   bidMultiplier: 0,
+        //   maxPosition: Math.min(multState.maxPosition, bullTrapMaxPos),
+        //   targetInventory: 0.1,  // Slight short bias
+        //   priority: StrategyPriority.EMERGENCY,
+        //   bidLocked: true,
+        //   source: 'BULL_TRAP',
+        //   reason: 'Fake bounce detected - SM shorts still winning'
+        // })
 
         this.notifier.warn(
           `⚠️🔺 [BULL TRAP] ${token} | Fake bounce detected! ` +
-          `SM shorts still winning | Bid×0 | DO NOT BUY!`
+          `SM shorts still winning | ⚠️ BID BLOCK DISABLED - need to reduce positions`
         )
       } else if (bottomSignal.signalType === 'BULL_TRAP' && isSignalEnginePureMmMode) {
         this.notifier.warn(`⚠️🔺 [BULL TRAP WARNING] ${token} | SM shorts still winning - CAUTION`)
@@ -1853,20 +2247,22 @@ export class DynamicConfigManager {
 
       // DEAD_CAT_BOUNCE: Stay out completely (EMERGENCY priority)
       // 🧠 SIGNAL ENGINE: Skip this block if SignalEngine says PURE_MM for this token
+      // 🛠️ 2026-01-22: DISABLED - same as BULL_TRAP, was blocking position reduction
       else if (bottomSignal.signalType === 'DEAD_CAT_BOUNCE' && !isSignalEnginePureMmMode) {
-        multState = applyMultiplier(multState, {
-          bidMultiplier: 0,
-          maxPosition: 0,
-          targetInventory: 0,
-          priority: StrategyPriority.EMERGENCY,
-          bidLocked: true,
-          source: 'DEAD_CAT',
-          reason: 'Dead cat bounce - no buying, no positions'
-        })
+        // DISABLED - causing position deadlock
+        // multState = applyMultiplier(multState, {
+        //   bidMultiplier: 0,
+        //   maxPosition: 0,
+        //   targetInventory: 0,
+        //   priority: StrategyPriority.EMERGENCY,
+        //   bidLocked: true,
+        //   source: 'DEAD_CAT',
+        //   reason: 'Dead cat bounce - no buying, no positions'
+        // })
 
         this.notifier.warn(
           `🔻 [DEAD CAT] ${token} | Dead cat bounce detected! ` +
-          `No buying, no positions`
+          `⚠️ BID BLOCK DISABLED - need to reduce positions`
         )
       } else if (bottomSignal.signalType === 'DEAD_CAT_BOUNCE' && isSignalEnginePureMmMode) {
         this.notifier.warn(`🔻 [DEAD CAT WARNING] ${token} | Dead cat bounce detected - CAUTION`)
