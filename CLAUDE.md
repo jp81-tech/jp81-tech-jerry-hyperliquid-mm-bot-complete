@@ -217,7 +217,43 @@ private tryPort(port: number, attempts: number = 0): void {
 | **Take Profit** | 50% | Cel zysku |
 | **HOLD_FOR_TP** | Aktywny | Trzymaj do osiągnięcia TP |
 
-### 🎯 Zasady Diamond Hands:
+### 💎 Diamond Hands - Pełna dokumentacja
+
+#### Definicja i psychologia
+
+| Typ | Emoji | Opis |
+|-----|-------|------|
+| **Diamond Hands** | 💎🙌 | Niezachwiane trzymanie pozycji mimo zmienności. Wierzy w tezę. |
+| **Paper Hands** | 🧻🙌 | Panika przy pierwszej korekcie. Zamyka ze stratą przed ruchem. |
+
+#### Porównanie strategii
+
+| Cecha | 🧻 Paper Hands (stary bot) | 💎 Diamond Hands (nowy bot) |
+|-------|---------------------------|----------------------------|
+| **Stop Loss** | 1.5-2% | **12%** |
+| **Take Profit** | 2-5% | **50%** |
+| **Trailing Stop** | Agresywny (1.5%) | Wyłączony |
+| **Częstotliwość** | Wysoka (Scalping) | Niska (Swing Trading) |
+| **Win Rate** | Wysoki, małe zyski | Niższy, duże zyski |
+| **Reakcja na szpilki** | Paniczna sprzedaż | Ignorowanie |
+| **Ryzyko** | Death by 1000 cuts | Duża strata jeśli trend się odwróci |
+| **Potencjał** | Ograniczony (grosze) | Ogromny (całe trendy) |
+
+#### Kiedy stosować Diamond Hands?
+
+**TYLKO** gdy masz silne potwierdzenie fundamentalne:
+
+```
+SM Ratio > 5x   →  💎 Diamond Hands AKTYWNE
+SM Ratio 2-5x   →  ⚠️ Ostrożność, mniejsza pozycja
+SM Ratio < 2x   →  🧻 Powrót do Paper Hands
+```
+
+**Aktualne przykłady:**
+- LIT: **5.5x** SHORT (SM $11M short vs $1.7M long) → 💎
+- FARTCOIN: **219x** SHORT (SM $5.4M short vs $33K long) → 💎💎💎
+
+#### 🎯 Zasady Diamond Hands:
 
 1. **Gdy SM są SHORT** → Bot jest SHORT
 2. **Nie zamykaj** dopóki:
@@ -225,25 +261,50 @@ private tryPort(port: number, attempts: number = 0): void {
    - ❌ SL 12% przekroczony, lub
    - 🔄 SM zmienią pozycję na LONG
 3. **Ignoruj:**
-   - Krótkoterminowe odbicia
-   - Taktyczne redukcje pozycji przez pojedyncze wieloryby
+   - Krótkoterminowe odbicia (fake pumps)
+   - Taktyczne redukcje przez pojedyncze wieloryby
    - "Szum" z AlphaEngine gdy Strategia mówi HOLD
+   - Emocje i FOMO
 
-### 📊 Kiedy Diamond Hands NIE działa:
+#### 📊 Kiedy Diamond Hands NIE działa:
 
 - SM ratio spada poniżej 2x (np. $5M short vs $3M long)
 - Wszystkie SM zamykają pozycje (nie tylko redukcja)
 - HARD_BLOCK aktywowany przez zewnętrzny sygnał
+- Fundamenty się zmieniły (np. duży news)
 
-### 🔒 Zabezpieczenia:
+#### 🔒 Implementacja w kodzie:
 
 ```typescript
 // HOLD_FOR_TP blokuje bidy gdy trzymamy shorta
+const HOLD_FOR_TP_GRID = ['VIRTUAL', 'LIT', 'FARTCOIN']
+
 if (mode === FOLLOW_SM_SHORT && hasShortPosition) {
   bidMultiplier = 0.00  // ZERO kupowania
   askMultiplier = 1.50  // Agresywne shortowanie
   lockBids = true
 }
+
+// Nuclear Fix - ostatnia linia obrony
+if (sizeMultipliers.bid === 0 && isHoldForTpGrid) {
+  gridOrders = gridOrders.filter(o => o.side !== 'bid')
+  // + anuluj istniejące bidy na giełdzie
+}
+```
+
+#### Profil ryzyka
+
+```
+         RYZYKO                    NAGRODA
+    ┌─────────────┐           ┌─────────────┐
+    │   -12%      │           │   +50%      │
+    │   (SL)      │           │   (TP)      │
+    └─────────────┘           └─────────────┘
+
+    Risk/Reward Ratio = 1:4.16
+
+    Wymagany Win Rate dla breakeven: ~20%
+    (przy 1 wygranej na 5 trades jesteś na zero)
 ```
 
 ---
