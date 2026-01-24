@@ -19,7 +19,7 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, MmMode } from './mm/SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, MmMode } from './mm/SmAutoDetector.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
 // 🚀 AlphaExtractionEngine - Native TypeScript Smart Money tracking (replaces whale_tracker.py)
@@ -57,6 +57,17 @@ import { LiquidationShield } from './signals/liquidation_shield.js'
 import { MarketVisionService, NANSEN_TOKENS } from './signals/market_vision.js'
 import { VPINAnalyzer } from './signals/vpin_analyzer.js'
 import { WhaleIntelligence } from './signals/whale_intelligence.js'
+// 🔔 Nansen Alert Integration - Real-time SM alert processing
+import {
+  processNansenAlert,
+  shouldBlockBids,
+  shouldBlockAsks,
+  updateBotState,
+  nansenIntegration,
+  getMMSignalStatus,
+  shouldStartMM,
+  shouldStopMM
+} from './signals/nansen_alert_integration.js'
 import { Supervisor, SupervisorHooks } from './supervisor/index.js'
 import { DailySnapshotGenerator } from './telemetry/DailySnapshotGenerator.js'
 import { TelemetryCollector } from './telemetry/TelemetryCollector.js'
@@ -3528,7 +3539,7 @@ class HyperliquidMMBot {
       }
     })
 
-    const dynamicConfigTokens = (process.env.DYNAMIC_CONFIG_TOKENS ?? 'DOGE,LIT,SUI,SOL')
+    const dynamicConfigTokens = (process.env.DYNAMIC_CONFIG_TOKENS ?? 'DOGE,LIT,SUI,SOL,VIRTUAL,FARTCOIN')
       .split(',')
       .map((s) => s.trim().toUpperCase())
       .filter((s) => s.length > 0)
@@ -3948,6 +3959,12 @@ class HyperliquidMMBot {
         }
 
         this.checkFillWatchdog()
+
+        // 🐋 Load whale tracker data into SmAutoDetector cache (refreshes every 30s)
+        await loadAndAnalyzeAllTokens()
+
+        // 🔔 NANSEN ALERT QUEUE: Process alerts from Telegram (via ai-executor)
+        await this.processNansenAlertQueue()
 
         // 🛑 LIQUIDITY GUARD: Cancel orders on blocked pairs
         await this.cancelAllOnBlockedPairs();
@@ -4700,6 +4717,62 @@ class HyperliquidMMBot {
       }
     }
     return []
+  }
+
+  /**
+   * 🔔 Process Nansen alert queue from Telegram (via ai-executor)
+   * Reads alerts from /tmp/nansen_raw_alert_queue.json and processes via NansenAlertIntegration
+   */
+  private async processNansenAlertQueue(): Promise<void> {
+    const ALERT_QUEUE_FILE = '/tmp/nansen_raw_alert_queue.json'
+    try {
+      if (!fs.existsSync(ALERT_QUEUE_FILE)) return
+
+      const content = fs.readFileSync(ALERT_QUEUE_FILE, 'utf8')
+      const queue: Array<{ timestamp: string; message: string; token: string; processed: boolean }> = JSON.parse(content)
+
+      const unprocessedCount = queue.filter(a => !a.processed).length
+      if (unprocessedCount > 0) {
+        console.log(`📥 [NANSEN_QUEUE] Processing ${unprocessedCount} unprocessed alerts...`)
+      }
+
+      let hasProcessed = false
+      for (const alert of queue) {
+        if (alert.processed) continue
+
+        console.log(`📥 [NANSEN_QUEUE] Processing alert for ${alert.token}: ${alert.message.substring(0, 60)}...`)
+
+        // Process alert through NansenAlertIntegration
+        const decision = processNansenAlert(alert.message, alert.token)
+
+        if (decision) {
+          console.log(`🔔 [NANSEN_ALERT_QUEUE] Processed ${alert.token}: ${decision.action} (${decision.confidence}%) - ${decision.reason}`)
+
+          // Handle immediate actions
+          if (decision.action === 'LOCK_BIDS') {
+            nansenIntegration.setLock('bid', decision.reason)
+          } else if (decision.action === 'LOCK_ASKS') {
+            nansenIntegration.setLock('ask', decision.reason)
+          } else if (decision.action === 'CLOSE_LONG' || decision.action === 'CLOSE_SHORT') {
+            console.log(`🔔 [NANSEN_ALERT_QUEUE] Position close signal queued for ${alert.token}`)
+          }
+
+          this.notifier.info(`🔔 [NANSEN] ${alert.token}: ${decision.action} - ${decision.reason}`)
+        }
+
+        alert.processed = true
+        hasProcessed = true
+      }
+
+      // Save updated queue
+      if (hasProcessed) {
+        const processedAlerts = queue.filter(a => a.processed).slice(-5)
+        const unprocessedAlerts = queue.filter(a => !a.processed)
+        fs.writeFileSync(ALERT_QUEUE_FILE, JSON.stringify([...unprocessedAlerts, ...processedAlerts], null, 2))
+      }
+    } catch (err: any) {
+      console.error(`❌ [NANSEN_QUEUE] Error processing queue: ${err.message}`)
+    }
   }
 
   /**
@@ -6046,6 +6119,11 @@ class HyperliquidMMBot {
     // 🔧 APPLY TUNING OVERRIDES - DynamicConfigManager updates NANSEN_TOKENS directly
     // Read tuning from NANSEN_TOKENS which includes live emergency overrides
     const overridesConfig = NANSEN_TOKENS[symbol]?.tuning
+    // DEBUG: Log tuning for key pairs
+    const DEBUG_TOKENS = ['FARTCOIN', 'LIT', 'VIRTUAL'];
+    if (DEBUG_TOKENS.includes(symbol)) {
+      console.log(`[DEBUG-TUNING] ${symbol}: enabled=${overridesConfig?.enabled}, bidSizeMult=${overridesConfig?.bidSizeMultiplier}, pos=${position?.size ?? 'null'}`);
+    }
     if (overridesConfig && overridesConfig.enabled) {
       if (overridesConfig.baseOrderSizeUsd) {
         const tunedCapital = overridesConfig.baseOrderSizeUsd * 20
@@ -6068,8 +6146,107 @@ class HyperliquidMMBot {
         bid: overridesConfig.bidSizeMultiplier ?? sizeMultipliers.bid,
         ask: overridesConfig.askSizeMultiplier ?? sizeMultipliers.ask
       }
-      targetInventoryBias = overridesConfig.targetInventory ?? 0
 
+      // 🔧 FIX 2026-01-22: POSITION REDUCTION OVERRIDE
+      // If bidMultiplier=0 but we have a SHORT position, restore bid to 1.0 for position reduction
+      // This prevents deadlock where we can't close shorts because bids are blocked
+      // DEBUG: Log position check for key pairs
+      // 🔧 FIX 2026-01-23: Removed VIRTUAL - user wants to HOLD SHORT for TP, not reduce
+      const POSITION_REDUCE_TOKENS = [];  // 🔧 FIX 2026-01-24: FARTCOIN moved to HOLD_FOR_TP
+      // Tokens that should HOLD position for TP (no automatic position reduction)
+      const HOLD_FOR_TP_TOKENS = ['VIRTUAL', 'LIT', 'FARTCOIN'];
+      if (POSITION_REDUCE_TOKENS.includes(symbol) && sizeMultipliers.bid === 0) {
+        console.log(`[DEBUG-REDUCE] ${symbol}: bid=0, position=${position ? position.size : 'null'}`);
+      }
+      if (sizeMultipliers.bid === 0 && position && position.size < 0) {
+        const posVal = Math.abs(position.size) * midPrice
+        // 🔧 FIX 2026-01-23: Skip position reduction for HOLD_FOR_TP tokens
+        if (HOLD_FOR_TP_TOKENS.includes(symbol)) {
+          console.log(`💎 [HOLD_FOR_TP] ${symbol}: Keeping SHORT position for TP (no bid restore)`);
+        } else if (posVal > 50) { // Only if position > $50
+          sizeMultipliers.bid = 1.0  // Restore bid for position reduction
+          this.notifier.info(`✅ [POSITION_REDUCE_FIX] ${symbol}: Restored bid×1.0 despite bidLocked - need to close SHORT $${posVal.toFixed(0)}`)
+        }
+      }
+      // Same for asks when we have a LONG position
+      if (sizeMultipliers.ask === 0 && position && position.size > 0) {
+        const posVal = Math.abs(position.size) * midPrice
+        if (posVal > 50) { // Only if position > $50
+          sizeMultipliers.ask = 1.0  // Restore ask for position reduction
+          this.notifier.info(`✅ [POSITION_REDUCE_FIX] ${symbol}: Restored ask×1.0 despite askLocked - need to close LONG $${posVal.toFixed(0)}`)
+        }
+      }
+
+      targetInventoryBias = overridesConfig.targetInventory ?? 0
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 🔔 NANSEN ALERT INTEGRATION - Real-time SM signal processing
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Update bot state for Nansen alert integration (allows real-time alert processing)
+    const positionSideForAlert: 'long' | 'short' | 'none' =
+      position ? (position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none') : 'none'
+    const positionSizeForAlert = position ? Math.abs(position.size) : 0
+    const entryPriceForAlert = position?.entryPrice ?? 0
+    const unrealizedPnlForAlert = position
+      ? (positionSideForAlert === 'long'
+          ? (midPrice - entryPriceForAlert) * positionSizeForAlert
+          : (entryPriceForAlert - midPrice) * positionSizeForAlert)
+      : 0
+
+    // Determine current mode based on HOLD_FOR_TP_TOKENS and SM following
+    const NANSEN_HOLD_FOR_TP = ['VIRTUAL', 'LIT', 'FARTCOIN']
+    const currentMode: 'MM' | 'FOLLOW_SM' | 'HOLD_FOR_TP' =
+      NANSEN_HOLD_FOR_TP.includes(symbol) && positionSideForAlert === 'short'
+        ? 'HOLD_FOR_TP'
+        : 'FOLLOW_SM'
+
+    // Calculate actual skew
+    const maxPosUsd = Number(process.env.MAX_POSITION_USD || 10000)
+    const actualSkewForAlert = position
+      ? (position.size * midPrice) / maxPosUsd
+      : 0
+
+    // Update Nansen integration state
+    updateBotState(
+      symbol,
+      currentMode,
+      positionSideForAlert,
+      positionSizeForAlert,
+      entryPriceForAlert,
+      unrealizedPnlForAlert,
+      actualSkewForAlert
+    )
+
+    // Check for Nansen alert-based bid/ask blocking
+    const nansenBidBlock = shouldBlockBids(symbol)
+    const nansenAskBlock = shouldBlockAsks(symbol)
+
+    if (nansenBidBlock.locked && sizeMultipliers.bid > 0) {
+      console.log(`🔔 [NANSEN_ALERT] ${symbol}: BLOCKING BIDS - ${nansenBidBlock.reason}`)
+      sizeMultipliers.bid = 0
+    }
+    if (nansenAskBlock.locked && sizeMultipliers.ask > 0) {
+      console.log(`🔔 [NANSEN_ALERT] ${symbol}: BLOCKING ASKS - ${nansenAskBlock.reason}`)
+      sizeMultipliers.ask = 0
+    }
+
+    // Check for position close signal
+    const nansenCloseSignal = nansenIntegration.shouldClosePosition(symbol)
+    if (nansenCloseSignal.close && position && Math.abs(position.size) > 0) {
+      console.log(`🔔 [NANSEN_ALERT] ${symbol}: CLOSE SIGNAL - ${nansenCloseSignal.reason}`)
+      try {
+        await (this.trading as LiveTrading).closePositionForPair(pair, 'nansen_alert_close')
+        this.notifier.info(`✅ [NANSEN_CLOSE] ${pair} position closed - ${nansenCloseSignal.reason}`)
+        return // Exit after closing
+      } catch (err: any) {
+        this.notifier.error(`❌ [NANSEN_CLOSE FAILED] ${pair}: ${err?.message || err}`)
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    if (overridesConfig && overridesConfig.enabled) {
       // ============================================================
       // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
       // ============================================================
@@ -6177,7 +6354,12 @@ class HyperliquidMMBot {
         // When profitable, we should take profit by buying back
         const SM_ALIGNED_TP_THRESHOLD = 0.005  // 0.5% profit to trigger TP
 
-        if (sizeMultipliers.bid === 0 && positionSide === 'short') {
+        // 🔧 FIX 2026-01-24: Skip SM-ALIGNED TP for HOLD_FOR_TP tokens
+        // User wants to hold positions longer, SM is still opening new shorts
+        const HOLD_FOR_TP_SKIP_SM_TP = ['VIRTUAL', 'LIT', 'FARTCOIN']
+        const skipSmAlignedTp = HOLD_FOR_TP_SKIP_SM_TP.includes(symbol)
+
+        if (sizeMultipliers.bid === 0 && positionSide === 'short' && !skipSmAlignedTp) {
           const entryPx = position.entryPrice || midPrice
           const profitPct = (entryPx - midPrice) / entryPx  // SHORT profit when price drops
 
@@ -6299,6 +6481,15 @@ class HyperliquidMMBot {
     }
 
     const actualSkew = inventorySkew; // Capture real inventory skew BEFORE vision injection
+
+    // 🔧 FIX 2026-01-23: HOLD_FOR_TP - Override inventorySkew to force grid to place ASKs
+    // When holding SHORT for TP, we need to allocate capital to SELL side (not BUY for position reduction)
+    const HOLD_FOR_TP_SKEW = ['VIRTUAL', 'LIT', 'FARTCOIN']
+    if (HOLD_FOR_TP_SKEW.includes(pair) && actualSkew < -0.1) {
+      // Force positive skew so grid allocates capital to ASKS (sells) instead of BIDS (buys)
+      inventorySkew = 0.3  // Pretend we're 30% long → grid will place more asks to "reduce" it
+      console.log(`💎 [HOLD_FOR_TP SKEW] ${pair}: Override inventorySkew from ${(actualSkew*100).toFixed(0)}% to +30% for ASK allocation`)
+    }
 
     // 🧠 SignalEngine PURE_MM check for inventory deviation bypass
     const signalEngineResultInv = getAutoEmergencyOverrideSync(pair);
@@ -6818,34 +7009,82 @@ class HyperliquidMMBot {
     // 🛑 FORCE SHORT ONLY FOR UNHOLY TRINITY (FARTCOIN, VIRTUAL)
     // ALWAYS block bids AND force enable shorts - override REGIME restrictions
     // VIRTUAL was whipsawing (buying tops, selling bottoms) due to weak Oracle signal ~0
+    // 🔧 FIX 2026-01-22: Allow longs when we have a SHORT position to reduce (position management)
     // 🧠 BUT: Skip this block if SignalEngine wants PURE_MM (both sides enabled)
     const signalEngineResultFso = getAutoEmergencyOverrideSync(pair);
     const isSignalEnginePureMmFso = signalEngineResultFso?.signalEngineOverride && signalEngineResultFso?.mode === MmMode.PURE_MM;
 
+    // 🔧 FIX 2026-01-23: VIRTUAL uses HOLD_FOR_TP mode - no position reduction
+    const HOLD_FOR_TP_PAIRS = ['VIRTUAL', 'LIT', 'FARTCOIN'];
+
     if ((pair === 'FARTCOIN' || pair === 'VIRTUAL') && !isSignalEnginePureMmFso) {
-      permissions.allowLongs = false;
-      permissions.allowShorts = true; // 🔓 Override REGIME - we MUST be able to short
-      if (permissions.reason) permissions.reason += ' | ';
-      permissions.reason += `${pair}_FORCE_SHORT_ONLY`;
-      this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: ASK-only grid, BIDs blocked. Shorts ENABLED.`);
+      // actualSkew is negative for SHORT positions (captured earlier before vision injection)
+      const hasShortPosition = actualSkew < -0.05; // More than 5% of capital in shorts
+      const isHoldForTp = HOLD_FOR_TP_PAIRS.includes(pair);
+
+      if (hasShortPosition && !isHoldForTp) {
+        // We have a SHORT position - allow LONGS to reduce it (take profit / reduce risk)
+        // BUT NOT for HOLD_FOR_TP tokens - they keep shorts for TP
+        permissions.allowLongs = true;
+        permissions.allowShorts = true; // Keep shorts enabled too
+        if (permissions.reason) permissions.reason += ' | ';
+        permissions.reason += `${pair}_POSITION_REDUCE`;
+        this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: SHORT ${(actualSkew * 100).toFixed(0)}% detected → BIDs ENABLED for position reduction`);
+      } else if (hasShortPosition && isHoldForTp) {
+        // 💎 HOLD_FOR_TP: Keep short, block longs, place asks for TP
+        permissions.allowLongs = false;
+        permissions.allowShorts = true;
+        if (permissions.reason) permissions.reason += ' | ';
+        permissions.reason += `${pair}_HOLD_SHORT_FOR_TP`;
+        this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding SHORT ${(actualSkew * 100).toFixed(0)}% for TP. BIDs BLOCKED, ASKs for TP.`);
+      } else {
+        // No significant SHORT position - block new longs (prevent whipsaw)
+        permissions.allowLongs = false;
+        permissions.allowShorts = true; // 🔓 Override REGIME - we MUST be able to short
+        if (permissions.reason) permissions.reason += ' | ';
+        permissions.reason += `${pair}_FORCE_SHORT_ONLY`;
+        this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: ASK-only grid, BIDs blocked. Shorts ENABLED.`);
+      }
     } else if ((pair === 'FARTCOIN' || pair === 'VIRTUAL') && isSignalEnginePureMmFso) {
       console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → FORCE_SHORT_ONLY bypassed, both sides enabled`);
     }
 
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
     // This is EMERGENCY priority and should bypass all other regime restrictions
+    // 🔧 FIX 2026-01-22: BUT always allow position reduction (close shorts/longs)
     if (overridesConfig?.followSmMode) {
       if (overridesConfig.followSmMode === 'FOLLOW_SM_LONG') {
         // Force allow longs, block shorts - we're following SM bullish signal
+        // But allow shorts to close LONG positions
+        const hasLongPosition = actualSkew > 0.05;
         permissions.allowLongs = true;
-        permissions.allowShorts = false;
-        permissions.reason = 'FOLLOW_SM_LONG (EMERGENCY OVERRIDE)';
-        this.notifier.warn(`🟢 [EMERGENCY] ${pair}: FOLLOW_SM_LONG overriding REGIME → allowLongs=TRUE`);
+        permissions.allowShorts = hasLongPosition; // Allow shorts only to reduce longs
+        permissions.reason = hasLongPosition
+          ? 'FOLLOW_SM_LONG (position reduce enabled)'
+          : 'FOLLOW_SM_LONG (EMERGENCY OVERRIDE)';
+        this.notifier.warn(`🟢 [EMERGENCY] ${pair}: FOLLOW_SM_LONG overriding REGIME → allowLongs=TRUE${hasLongPosition ? ', allowShorts for reduce' : ''}`);
       } else if (overridesConfig.followSmMode === 'FOLLOW_SM_SHORT') {
         // Force allow shorts, block longs - we're following SM bearish signal
-        permissions.allowLongs = false;
-        permissions.allowShorts = true;
-        permissions.reason = 'FOLLOW_SM_SHORT (EMERGENCY OVERRIDE)';
+        // But allow longs to close SHORT positions (UNLESS HOLD_FOR_TP)
+        const hasShortPosition = actualSkew < -0.05;
+        const isHoldForTp = HOLD_FOR_TP_PAIRS.includes(pair);
+
+        // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens keep shorts, no position reduction
+        if (isHoldForTp && hasShortPosition) {
+          permissions.allowLongs = false; // Block longs - hold short for TP
+          permissions.allowShorts = true;
+          permissions.reason = 'FOLLOW_SM_SHORT (HOLD_FOR_TP)';
+          this.notifier.info(`💎 [FOLLOW_SM_SHORT] ${pair}: HOLD_FOR_TP mode - SHORT ${(actualSkew * 100).toFixed(0)}%, longs BLOCKED for TP`);
+        } else {
+          permissions.allowLongs = hasShortPosition; // Allow longs only to reduce shorts
+          permissions.allowShorts = true;
+          permissions.reason = hasShortPosition
+            ? 'FOLLOW_SM_SHORT (position reduce enabled)'
+            : 'FOLLOW_SM_SHORT (EMERGENCY OVERRIDE)';
+          if (hasShortPosition) {
+            this.notifier.info(`[FOLLOW_SM_SHORT] ${pair}: SHORT ${(actualSkew * 100).toFixed(0)}% → longs enabled for position reduction`);
+          }
+        }
       }
     }
 
@@ -6939,7 +7178,29 @@ class HyperliquidMMBot {
     }
 
     // 🛑 EMERGENCY OVERRIDE: Remove bid orders when SM shorts are winning
-    if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders)) {
+    // ⚠️ BUT: If we have a SHORT position (actualSkew < -0.1), we NEED bids to reduce/close it!
+    // NOTE: Use actualSkew (real position) not inventorySkew (modified by vision/signals)
+    const hasShortPosition = actualSkew < -0.1
+
+    // DEBUG: Log position check for key pairs
+    // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions
+    const HOLD_FOR_TP_GRID = ['VIRTUAL', 'LIT', 'FARTCOIN']
+    const isHoldForTpGrid = HOLD_FOR_TP_GRID.includes(pair)
+
+    if ((pair === 'FARTCOIN' || pair === 'LIT' || pair === 'VIRTUAL') && sizeMultipliers.bid === 0) {
+      console.log(`[DEBUG-POS] ${pair}: actualSkew=${(actualSkew * 100).toFixed(1)}% hasShort=${hasShortPosition} bidMult=${sizeMultipliers.bid} holdForTp=${isHoldForTpGrid}`)
+    }
+
+    // 💎 HOLD_FOR_TP: Remove ALL bids - we want to hold position for TP
+    if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders) && isHoldForTpGrid) {
+      const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
+      if (originalBids > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
+        this.notifier.info(
+          `💎 [HOLD_FOR_TP] ${pair} removed ${originalBids} BIDS - holding SHORT for TP (actualSkew ${(actualSkew * 100).toFixed(0)}%)`
+        )
+      }
+    } else if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders) && !hasShortPosition) {
       const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
       if (originalBids > 0) {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
@@ -6947,10 +7208,14 @@ class HyperliquidMMBot {
           `🛑 [EMERGENCY] ${pair} removed ${originalBids} BIDS - SM shorts winning, asks only`
         )
       }
+    } else if (sizeMultipliers.bid === 0 && hasShortPosition && !isHoldForTpGrid) {
+      this.notifier.info(`✅ [POSITION_REDUCE] ${pair} keeping BIDs despite bid×0 - need to reduce SHORT (actualSkew ${(actualSkew * 100).toFixed(0)}%)`)
     }
 
     // 🛑 Cancel existing bid orders on exchange when bid×0 (SEPARATE from grid filtering)
-    if (sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading) {
+    // ⚠️ BUT: If we have a SHORT position, we NEED bids to reduce/close it!
+    // 💎 HOLD_FOR_TP: Always cancel bids - we want to hold position
+    if (sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading && (isHoldForTpGrid || !hasShortPosition)) {
       try {
         const existingOrders = await this.trading.getOpenOrders(pair)
         const existingBids = existingOrders.filter((o: any) => o.side === 'B' || o.side === 'buy')
@@ -6964,7 +7229,10 @@ class HyperliquidMMBot {
     }
 
     // 🛑 EMERGENCY OVERRIDE: Remove ask orders when SM longs are winning
-    if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders)) {
+    // ⚠️ BUT: If we have a LONG position (actualSkew > 0.1), we NEED asks to reduce/close it!
+    // NOTE: Use actualSkew (real position) not inventorySkew (modified by vision/signals)
+    const hasLongPosition = actualSkew > 0.1
+    if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders) && !hasLongPosition) {
       const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
       if (originalAsks > 0) {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
@@ -6972,10 +7240,13 @@ class HyperliquidMMBot {
           `🛑 [EMERGENCY] ${pair} removed ${originalAsks} ASKS - SM longs winning, bids only`
         )
       }
+    } else if (sizeMultipliers.ask === 0 && hasLongPosition) {
+      this.notifier.info(`✅ [POSITION_REDUCE] ${pair} keeping ASKs despite ask×0 - need to reduce LONG (actualSkew ${(actualSkew * 100).toFixed(0)}%)`)
     }
 
     // 🛑 Cancel existing ask orders on exchange when ask×0 (SEPARATE from grid filtering)
-    if (sizeMultipliers.ask === 0 && this.trading instanceof LiveTrading) {
+    // ⚠️ BUT: If we have a LONG position, we NEED asks to reduce/close it!
+    if (sizeMultipliers.ask === 0 && this.trading instanceof LiveTrading && !hasLongPosition) {
       try {
         const existingOrders = await this.trading.getOpenOrders(pair)
         const existingAsks = existingOrders.filter((o: any) => o.side === 'A' || o.side === 'sell')
