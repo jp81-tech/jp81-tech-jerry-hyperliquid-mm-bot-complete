@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-01-24
+- Data: 2026-01-25
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -25,17 +25,19 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/signals/nansen_alert_integration.ts` - integracja alertów z botem
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
+- `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
 
 **Kluczowe pliki danych:**
 - `/tmp/smart_money_data.json` - dane z whale_tracker.py (na serwerze)
 - `/tmp/nansen_bias.json` - bias cache (na serwerze)
 - `/tmp/nansen_mm_signal_state.json` - stan sygnałów MM (GREEN/YELLOW/RED)
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
+- `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `rotator.config.json` - config rotacji par
 
 ---
 
-## Zmiany 22-24 stycznia 2026
+## Zmiany 22-25 stycznia 2026
 
 ### 1. SmAutoDetector - Fix ładowania danych whale (22.01)
 **Problem:** `loadAndAnalyzeAllTokens()` nigdy nie było wywoływane w mainLoop
@@ -115,6 +117,135 @@ private tryPort(port: number, attempts: number = 0): void {
 ```
 **Konfiguracja:** `TELEMETRY_PORT=8082` w `.env`
 **Endpoint:** `http://localhost:8082/telemetry/latest`
+
+### 7. VIP Spy - Operacja "Cień Generała" (25.01)
+**Plik:** `scripts/vip_spy.py`
+**PM2:** `vip-spy`
+
+**Cel:** Real-time monitoring 4 kluczowych SM traderów (TIER 1 wielorybów)
+
+**Funkcje:**
+- Polling co 30 sekund przez Hyperliquid API
+- Wykrywanie: nowe pozycje, zamknięcia, flipy, zmiany SIZE >5%
+- Anti-glitch protection (ignoruje błędy API)
+- Alerty na Telegram + logi PM2
+- State persistence w `/tmp/vip_spy_state.json`
+
+**Monitorowane adresy (4 wieloryby):**
+- `0xa31211...` (Generał) - altcoiny (HYPE, LIT, FARTCOIN)
+- `0x45d26f...` (Wice-Generał) - majors + altcoiny
+- `0x5d2f44...` (Pułkownik) - MEGA SHORT BTC $44.6M
+- `0x35d115...` (Major) - MEGA SHORT SOL $65M
+
+**Monitorowane coiny:** LIT, FARTCOIN, HYPE, BTC, SOL, ETH
+
+### 8. Rotacja HYPE (25.01)
+**Operacja:** Wymiana VIRTUAL na HYPE w aktywnym portfelu
+
+### 9. VIP Spy Expansion - Pułkownik + Major (25.01)
+**Operacja:** Dodanie 2 nowych TIER 1 wielorybów do monitoringu
+
+**Nowi VIPy:**
+| Alias | Adres | PnL 30D | Główna pozycja |
+|-------|-------|---------|----------------|
+| 🎖️ Pułkownik | `0x5d2f4460ac3514ada79f5d9838916e508ab39bb7` | +$21.1M | SHORT BTC $44.6M |
+| 🎖️ Major | `0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1` | +$12.8M | SHORT SOL $65M |
+
+**Nansen Labels:** Smart HL Perps Trader, Consistent Perps Winner
+
+**Rozszerzenie WATCHED_COINS:** Dodano BTC, SOL, ETH (majors)
+
+**Łączne shorty 4 wielorybów:**
+- BTC: $89.3M
+- SOL: $67.3M
+- ETH: $35.8M
+- HYPE: $19.6M
+- LIT: $7.95M
+- FARTCOIN: $1.73M
+
+### 10. Anti-Glitch Protection (25.01)
+**Problem:** Fałszywe alerty gdy API zwraca błąd (429 rate limit)
+**Fix:** Gdy `get_positions()` zwraca puste dane, zachowaj poprzedni stan
+```python
+if not positions and old_positions:
+    log(f"⚠️ API glitch - zachowuję poprzedni stan")
+    new_state[address] = old_positions
+    continue
+```
+
+### 11. WebSocket subscribeTrades fix (25.01)
+**Problem:** `TypeError: this.websocket.subscribeTrades is not a function` - bot nie mógł wystartować
+**Plik:** `src/utils/websocket_client.ts`
+**Fix:** Dodano brakującą metodę `subscribeTrades()` do klasy `HyperliquidWebSocket`
+```typescript
+subscribeTrades(coin: string, callback: (data: TradeUpdate) => void): void {
+  const key = `trades:${coin}`
+  // ... subscription logic
+}
+```
+**Dodano także:** typ `TradeUpdate`, obsługę `trades` channel w `handleMessage()`
+
+### 12. HOLD_FOR_TP dla HYPE - rotacja tokenów (25.01)
+**Problem:** HYPE pozycje były zamykane ze stratą zamiast być trzymane dla Take Profit
+**Przyczyna:** Po rotacji VIRTUAL → HYPE, wiele list tokenów nadal miało "VIRTUAL"
+
+**Zmiany w `mm_hl.ts` (10 miejsc):**
+- `SIGNAL_ENGINE_TOKENS_PAUSE` → dodano HYPE
+- `DEBUG_TOKENS` → dodano HYPE
+- `HOLD_FOR_TP_TOKENS` → VIRTUAL → HYPE
+- `HOLD_FOR_TP_PAIRS` → VIRTUAL → HYPE
+- `HOLD_FOR_TP_GRID` → VIRTUAL → HYPE
+- `SIGNAL_ENGINE_TOKENS` → dodano HYPE
+- Warunki FSO (Force Short Only) → dodano HYPE
+
+**Zmiany w `dynamic_config.ts` (3 miejsca):**
+- `MM_TOKENS` → VIRTUAL → HYPE
+- `HOLD_FOR_TP_TOKENS` → VIRTUAL → HYPE
+- `HOLD_FOR_TP_EMERGENCY` → VIRTUAL → HYPE
+
+**Log sukcesu:** `💎 [HOLD_FOR_TP] HYPE: Blocking bids in emergency override - hold SHORT for TP`
+
+### 13. HYPE Nansen Kill Switch Bypass (25.01)
+**Problem:** `[NANSEN KILL SWITCH] HYPE: 💀 HYPE/hyperevm: token appears dead`
+**Przyczyna:** HYPE jest perpem na Hyperliquid, nie ma on-chain flows na hyperevm
+
+**Fix 1 - `market_vision.ts`:**
+```typescript
+'HYPE': {
+  chain: 'hyperliquid',  // Zmiana z 'hyperevm'
+  address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
+  // ...
+}
+```
+
+**Fix 2 - `nansen_pro.ts` (`getGenericTokenGuard`):**
+```typescript
+if (chain === 'hyperliquid') {
+  console.log(`[NansenPro] ${label}: Hyperliquid perp - skipping flow-based kill switch`)
+  return { spreadMult: 1.0, pause: false }
+}
+```
+
+### 14. FARTCOIN/LIT Known Active Tokens Whitelist (25.01)
+**Problem:** `[NANSEN KILL SWITCH] FARTCOIN: 💀 token appears dead` - fałszywy alarm!
+**Przyczyna:** Nansen API nie zwraca danych flow dla FARTCOIN na Solanie mimo że token ma $9M+ daily volume
+
+**Fix w `nansen_pro.ts` (`getGenericTokenGuard`):**
+```typescript
+// Whitelist aktywnych tokenów - bypass kill switch gdy Nansen nie ma danych
+const KNOWN_ACTIVE_TOKENS = [
+  'FARTCOIN',  // Bardzo aktywny na Solana + HL perps, $9M+ daily volume
+  'LIT',       // Aktywny na Ethereum + HL perps
+]
+
+// Bypass kill switch dla znanych aktywnych tokenów gdy dataQuality='dead'
+if (isKnownActive && s.dataQuality === 'dead') {
+  console.log(`[NansenPro] ${label}: ⚠️ Nansen shows no data but token is KNOWN ACTIVE - bypassing kill switch`)
+  return { spreadMult: 1.2, pause: false } // Lekko szerszy spread jako ostrożność
+}
+```
+
+**Log sukcesu:** `[NansenPro] FARTCOIN/solana: ⚠️ Nansen shows no data but token is KNOWN ACTIVE - bypassing kill switch`
 
 ---
 
@@ -277,7 +408,7 @@ SM Ratio < 2x   →  🧻 Powrót do Paper Hands
 
 ```typescript
 // HOLD_FOR_TP blokuje bidy gdy trzymamy shorta
-const HOLD_FOR_TP_GRID = ['VIRTUAL', 'LIT', 'FARTCOIN']
+const HOLD_FOR_TP_GRID = ['HYPE', 'LIT', 'FARTCOIN']  // Zaktualizowane 25.01
 
 if (mode === FOLLOW_SM_SHORT && hasShortPosition) {
   bidMultiplier = 0.00  // ZERO kupowania
@@ -339,6 +470,87 @@ curl http://localhost:8082/watchdog
 
 ---
 
+## 🕵️ VIP Spy - Operacja "Cień Generała" (25.01.2026)
+
+### Cel
+Monitoring w czasie rzeczywistym **4 kluczowych SM traderów** (TIER 1 Wielorybów) na Hyperliquid.
+
+### Monitorowani VIPy (4 wieloryby)
+
+| Alias | Adres | Nansen Labels | PnL 30D | Główne pozycje |
+|-------|-------|---------------|---------|----------------|
+| 🎖️ **Generał** | `0xa312114b5795dff9b8db50474dd57701aa78ad1e` | Smart HL Perps Trader | +$15.1M | HYPE $8.3M, LIT $7.5M, ETH $3.5M |
+| 🎖️ **Wice-Generał** | `0x45d26f28196d226497130c4bac709d808fed4029` | Smart HL Perps Trader | +$30.6M | BTC $39M, ETH $27M, HYPE $11.3M |
+| 🎖️ **Pułkownik** | `0x5d2f4460ac3514ada79f5d9838916e508ab39bb7` | Smart HL, Consistent Perps Winner | +$21.1M | BTC $44.6M (MEGA SHORT) |
+| 🎖️ **Major** | `0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1` | Smart HL, Consistent Perps Winner | +$12.8M | SOL $65M, BTC $5.6M, ETH $5.4M |
+
+### Łączne shorty 4 wielorybów (snapshot 25.01.2026)
+
+| Coin | Total SHORT | Główny gracz |
+|------|-------------|--------------|
+| **BTC** | $89.3M | Pułkownik ($44.6M) + Wice-Generał ($39M) |
+| **SOL** | $67.3M | Major ($65.2M) |
+| **ETH** | $35.8M | Wice-Generał ($26.9M) |
+| **HYPE** | $19.6M | Wice-Generał ($11.3M) + Generał ($8.3M) |
+| **LIT** | $7.95M | Generał ($7.5M) |
+| **FARTCOIN** | $1.73M | Wice-Generał ($957K) + Generał ($773K) |
+
+### Monitorowane coiny
+**Altcoiny (Generał + Wice-Generał):**
+- LIT, FARTCOIN, HYPE
+
+**Majors (Pułkownik + Major):**
+- BTC, SOL, ETH
+
+### Konfiguracja
+
+| Parametr | Wartość |
+|----------|---------|
+| Interwał | 30 sekund |
+| Threshold | $10,000 lub 5% zmiany |
+| State file | `/tmp/vip_spy_state.json` |
+| PM2 name | `vip-spy` |
+
+### Wykrywane zdarzenia
+
+| Event | Opis | Alert |
+|-------|------|-------|
+| `NEW_POSITION` | VIP otwiera nową pozycję | Telegram + log |
+| `CLOSED_POSITION` | VIP zamyka pozycję | Telegram + log |
+| `FLIP_POSITION` | VIP zmienia stronę (LONG↔SHORT) | Telegram + log |
+| `SIZE_INCREASED` | VIP zwiększa pozycję o >$10K lub >5% | Telegram + log |
+| `SIZE_REDUCED` | VIP redukuje pozycję o >$10K lub >5% | Telegram + log |
+
+### Użycie
+
+```bash
+# Uruchomienie
+pm2 start scripts/vip_spy.py --name vip-spy --interpreter python3
+
+# Logi
+pm2 logs vip-spy --lines 50
+
+# Status
+pm2 status vip-spy
+
+# Restart
+pm2 restart vip-spy
+```
+
+### Źródło danych
+
+```
+Hyperliquid API → clearinghouseState → VIP positions
+     ↓
+   vip_spy.py (co 30s)
+     ↓
+  Porównanie z poprzednim stanem
+     ↓
+  Alert jeśli zmiana > threshold
+```
+
+---
+
 ## Git / GitHub
 
 ```bash
@@ -377,8 +589,14 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 - [ ] Monitorować działanie SM OUTFLOW/INFLOW alertów w produkcji
 - [ ] Sprawdzić PnL po kilku dniach działania nowych parserów
 - [ ] Rozważyć dodanie więcej tokenów do monitoringu
+- [x] VIP Spy - monitoring Generała i Wice-Generała (DONE 25.01)
+- [x] Fix HOLD_FOR_TP dla HYPE po rotacji tokenów (DONE 25.01)
+- [x] Fix fałszywych alarmów Nansen Kill Switch dla FARTCOIN (DONE 25.01)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
+- `vip_spy.py` działa jako PM2 process `vip-spy` (polling co 30s)
 - Telemetry działa na porcie 8082 (8080/8081 zajęte przez inne serwisy)
 - gh CLI zainstalowane i zalogowane jako `jp81-tech`
+- **KNOWN_ACTIVE_TOKENS**: FARTCOIN, LIT - omijają kill switch gdy Nansen nie ma danych
+- **Hyperliquid perps**: chain='hyperliquid' automatycznie omija flow-based kill switch

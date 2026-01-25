@@ -1584,6 +1584,21 @@ export class NansenProAPI {
     address: string,
     spreadCaps: { min: number; max: number } = { min: 0.9, max: 2.0 }
   ): Promise<{ spreadMult: number; pause: boolean; reason?: string }> {
+    // 🔧 FIX 2026-01-25: Hyperliquid perps have no on-chain flows - skip flow-based kill switch
+    if (chain === 'hyperliquid') {
+      console.log(`[NansenPro] ${label}: Hyperliquid perp - skipping flow-based kill switch (perps have no on-chain flows)`)
+      return { spreadMult: 1.0, pause: false }
+    }
+
+    // 🔧 FIX 2026-01-25: Known active tokens whitelist - bypass kill switch when Nansen has no data
+    // These tokens are verified active on DEX/perps but Nansen API may not track them well
+    const KNOWN_ACTIVE_TOKENS = [
+      'FARTCOIN',  // Very active on Solana + HL perps, $9M+ daily volume
+      'LIT',       // Active on Ethereum + HL perps
+    ]
+    const tokenSymbol = label.split('/')[0] // Extract symbol from "FARTCOIN/solana"
+    const isKnownActive = KNOWN_ACTIVE_TOKENS.includes(tokenSymbol)
+
     const s = await this.getTokenFlowSignals(address, chain)
     if (!s) {
       // If signal fetch completely failed, neutral default
@@ -1593,6 +1608,11 @@ export class NansenProAPI {
     // 1. Kill Switch
     const ks = this.computeKillSwitchForSignals(s, label)
     if (ks.pause) {
+      // 🔧 FIX: Bypass kill switch for known active tokens when issue is "dead" (no Nansen data)
+      if (isKnownActive && s.dataQuality === 'dead') {
+        console.log(`[NansenPro] ${label}: ⚠️ Nansen shows no data but token is KNOWN ACTIVE - bypassing kill switch`)
+        return { spreadMult: 1.2, pause: false } // Slightly wider spread as precaution
+      }
       return { spreadMult: 1.0, pause: true, reason: ks.reason }
     }
 

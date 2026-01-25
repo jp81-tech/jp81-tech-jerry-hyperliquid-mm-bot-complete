@@ -111,7 +111,7 @@ interface MMSignalCheck {
 }
 
 function checkMMSignalForToken(token: string): MMSignalCheck {
-  const MM_TOKENS = ['VIRTUAL', 'LIT', 'FARTCOIN']
+  const MM_TOKENS = ['HYPE', 'LIT', 'FARTCOIN']
   if (!MM_TOKENS.includes(token.toUpperCase())) {
     return {
       signal: 'NONE',
@@ -1720,7 +1720,7 @@ export class DynamicConfigManager {
 
       // Apply with FOLLOW_SM priority (same as EMERGENCY)
       // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions - hold for TP
-      const HOLD_FOR_TP_TOKENS = ['VIRTUAL', 'LIT', 'FARTCOIN']
+      const HOLD_FOR_TP_TOKENS = ['HYPE', 'LIT', 'FARTCOIN']
       const isHoldForTp = HOLD_FOR_TP_TOKENS.includes(token)
 
       // For HOLD_FOR_TP: Block bids completely, aggressive asks for TP
@@ -2063,7 +2063,7 @@ export class DynamicConfigManager {
 
     if (emergencyOverride) {
       // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT allow position reduction
-      const HOLD_FOR_TP_EMERGENCY = ['VIRTUAL', 'LIT', 'FARTCOIN']
+      const HOLD_FOR_TP_EMERGENCY = ['HYPE', 'LIT', 'FARTCOIN']
       const isHoldForTpEmergency = HOLD_FOR_TP_EMERGENCY.includes(token)
       const isFollowShort = autoDetectedMode === 'FOLLOW_SM_SHORT'
 
