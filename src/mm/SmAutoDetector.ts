@@ -972,6 +972,27 @@ export function getAutoEmergencyOverrideSync(token: string): {
   signalEngineAllowLongs: boolean
   signalEngineAllowShorts: boolean
 } | undefined {
+  // ☢️ GENERALS_OVERRIDE: Generał ($8.5M) i Wice-Generał ($11.5M) dokładają shorty
+  // Wymuszamy FOLLOW_SM_SHORT dla tych tokenów BEZWARUNKOWO
+  const GENERALS_FORCE_SHORT = ['HYPE', 'LIT', 'FARTCOIN']
+
+  if (GENERALS_FORCE_SHORT.includes(token)) {
+    console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT - Generałowie shortują!`)
+    return {
+      bidEnabled: false,           // ZAKAZ KUPOWANIA
+      askEnabled: true,            // Zezwól na shorty
+      bidMultiplier: 0.0,          // Zero bidów
+      askMultiplier: 1.5,          // Agresywne aski
+      maxInventoryUsd: 10000,      // Max pozycja
+      reason: `☢️ GENERALS_OVERRIDE - Generał + Wice-Generał shortują`,
+      mode: MmMode.FOLLOW_SM_SHORT,
+      convictionScore: 95,         // Wysoka pewność
+      signalEngineOverride: true,  // Nadpisz SignalEngine
+      signalEngineAllowLongs: false,
+      signalEngineAllowShorts: true
+    }
+  }
+
   const analysis = cachedAnalysis.get(token)
 
   if (!analysis) {
