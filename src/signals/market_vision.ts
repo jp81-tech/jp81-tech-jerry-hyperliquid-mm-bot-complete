@@ -45,7 +45,7 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     }
   },
   'HYPE': {
-    chain: 'hyperevm',
+    chain: 'hyperliquid',  // 🔧 FIX 2026-01-25: Changed from hyperevm - HYPE is a perp with no on-chain flows
     address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
     spreadCaps: { min: 0.9, max: 1.3 },
     tuning: { // NEUTRAL / HIGH VOL
