@@ -149,11 +149,11 @@ class LiquidityMonitor:
 
         for _, data in comparisons.items():
             change = data.get("change_pct", 0) / 100
-            if change < -self.THRESHOLDS["liq_drop_rug"]:
+            if change <= -self.THRESHOLDS["liq_drop_rug"]:
                 return LiquidityRisk.RUG_DETECTED
-            elif change < -self.THRESHOLDS["liq_drop_critical"]:
+            elif change <= -self.THRESHOLDS["liq_drop_critical"]:
                 return LiquidityRisk.CRITICAL
-            elif change < -self.THRESHOLDS["liq_drop_warning"]:
+            elif change <= -self.THRESHOLDS["liq_drop_warning"]:
                 if base_risk == LiquidityRisk.SAFE:
                     base_risk = LiquidityRisk.MODERATE
 
@@ -192,13 +192,14 @@ class LiquidityAlertIntegration:
 
     def _log_alert_to_file(self, pool: LPPool, analysis: dict, kind: str):
         """Log alert to CSV file."""
+        risk_val = analysis["risk"].value if hasattr(analysis["risk"], "value") else str(analysis["risk"])
         line = (
             f"{datetime.utcnow().isoformat()},"
             f"{kind},"
             f"{pool.token_symbol},"
             f"{pool.dex},"
             f"{pool.chain},"
-            f"{analysis.get('risk', '')},"
+            f"{risk_val},"
             f"{analysis.get('current_liquidity', '')},"
             f"{analysis.get('liq_mcap_ratio', '')},"
             f"{analysis.get('changes', {}).get('5m', {}).get('change_pct', '')},"
@@ -343,6 +344,7 @@ def setup_liquidity_monitoring(telegram_chat_id: str):
         # MON (Solana / Meteora)
         LPPool(
             token_symbol="MON",
+            token_address="MON_TOKEN_ADDRESS_IF_NEEDED",
             lp_address="GbVFZZ9g71fNioHDfS3aTEYvMGxLcs6yWNdiG9uBLQnn",
             dex="meteora",
             chain="solana",

@@ -17,9 +17,20 @@ export type UserFillUpdate = {
   cloid?: string
 }
 
+export type TradeUpdate = {
+  coin: string
+  px: string
+  sz: string
+  side: string  // 'B' for buy, 'A' for sell (ask/aggressive sell)
+  time: number
+  hash?: string
+  tid?: number
+}
+
 export type WebSocketMessage =
   | { channel: 'l2Book'; data: L2BookUpdate }
   | { channel: 'user'; data: { fills: UserFillUpdate[] } }
+  | { channel: 'trades'; data: TradeUpdate[] }
 
 export class HyperliquidWebSocket {
   private ws: WebSocket | null = null
@@ -154,6 +165,25 @@ export class HyperliquidWebSocket {
     }
   }
 
+  subscribeTrades(coin: string, callback: (data: TradeUpdate) => void): void {
+    const key = `trades:${coin}`
+    if (!this.subscriptions.has(key)) {
+      this.subscriptions.set(key, new Set())
+    }
+    this.subscriptions.get(key)!.add(callback)
+
+    // Send subscription message
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({
+        method: 'subscribe',
+        subscription: {
+          type: 'trades',
+          coin
+        }
+      }))
+    }
+  }
+
   private handleMessage(message: WebSocketMessage): void {
     if (message.channel === 'l2Book') {
       const key = `l2Book:${message.data.coin}`
@@ -168,10 +198,24 @@ export class HyperliquidWebSocket {
           callbacks.forEach(cb => cb(message.data.fills))
         }
       }
+    } else if (message.channel === 'trades') {
+      // Trades come as array, call callback for each trade
+      const trades = message.data
+      if (Array.isArray(trades) && trades.length > 0) {
+        const coin = trades[0].coin
+        const key = `trades:${coin}`
+        const callbacks = this.subscriptions.get(key)
+        if (callbacks) {
+          // Call callback for each individual trade
+          trades.forEach(trade => {
+            callbacks.forEach(cb => cb(trade))
+          })
+        }
+      }
     }
   }
 
-  unsubscribe(coin: string, type: 'l2Book' | 'user'): void {
+  unsubscribe(coin: string, type: 'l2Book' | 'user' | 'trades'): void {
     const key = `${type}:${coin}`
     this.subscriptions.delete(key)
 
@@ -180,7 +224,7 @@ export class HyperliquidWebSocket {
         method: 'unsubscribe',
         subscription: {
           type,
-          coin: type === 'l2Book' ? coin : undefined,
+          coin: (type === 'l2Book' || type === 'trades') ? coin : undefined,
           user: type === 'user' ? coin : undefined
         }
       }))

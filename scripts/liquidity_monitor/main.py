@@ -13,13 +13,13 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '../../.env'))
 async def main():
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     # Chat ID from user request or env
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "645284026")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
 
-    if not telegram_bot_token:
+    if not telegram_bot_token or not chat_id:
         # Fallback to hardcoded token from previous context if available, or error
         # Assuming user has it in .env
-        print("❌ Missing TELEGRAM_BOT_TOKEN environment variable")
-        print("   Please add TELEGRAM_BOT_TOKEN to your .env file")
+        print("❌ Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variable")
+        print("   Please add them to your .env file")
         return
 
     interval = int(os.getenv("LIQ_MONITOR_INTERVAL", "300"))
