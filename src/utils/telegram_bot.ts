@@ -6,6 +6,18 @@ export class TelegramAlertBot {
     private chatId: string;
     private enabled: boolean;
 
+    // Skip routine status alerts from flooding Telegram
+    private skipPatterns = [
+        '[FOLLOW SM]',
+        'BULL TRAP',
+        'BULL_TRAP',
+        'DEAD CAT',
+        'GENERALS_OVERRIDE',
+        'PURE_MM',
+        'BidLocked:',
+        'AskLocked:',
+    ];
+
     constructor() {
         this.token = process.env.TELEGRAM_BOT_TOKEN || '';
         this.chatId = process.env.TELEGRAM_CHAT_ID || '';
@@ -20,6 +32,10 @@ export class TelegramAlertBot {
 
     async send(message: string, level: 'info' | 'warn' | 'error' = 'info'): Promise<void> {
         if (!this.enabled) return;
+
+        // Skip routine alerts
+        const shouldSkip = this.skipPatterns.some(pattern => message.includes(pattern));
+        if (shouldSkip) return;
 
         let icon = 'ℹ️';
         if (level === 'warn') icon = '⚠️';
