@@ -24,6 +24,22 @@ export class ConsoleNotifier implements Notifier {
 
   warn(msg: string) {
     console.warn(`[WARN] ${msg}`);
+
+    // Skip routine status alerts from flooding Telegram
+    const skipPatterns = [
+      '[FOLLOW SM]',
+      'BULL TRAP',
+      'BULL_TRAP',
+      'DEAD CAT',
+      'GENERALS_OVERRIDE',
+      'PURE_MM',
+      'BidLocked:',
+      'AskLocked:',
+    ];
+
+    const shouldSkip = skipPatterns.some(pattern => msg.includes(pattern));
+    if (shouldSkip) return;
+
     telegramBot.send(msg, 'warn').catch(e => console.error('[Telegram] Failed to send warn:', e.message));
   }
 
