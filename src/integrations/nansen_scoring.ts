@@ -108,6 +108,8 @@ export class NansenHyperliquidAPI {
       return sorted
     } catch (error: any) {
       console.error(`[Nansen] Failed to fetch perp screener:`, error.message)
+      // 🔧 FIX 2026-02-02: Cache failure to prevent retrying every cycle
+      this.cache.set(cacheKey, { data: { data: [], pagination: { page: 1, per_page: 0, is_last_page: true } }, timestamp: Date.now() })
       return []
     }
   }
