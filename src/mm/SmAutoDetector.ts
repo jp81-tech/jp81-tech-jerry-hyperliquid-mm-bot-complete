@@ -1085,8 +1085,22 @@ export function getAutoEmergencyOverrideSync(token: string): {
     // CHECK BIAS THRESHOLD - nie shortuj przy neutralnym sygnale
     const preAnalysis = cachedAnalysis.get(token)
     if (preAnalysis && preAnalysis.ratio < GENERALS_MIN_SHORT_RATIO) {
-      console.log(`⚠️ [GENERALS_OVERRIDE] ${token}: SKIP - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (za neutralny, potrzeba min ${GENERALS_MIN_SHORT_RATIO}x)`)
-      // Fall through to normal analysis below
+      // 🛡️ DEFENSIVE MODE: Ratio too low for forced SHORT, but PROTECT existing short
+      // Don't force new shorts, but BLOCK LONGS to prevent closing existing short at a loss
+      console.log(`🛡️ [GENERALS_OVERRIDE] ${token}: DEFENSIVE - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (blocking longs to protect existing short, no new shorts forced)`)
+      return {
+        bidEnabled: false,           // BLOCK LONGS - protect existing short
+        askEnabled: true,            // Allow shorts if grid wants
+        bidMultiplier: 0.0,          // Zero bids
+        askMultiplier: 1.0,          // Normal asks (not aggressive)
+        maxInventoryUsd: GENERALS_MAX_INVENTORY_USD,
+        reason: `🛡️ GENERALS_DEFENSIVE - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (protecting short, no forced entry)`,
+        mode: MmMode.FOLLOW_SM_SHORT,  // Keep SHORT mode to prevent PURE_MM override
+        convictionScore: 60,         // Lower conviction - not forcing, just protecting
+        signalEngineOverride: true,  // Override SignalEngine to prevent PURE_MM
+        signalEngineAllowLongs: false,  // CRITICAL: Block longs
+        signalEngineAllowShorts: true
+      }
     } else {
       console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT (ratio: ${preAnalysis?.ratio.toFixed(2) ?? '?'}x >= ${GENERALS_MIN_SHORT_RATIO}x)`)
       return {

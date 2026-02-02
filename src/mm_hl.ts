@@ -7087,17 +7087,29 @@ class HyperliquidMMBot {
 
       // Check if mode is PURE_MM (SignalEngine said WAIT)
       // PURE_MM = no clear signal = allow both sides for market making
+      // 🛡️ FIX 2026-02-02: NEVER enable longs for HOLD_FOR_TP tokens with existing short
       if (isPureMmMode) {
-        // 🎯 MASTER OVERRIDE: Force BOTH sides enabled for PURE_MM
-        const prevLongs = permissions.allowLongs;
-        const prevShorts = permissions.allowShorts;
+        const hasShortPos = actualSkew < -0.05;
+        const isHoldTp = isHoldForTpToken(pair);
 
-        permissions.allowLongs = true;
-        permissions.allowShorts = true;
+        if (isHoldTp && hasShortPos) {
+          // 🛡️ HOLD_FOR_TP PROTECTION: Don't allow longs - we're holding a short for TP
+          permissions.allowLongs = false;
+          permissions.allowShorts = true;
+          console.log(`🛡️ [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode BUT HOLD_FOR_TP active with SHORT pos → BLOCKING LONGS (protecting short for TP)`);
+          permissions.reason = 'SIGNAL_ENGINE_PURE_MM (HOLD_FOR_TP PROTECTION - longs blocked)';
+        } else {
+          // 🎯 MASTER OVERRIDE: Force BOTH sides enabled for PURE_MM
+          const prevLongs = permissions.allowLongs;
+          const prevShorts = permissions.allowShorts;
 
-        if (!prevLongs || !prevShorts) {
-          console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode → FORCE BOTH SIDES (was Longs:${prevLongs} Shorts:${prevShorts})`);
-          permissions.reason = 'SIGNAL_ENGINE_PURE_MM (MASTER OVERRIDE)';
+          permissions.allowLongs = true;
+          permissions.allowShorts = true;
+
+          if (!prevLongs || !prevShorts) {
+            console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode → FORCE BOTH SIDES (was Longs:${prevLongs} Shorts:${prevShorts})`);
+            permissions.reason = 'SIGNAL_ENGINE_PURE_MM (MASTER OVERRIDE)';
+          }
         }
       }
 
