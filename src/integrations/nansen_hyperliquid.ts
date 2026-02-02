@@ -120,7 +120,7 @@ export class NansenHyperliquidService {
   private cacheLifetimeMs = 300_000 // 5 minute hard limit for stale data
   private health: ProxyHealth = { isHealthy: true, lastSuccess: Date.now(), consecutiveFailures: 0 }
 
-  constructor(apiKey: string, baseURL: string = 'http://localhost:8080') {
+  constructor(apiKey: string, baseURL: string = 'http://localhost:8082') {
     this.client = axios.create({
       baseURL,
       headers: { 'Content-Type': 'application/json' },
@@ -821,7 +821,7 @@ export function getNansenHyperliquidService(): NansenHyperliquidService | null {
     return null
   }
 
-  const baseURL = process.env.NANSEN_PROXY_URL || 'http://localhost:8080'
+  const baseURL = process.env.NANSEN_PROXY_URL || 'http://localhost:8082'
 
   if (!nansenHLInstance) {
     nansenHLInstance = new NansenHyperliquidService(apiKey, baseURL)
