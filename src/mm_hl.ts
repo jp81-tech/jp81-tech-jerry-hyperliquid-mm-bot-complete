@@ -20,7 +20,8 @@ import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.j
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, MmMode } from './mm/SmAutoDetector.js'
-import { isShortOnlyToken, isHoldForTpToken, SHORT_ONLY_TOKENS } from './config/short_only_config.js'
+import { isShortOnlyToken, isHoldForTpToken, SHORT_ONLY_TOKENS, getBounceFilterConfig } from './config/short_only_config.js'
+import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
 // 🚀 AlphaExtractionEngine - Native TypeScript Smart Money tracking (replaces whale_tracker.py)
@@ -7157,6 +7158,29 @@ class HyperliquidMMBot {
       console.log(`[FARTCOIN GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
     }
 
+    // 🎯 SHORT-ON-BOUNCE: Nie goń dna, shortuj na bounce'u
+    let bounceFilterChaseBlock = false
+    if (isShortOnlyToken(pair) && sizeMultipliers.ask > 0) {
+      const bounceConfig = getBounceFilterConfig(pair)
+      if (bounceConfig.enabled) {
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const change1h = snapshot?.momentum?.change1h ?? 0
+
+        if (change1h < bounceConfig.chaseThreshold) {
+          // CHASE: cena spada mocno, nie gonimy
+          bounceFilterChaseBlock = true
+        } else if (change1h < bounceConfig.bounceThreshold) {
+          // NEUTRAL: zmniejsz aski
+          const prev = sizeMultipliers.ask
+          sizeMultipliers.ask *= bounceConfig.neutralAskMult
+          console.log(`🎯 [BOUNCE_FILTER] ${pair}: NEUTRAL (1h: ${change1h >= 0 ? '+' : ''}${change1h.toFixed(2)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+        } else {
+          // BOUNCE: odbicie potwierdzone!
+          console.log(`🎯 [BOUNCE_FILTER] ${pair}: BOUNCE (1h: +${change1h.toFixed(2)}%) → FULL asks`)
+        }
+      }
+    }
+
     let gridOrders = this.gridManager!.generateGridOrders(
       pair,
       midPrice,
@@ -7176,6 +7200,19 @@ class HyperliquidMMBot {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
         this.notifier.info(
           `🛑 [TREND STOP APPLY] ZEC/SOL removed ${originalAsks} asks – bids only (reduce-short mode)`
+        )
+      }
+    }
+
+    // 🎯 SHORT-ON-BOUNCE: Usuń aski gdy gonimy dno
+    if (bounceFilterChaseBlock && Array.isArray(gridOrders)) {
+      const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
+      if (originalAsks > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const change1h = snapshot?.momentum?.change1h ?? 0
+        this.notifier.warn(
+          `🎯 [BOUNCE_FILTER] ${pair}: CHASE (1h: ${change1h.toFixed(2)}%) → usunięto ${originalAsks} asks. Czekam na bounce.`
         )
       }
     }

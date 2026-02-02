@@ -75,3 +75,32 @@ export function isShortOnlyToken(token: string): boolean {
 export function isHoldForTpToken(token: string): boolean {
   return ALL_HOLD_FOR_TP_TOKENS.includes(token.toUpperCase())
 }
+
+// ============================================================
+// SHORT-ON-BOUNCE FILTER
+// "Nie goń dna, shortuj na bounce'u"
+// SM traderzy czekają na odbicie i dopiero wtedy dodają shorty
+// ============================================================
+
+export interface BounceFilterConfig {
+  chaseThreshold: number      // blokuj aski gdy change1h < tego (cena spada mocno)
+  bounceThreshold: number     // pełne aski gdy change1h >= tego (odbicie potwierdzone)
+  neutralAskMult: number      // mnożnik ask w strefie neutralnej
+  enabled: boolean
+}
+
+export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
+  chaseThreshold: -2.0,
+  bounceThreshold: 0.3,
+  neutralAskMult: 0.5,
+  enabled: true,
+}
+
+export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>> = {
+  'FARTCOIN': { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+  'HYPE':     { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+}
+
+export function getBounceFilterConfig(token: string): BounceFilterConfig {
+  return { ...BOUNCE_FILTER_DEFAULTS, ...(BOUNCE_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
+}
