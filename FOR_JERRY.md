@@ -1338,5 +1338,160 @@ Jedna pominięta stacja = ślepy trade.
 
 ---
 
+## Bug #8: "Golden Duo mówi do ściany, Oracle nie zna imion" (02.02.2026)
+
+### Problem: Dwa ciche errory spamujące logi
+
+Po fixach Bug #6 i #7 logi wyglądały czysto... prawie. Dwa errory cicho jechały w tle, co pętlę bota:
+
+```
+[Golden Duo] Failed to fetch signal for HYPE: connect ECONNREFUSED 127.0.0.1:8080
+[Golden Duo] Failed to fetch signal for LIT: connect ECONNREFUSED 127.0.0.1:8080
+[Golden Duo] Failed to fetch signal for PUMP: connect ECONNREFUSED 127.0.0.1:8080
+...powtórz dla KAŻDEGO tokena, co 60 sekund...
+
+[Oracle] Error processing BTC: TypeError: mmAlertBot.sendRiskAlert is not a function
+[Oracle] Error processing HYPE: TypeError: mmAlertBot.sendRiskAlert is not a function
+```
+
+Żaden z nich nie powodował straty pieniędzy (graceful degradation zadziałał), ale: szum w logach maskuje prawdziwe problemy, a Golden Duo nie dostarczał danych do systemu.
+
+### Root Cause #1: Golden Duo - "Trzy adresy, zero działa"
+
+Golden Duo to system który łączy dwa źródła: **SM Position Bias** (strategia) i **Flow Skew** (taktyka). Powinien dostarczać dane do gridu, żeby asymetrycznie skewować ceny.
+
+Problem: w kodzie było **trzy osobne miejsca** z portami, każdy wskazywał na coś innego:
+
+```
+nansen-bridge.mjs:        PORT = 8080 (config)
+nansen-bridge (aktualny):  nasłuchuje na 8081 (bo 8080 zajęty!)
+.env:                      NANSEN_PROXY_URL=http://localhost:8080
+nansen_hyperliquid.ts:     fallback = 'http://localhost:8080'
+ai-executor-v2.mjs:        fallback = 'http://127.0.0.1:8080'
+```
+
+Nansen-bridge wystartował na 8081 bo 8080 był zajęty, ale NIKT nie zaktualizował reszty. Trzy osobne pliki wskazywały na port który nie nasłuchuje.
+
+Ale to nie koniec. `getGoldenDuoSignalForPair()` (wywoływana per token per pętlę) próbowała `POST /api/token-perp-positions` i `POST /api/smart-money-perp-trades`. **Te endpointy nie istnieją na nansen-bridge!** Nansen-bridge ma `GET /api/golden_duo` - zupełnie inne API.
+
+Czyli nawet z poprawnym portem, ta funkcja nigdy by nie zadziałała. Dwa bugi naraz.
+
+Tymczasem `syncGoldenDuo()` (strategic worker, co 60s) poprawnie wywoływał `GET /api/golden_duo` i ładował dane do `goldenDuoData`. Te dane były używane przez `getNansenBiasForPair()` i `getDivergenceMultipliers()` w multi-layer gridzie. Więc **strategiczna warstwa działała** - to taktyczna warstwa (positionBias + flowSkew) była zepsuta.
+
+### Fix: Jedna prawda, jedna ścieżka
+
+```
+PRZED (trzy niezgodne ścieżki):
+
+  syncGoldenDuo()              → GET /api/golden_duo → goldenDuoData ✅
+  getGoldenDuoSignalForPair()  → POST /api/token-perp-positions → ❌ ECONNREFUSED
+  getNansenBiasForPair()       → goldenDuoData → ✅
+
+PO (jedna ścieżka):
+
+  syncGoldenDuo()              → GET /api/golden_duo → goldenDuoData ✅
+  getGoldenDuoSignalForPair()  → goldenDuoData (z cache!) → ✅
+  getNansenBiasForPair()       → goldenDuoData → ✅
+```
+
+Zamiast `getGoldenDuoSignalForPair()` robił osobne HTTP calle (do nieistniejących endpointów), teraz czyta z `goldenDuoData` cache'u który `syncGoldenDuo()` już wypełnia co 60 sekund:
+
+```typescript
+// PRZED: HTTP call do nieistniejącego endpointu
+const signal = await getGoldenDuoSignal(symbol) // → ECONNREFUSED
+
+// PO: czytaj z cache który już masz
+const gdData = this.goldenDuoData[symbol]
+if (gdData) {
+  const positionBias = (gdData.bias - 0.5) * 2  // 0→-1, 0.5→0, 1→+1
+  return { symbol, positionBias, flowSkew: gdData.flowSkew ?? 0 }
+}
+```
+
+Plus `.env` poprawiony na serwerze: `NANSEN_PROXY_URL=http://localhost:8081`.
+Plus fallbacki w kodzie zmienione z 8080 na 8082 (port telemetrii - jako bezpieczny default).
+
+### Root Cause #2: Oracle - "Nie ma takiej metody"
+
+```typescript
+// mm_hl.ts:5311
+mmAlertBot.sendRiskAlert(flipMsg, 'warning').catch(() => {})
+```
+
+`MMAlertBot` nie ma metody `sendRiskAlert()`. Ta metoda istnieje jako **standalone function** w `slack_router.ts`:
+
+```typescript
+// utils/slack_router.ts
+export async function sendRiskAlert(text: string): Promise<void> {
+  await sendSlackText(text, "risk")
+}
+```
+
+I ta funkcja jest już zaimportowana w mm_hl.ts (linia 105). Ktoś wywołał `mmAlertBot.sendRiskAlert()` zamiast `sendRiskAlert()`. Jedna literka różnicy w prefixie - `mmAlertBot.` zamiast nic.
+
+**Fix:** Zmiana na standalone: `sendRiskAlert(flipMsg).catch(() => {})`.
+
+### Weryfikacja
+
+Po deploy i restart - flush logów, 45 sekund czekania:
+```
+=== Golden Duo ECONNREFUSED errors: 0
+=== Oracle sendRiskAlert errors: 0
+=== Golden Duo sync: [GoldenDuo] Synced 15 coins from nansen-bridge ✅
+```
+
+### Golden Duo - "Czy te dane w ogóle mają sens?"
+
+Po fixie Golden Duo zaczął dostarczać positionBias do gridu. Sprawdzenie spójności z resztą systemu:
+
+| Token | GD bias | positionBias | getNansenBias | Bot Mode | Spójne? |
+|-------|---------|-------------|--------------|----------|---------|
+| PUMP | 0.00 | -1.00 | 'short' | FOLLOW_SM_SHORT | YES |
+| FARTCOIN | 0.01 | -0.98 | 'short' | FOLLOW_SM_SHORT | YES |
+| SUI | 0.03 | -0.94 | 'short' | FOLLOW_SM_SHORT | YES |
+| ENA | 0.04 | -0.92 | 'short' | FOLLOW_SM_SHORT | YES |
+| LIT | 0.17 | -0.66 | 'short' | FOLLOW_SM_SHORT | YES |
+| HYPE | 0.49 | -0.02 | neutral | DEFENSIVE | YES |
+
+Bias 0 = "SM maksymalnie short" → positionBias = -1.0 (bear)
+Bias 0.5 = "SM neutralny" → positionBias = 0.0 (neutral)
+Bias 1.0 = "SM maksymalnie long" → positionBias = +1.0 (bull)
+
+Ważne: `positionBias` jest używany tylko w Regular MM (nie multi-layer). Wszystkie aktywne tokeny to multi-layer, więc positionBias nie wpływa na ich gridy. Ale `getNansenBiasForPair()` (który też czyta `goldenDuoData`) wpływa - kontroluje spread asymmetry i contra-skew limiting w multi-layer.
+
+Jedna luka: `flowSkew` jest zawsze 0, bo nansen-bridge nie ma tych danych. Oznacza to, że "alpha shift" (przesunięcie mid-price na podstawie flow) nigdy nie działał. To status quo od zawsze - ten feature wymaga rozbudowy nansen-bridge.
+
+### Lekcja #20: "Ciche errory to bomby zegarowe"
+
+Golden Duo i Oracle spamowały errory od tygodni. Nikt ich nie naprawił, bo "bot dalej działa". Prawda - graceful degradation zadziałał. Ale:
+
+1. **Szum w logach maskuje prawdziwe problemy.** Gdy masz 200 linii ECONNREFUSED, łatwo przeoczyć jedną linię z PRAWDZIWYM problemem.
+2. **Dane nie docierają.** Golden Duo miał dostarczać positionBias i flowSkew. Nie dostarczał. System działał "bez ręki" - niby OK, ale suboptymalne.
+3. **Entropia rośnie.** Dziś jeden cichy error, jutro dwa, za tydzień dziesięć. Każdy "niegroźny" error obniża signal-to-noise ratio logów.
+
+**Zasada:** Treat warnings as errors. Jeśli coś loguje warning/error i to "nie szkodzi" - to albo napraw to, albo wyłącz log. Zero tolerancji dla "w sumie to działa, ale loguje błędy". Twoje przyszłe ja, debugujące o 3 w nocy, podziękuje za czyste logi.
+
+### Lekcja #21: "Sprawdź porty po starcie"
+
+Nansen-bridge miał port 8080 w konfiguracji, ale startował na 8081 bo 8080 był zajęty. Nikt tego nie zauważył. Reszta systemu nadal wskazywała na 8080.
+
+**Zasada:** Po każdym restarcie serwisu sprawdź `ss -tlnp | grep <port>`. Nie ufaj konfiguracji - ufaj kernelowi. Config mówi "chcę 8080", kernel mówi "dostałeś 8081". Kernel ma rację.
+
+Lepsze rozwiązanie: service discovery. Zamiast hardcoded portów, nansen-bridge mógłby ogłosić "nasłuchuję na porcie X" do pliku (np. `/tmp/nansen-bridge.port`) a reszta by go czytała. Ale to overengineering dla naszego przypadku - wystarczy konsekwencja w konfiguracji.
+
+### Lekcja #22: "Jeden cache, wiele konsumentów"
+
+Golden Duo miał DWA cache'e i DWA systemy fetchowania tych samych danych:
+- `syncGoldenDuo()` → `goldenDuoData` → `GET /api/golden_duo` ✅
+- `getGoldenDuoSignalForPair()` → `goldenDuoCache` → `POST /api/...` ❌
+
+Dwa cache'e robiące to samo, ale inaczej. Jeden działał, drugi nie. Klasyczny DRY violation w data fetching.
+
+**Fix:** Usunięcie drugiego fetching pathway - `getGoldenDuoSignalForPair()` teraz czyta z tego samego `goldenDuoData` cache'u co reszta systemu.
+
+**Zasada:** Jedno źródło danych → jeden fetch → jeden cache → wielu konsumentów. Nigdy "dwa osobne systemy pobierające to samo". Masz `syncGoldenDuo()` co 60s? To niech WSZYSCY czytają z jego cache'u, zamiast robić własne HTTP calle.
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
