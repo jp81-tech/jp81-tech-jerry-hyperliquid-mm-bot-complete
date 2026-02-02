@@ -20,6 +20,7 @@ import { AlphaSignalAggregator, CombinedAlphaSignal } from '../signals/AlphaSign
 import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY } from './SmAutoDetector.js'
 import { readNansenBiasJson, NansenBiasEntry, NansenTradingMode } from './nansen_bias_cache.js'
 import { getNansenProAPI } from '../integrations/nansen_pro.js'
+import { isShortOnlyToken, isHoldForTpToken } from '../config/short_only_config.js'
 import { nansenIntegration, shouldBlockBids, shouldBlockAsks, getMMSignalStatus, shouldStartMM, shouldStopMM } from '../signals/nansen_alert_integration.js'
 import fs from 'fs'
 
@@ -111,8 +112,8 @@ interface MMSignalCheck {
 }
 
 function checkMMSignalForToken(token: string): MMSignalCheck {
-  const MM_TOKENS = ['HYPE', 'LIT', 'FARTCOIN']
-  if (!MM_TOKENS.includes(token.toUpperCase())) {
+  // 🔧 FIX 2026-02-01: Centralized config
+  if (!isShortOnlyToken(token)) {
     return {
       signal: 'NONE',
       shouldTrade: true,
@@ -1720,8 +1721,8 @@ export class DynamicConfigManager {
 
       // Apply with FOLLOW_SM priority (same as EMERGENCY)
       // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions - hold for TP
-      const HOLD_FOR_TP_TOKENS = ['HYPE', 'LIT', 'FARTCOIN']
-      const isHoldForTp = HOLD_FOR_TP_TOKENS.includes(token)
+      // 🔧 FIX 2026-02-01: Centralized config
+      const isHoldForTp = isHoldForTpToken(token)
 
       // For HOLD_FOR_TP: Block bids completely, aggressive asks for TP
       // For normal tokens: Small bids allowed for position reduction
@@ -2063,8 +2064,8 @@ export class DynamicConfigManager {
 
     if (emergencyOverride) {
       // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT allow position reduction
-      const HOLD_FOR_TP_EMERGENCY = ['HYPE', 'LIT', 'FARTCOIN']
-      const isHoldForTpEmergency = HOLD_FOR_TP_EMERGENCY.includes(token)
+      // 🔧 FIX 2026-02-01: Centralized config
+      const isHoldForTpEmergency = isHoldForTpToken(token)
       const isFollowShort = autoDetectedMode === 'FOLLOW_SM_SHORT'
 
       // Determine multipliers - EMERGENCY uses override values directly!
