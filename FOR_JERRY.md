@@ -881,5 +881,122 @@ Zasada: **Fallbacki mają sens przy losowych awariach, nie przy systemowych prob
 
 ---
 
+## Ratio Monitor - "Radar wczesnego ostrzegania" (02.02.2026)
+
+### Problem: Jak wcześnie wykryć zmianę trendu?
+
+Masz shorta na LIT. SM ratio wynosi 4.94x - wygląda solidnie. Ale wczoraj było 5.5x. Przedwczoraj 6.2x. Widzisz trend? **Wieloryby powoli zamykają shorty.**
+
+Problem: bot sprawdza ratio co 30 sekund, ale nigdzie nie porównuje z poprzednimi wartościami. Nie wie, że ratio SPADA. Widzi tylko "teraz jest 4.94x, to powyżej 2.0x, więc FORCE SHORT". Żadnego alarmu dopóki ratio nie spadnie poniżej GENERALS_MIN_SHORT_RATIO (2.0x) - a wtedy może być za późno.
+
+To jak prowadzenie samochodu patrząc tylko na prędkościomierz. "100 km/h, OK." Ale nie widzisz, że zbliżasz się do zakrętu.
+
+### Rozwiązanie: RATIO_MONITOR
+
+Dodaliśmy system monitoringu który:
+
+1. **Śledzi historię ratio** - ostatnie 60 odczytów (~30 minut)
+2. **Oblicza trend** - "ratio spadło o 0.52x w ciągu 5 minut"
+3. **Alertuje przy progu** - głośny alarm gdy ratio spadnie poniżej zdefiniowanego progu
+4. **Ma cooldown** - nie spamuje co 30s, powtarza alert max co 5 minut
+5. **Informuje o recovery** - gdy ratio wraca powyżej progu
+
+```
+Normalny stan:
+📊 [RATIO_MONITOR] LIT: ratio=4.94x (threshold=3.5x) ✅ OK
+
+Ratio spada poniżej progu:
+🚨🚨🚨 [RATIO_MONITOR] LIT: THRESHOLD CROSSED - ratio 3.42x < 3.5x | trend: 📉 -0.52x (-11.2%) over ~5min
+🚨 [RATIO_MONITOR] LIT ratio spadl ponizej 3.5x - rozwaz redukcje pozycji!
+🚨 [RATIO_MONITOR] LIT: longs=$1678K shorts=$5894K uPnL_shorts=$2100K
+
+Ratio wraca:
+✅ [RATIO_MONITOR] LIT: RECOVERED above 3.5x - ratio now 3.62x | trend: 📈 +0.20x (5.7%) over ~5min
+```
+
+### Architektura: Config + Monitor
+
+Konfiguracja alertów siedzi w `short_only_config.ts` (obok reszty stałych):
+
+```typescript
+export const RATIO_ALERTS: RatioAlert[] = [
+  { token: 'LIT', threshold: 3.5, message: 'LIT ratio spadl ponizej 3.5x...' },
+  // Dodaj więcej tokenów w razie potrzeby
+]
+
+export const RATIO_ALERT_COOLDOWN_MS = 5 * 60 * 1000  // 5 min
+```
+
+Monitor (`checkRatioAlerts()`) odpala się przy KAŻDYM odświeżeniu danych SM - zarówno przez `loadAndAnalyzeAllTokens()` jak i przez `updateCacheFromSmData()`. To ważne, bo dane wchodzą dwoma ścieżkami i monitor musi łapać obie.
+
+### Bug po drodze: "Monitor się nie odpala!"
+
+Pierwszy deploy monitoringu nie działał. Logi pokazywały GENERALS_OVERRIDE z ratio, ale zero logów z RATIO_MONITOR.
+
+**Przyczyna:** `loadAndAnalyzeAllTokens()` (gdzie dodaliśmy monitor) prawie nigdy nie dociera do kodu analizy - `dynamic_config.ts` wywołuje `updateCacheFromSmData()` WCZEŚNIEJ, która wypełnia `cachedAnalysis`. Gdy `loadAndAnalyzeAllTokens()` jest wywoływana, cache jest świeży i zwraca natychmiast (early return na linii 982).
+
+```
+dynamic_config.ts → updateCacheFromSmData() → cachedAnalysis = dane ✅
+mm_hl.ts → loadAndAnalyzeAllTokens() → "cache fresh, return early" → ❌ monitor się nie odpala
+```
+
+**Fix:** Dodanie `checkRatioAlerts(newAnalysis)` RÓWNIEŻ w `updateCacheFromSmData()`.
+
+**Lekcja:** Gdy dodajesz logikę do jednej ścieżki danych, sprawdź czy dane nie wchodzą inną drogą. W naszym przypadku `cachedAnalysis` jest populowane z dwóch miejsc. Jedno `grep "cachedAnalysis ="` ujawniło problem od razu.
+
+### Centralizacja konfiguracji - "13 list → 1 plik"
+
+Przy okazji monitoringu zrobiliśmy duży refactoring. W `mm_hl.ts` i `dynamic_config.ts` było **13+ miejsc** z hardcoded listami tokenów:
+
+```typescript
+// mm_hl.ts - te same tokeny w 8 różnych miejscach!
+const SIGNAL_ENGINE_TOKENS_PAUSE = ['LIT', 'HYPE', 'FARTCOIN'];
+const HOLD_FOR_TP_TOKENS = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_PAIRS = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_GRID = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_SKIP_SM_TP = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_SKEW = ['HYPE', 'LIT', 'FARTCOIN'];
+const NANSEN_HOLD_FOR_TP = ['HYPE', 'LIT', 'FARTCOIN'];
+// ...i jeszcze więcej
+
+// dynamic_config.ts - to samo!
+const MM_TOKENS = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_TOKENS = ['HYPE', 'LIT', 'FARTCOIN'];
+const HOLD_FOR_TP_EMERGENCY = ['HYPE', 'LIT', 'FARTCOIN'];
+```
+
+Problem oczywisty: chcesz dodać ENA? Musisz znaleźć i zmienić 13 list. Zapomnisz o jednej? Bug. Zmienisz złą? Bug.
+
+**Teraz:** Wszystko importowane z jednego pliku:
+
+```typescript
+import { isShortOnlyToken, isHoldForTpToken, SHORT_ONLY_TOKENS } from '../config/short_only_config.js'
+
+// Było: const HOLD_FOR_TP_TOKENS = ['HYPE', 'LIT', 'FARTCOIN']
+// Jest: if (isHoldForTpToken(pair)) { ... }
+```
+
+Dodajesz nowy token? Jedna zmiana w `short_only_config.ts`. Gotowe.
+
+### Lekcja #13: "Threshold Alerts" > "Threshold Actions"
+
+Mogli byśmy zrobić tak, żeby bot AUTOMATYCZNIE zamykał pozycję gdy ratio spadnie poniżej 3.5x. Ale tego nie zrobiliśmy - z premedytacją.
+
+Dlaczego? Bo **alert wymaga ludzkiej decyzji**, a automatyczna akcja nie. W tradingu automatyczne decyzje są dobre gdy sytuacja jest czarno-biała (SL przy -12%, to jasne). Ale "ratio spadło do 3.4x" to szary obszar - może to chwilowe, może wieloryb zamknął pozycję na 5 minut i zaraz ją otworzy.
+
+Alert mówi: "Hej, coś się zmienia. Spójrz." Nie mówi: "Panikuj i zamknij wszystko."
+
+**Zasada:** Automatyzuj OCZYWISTE decyzje (hard stop loss). Dla NIEOCZYWISTYCH - alertuj człowieka i pozwól mu zdecydować.
+
+### Lekcja #14: DRY nie jest opcjonalny (Don't Repeat Yourself)
+
+13 identycznych list tokenów to podręcznikowy przykład naruszenia DRY. Jak to się stało? Stopniowo. Najpierw była jedna lista. Potem ktoś potrzebował tej samej listy w innym pliku i skopiował. Potem trzeci plik. Potem czwarty...
+
+Każda kopia to "dług techniczny" - działa dziś, ale jutro gdy zmienisz oryginał a zapomnisz o kopii, masz buga. Im więcej kopii, tym większe ryzyko.
+
+**Sygnał ostrzegawczy:** Jeśli widzisz ten sam string/array w 3+ miejscach, to pora na refactoring. Dzisiaj, nie jutro. Bo jutro będzie 4, potem 5, i za tydzień nikt nie pamięta ile kopii jest.
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
