@@ -109,6 +109,50 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     chain: 'solana',
     address: '9BB6NFEBSJbCrqODX4F9kR743r923Q83tq6kF659pump',
     spreadCaps: { min: 0.9, max: 2.0 }
+  },
+  // 🔧 FIX 2026-02-01: "Ostateczne Rozkazy" - new SHORT targets
+  'ENA': {
+    chain: 'ethereum',
+    address: '0x57e114B691Db790C35207b2e685D4A43181e6061',
+    spreadCaps: { min: 0.9, max: 1.5 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 20,
+      minSpreadBps: 12,
+      maxSpreadBps: 60,
+      smFlowSpreadMult: 1.3,
+      smPositionSpreadMult: 1.2,
+      baseOrderSizeUsd: 500,
+      maxPositionUsd: 5000,
+      smSignalSkew: -0.20,
+      inventorySkewMult: 1.3,
+      maxLeverage: 3,
+      stopLossPct: 0.04
+    }
+  },
+  'SUI': {
+    chain: 'sui',
+    address: '0x2::sui::SUI',
+    spreadCaps: { min: 0.9, max: 1.5 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 18,
+      minSpreadBps: 10,
+      maxSpreadBps: 50,
+      smFlowSpreadMult: 1.3,
+      smPositionSpreadMult: 1.2,
+      baseOrderSizeUsd: 500,
+      maxPositionUsd: 5000,
+      smSignalSkew: -0.20,
+      inventorySkewMult: 1.3,
+      maxLeverage: 3,
+      stopLossPct: 0.035
+    }
+  },
+  'PUMP': {
+    chain: 'hyperliquid',
+    address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
+    spreadCaps: { min: 1.0, max: 3.0 }
   }
 };
 

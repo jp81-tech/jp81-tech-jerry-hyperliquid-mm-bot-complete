@@ -37,6 +37,31 @@ export const GENERALS_MAX_INVENTORY_USD = 5000
  */
 export const GENERALS_MIN_SHORT_RATIO = 2.0
 
+// ============================================================
+// RATIO MONITORING / ALERTS
+// Tracks ratio changes and alerts when crossing thresholds
+// ============================================================
+
+export interface RatioAlert {
+  token: string
+  /** Alert when ratio drops BELOW this value */
+  threshold: number
+  /** Log message when threshold crossed */
+  message: string
+}
+
+/**
+ * Active ratio alerts. Bot will log a loud warning when a token's
+ * SM short/long ratio drops below the configured threshold.
+ * Alerts fire once per crossing + repeat every 5 minutes while below.
+ */
+export const RATIO_ALERTS: RatioAlert[] = [
+  { token: 'LIT', threshold: 3.5, message: 'LIT ratio spadl ponizej 3.5x - rozwaz redukcje pozycji!' },
+]
+
+/** Cooldown between repeated alerts for the same token (ms) */
+export const RATIO_ALERT_COOLDOWN_MS = 5 * 60 * 1000  // 5 minutes
+
 /**
  * Helper: check if a token is in SHORT_ONLY mode (GENERALS_FORCE_SHORT)
  */

@@ -16,7 +16,7 @@ import { StrategyPriority } from './dynamic_config.js'
 import { SignalEngine, TOKEN_CONFIGS } from '../core/strategy/SignalEngine.js'
 
 // Centralized SHORT-ONLY config
-import { SHORT_ONLY_TOKENS, GENERALS_MAX_INVENTORY_USD, GENERALS_MIN_SHORT_RATIO } from '../config/short_only_config.js'
+import { SHORT_ONLY_TOKENS, GENERALS_MAX_INVENTORY_USD, GENERALS_MIN_SHORT_RATIO, RATIO_ALERTS, RATIO_ALERT_COOLDOWN_MS } from '../config/short_only_config.js'
 
 // Re-export for backward compatibility
 export { TOKEN_CONFIGS }
@@ -892,6 +892,85 @@ let cachedAnalysis: Map<string, TokenSmAnalysis> = new Map()
 let lastLoadTime = 0
 const CACHE_TTL_MS = 30_000  // 30 seconds cache
 
+// ============================================================
+// RATIO MONITORING
+// Tracks ratio history and fires alerts on threshold crossings
+// ============================================================
+
+/** Previous ratio values for change detection */
+const prevRatios: Map<string, number> = new Map()
+
+/** Last alert timestamp per token (for cooldown) */
+const lastAlertTime: Map<string, number> = new Map()
+
+/** Ratio history for trend tracking: token -> [{ ts, ratio }] */
+const ratioHistory: Map<string, Array<{ ts: number; ratio: number }>> = new Map()
+const RATIO_HISTORY_MAX = 60  // Keep last 60 data points (~30 min at 30s intervals)
+
+function checkRatioAlerts(analysis: Map<string, TokenSmAnalysis>): void {
+  const now = Date.now()
+
+  for (const alert of RATIO_ALERTS) {
+    const tokenAnalysis = analysis.get(alert.token)
+    if (!tokenAnalysis) continue
+
+    const currentRatio = tokenAnalysis.ratio
+    const prevRatio = prevRatios.get(alert.token)
+
+    // Track history
+    let history = ratioHistory.get(alert.token)
+    if (!history) {
+      history = []
+      ratioHistory.set(alert.token, history)
+    }
+    history.push({ ts: now, ratio: currentRatio })
+    if (history.length > RATIO_HISTORY_MAX) {
+      history.shift()
+    }
+
+    // Calculate trend (ratio change over last 10 data points ~5 min)
+    let trendStr = ''
+    if (history.length >= 10) {
+      const recent = history[history.length - 1].ratio
+      const older = history[history.length - 10].ratio
+      const change = recent - older
+      const pct = older > 0 ? ((change / older) * 100).toFixed(1) : '?'
+      const arrow = change > 0.1 ? '📈' : change < -0.1 ? '📉' : '➡️'
+      trendStr = ` | trend: ${arrow} ${change > 0 ? '+' : ''}${change.toFixed(2)}x (${pct}%) over ~5min`
+    }
+
+    // Check threshold crossing
+    const isBelow = currentRatio < alert.threshold && currentRatio !== Infinity
+    const wasAbove = prevRatio === undefined || prevRatio >= alert.threshold
+
+    if (isBelow) {
+      const lastAlert = lastAlertTime.get(alert.token) || 0
+      const justCrossed = wasAbove && prevRatio !== undefined
+      const cooldownExpired = (now - lastAlert) >= RATIO_ALERT_COOLDOWN_MS
+
+      if (justCrossed || cooldownExpired) {
+        const crossMsg = justCrossed ? 'THRESHOLD CROSSED' : 'STILL BELOW'
+        console.log(`🚨🚨🚨 [RATIO_MONITOR] ${alert.token}: ${crossMsg} - ratio ${currentRatio.toFixed(2)}x < ${alert.threshold}x${trendStr}`)
+        console.log(`🚨 [RATIO_MONITOR] ${alert.message}`)
+        console.log(`🚨 [RATIO_MONITOR] ${alert.token}: longs=$${(tokenAnalysis.rawLongsUsd / 1000).toFixed(0)}K shorts=$${(tokenAnalysis.rawShortsUsd / 1000).toFixed(0)}K uPnL_shorts=$${(tokenAnalysis.shortsUpnl / 1000).toFixed(0)}K`)
+        lastAlertTime.set(alert.token, now)
+      }
+    } else if (prevRatio !== undefined && prevRatio < alert.threshold && currentRatio >= alert.threshold) {
+      // Ratio recovered above threshold
+      console.log(`✅ [RATIO_MONITOR] ${alert.token}: RECOVERED above ${alert.threshold}x - ratio now ${currentRatio.toFixed(2)}x${trendStr}`)
+      lastAlertTime.delete(alert.token)
+    }
+
+    // Always log ratio status on data refresh (but not every 30s - only when ratio changes significantly)
+    if (prevRatio === undefined || Math.abs(currentRatio - prevRatio) > 0.05) {
+      const status = isBelow ? '⚠️ BELOW' : '✅ OK'
+      console.log(`📊 [RATIO_MONITOR] ${alert.token}: ratio=${currentRatio.toFixed(2)}x (threshold=${alert.threshold}x) ${status}${trendStr}`)
+    }
+
+    prevRatios.set(alert.token, currentRatio)
+  }
+}
+
 /**
  * Loads SM data and analyzes all tokens.
  * Results are cached for 30 seconds.
@@ -918,6 +997,9 @@ export async function loadAndAnalyzeAllTokens(): Promise<Map<string, TokenSmAnal
 
     cachedAnalysis = newAnalysis
     lastLoadTime = now
+
+    // Check ratio alerts on fresh data
+    checkRatioAlerts(newAnalysis)
 
     console.log(`✅ [SmAutoDetector] Analyzed ${newAnalysis.size} tokens from ${smFile.timestamp}`)
 
@@ -1086,6 +1168,9 @@ export function updateCacheFromSmData(smData: Record<string, SmartMoneyEntry>): 
 
   cachedAnalysis = newAnalysis
   lastLoadTime = Date.now()
+
+  // Check ratio alerts on fresh data
+  checkRatioAlerts(newAnalysis)
 }
 
 // ============================================================
