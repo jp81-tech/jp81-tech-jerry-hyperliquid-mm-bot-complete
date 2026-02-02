@@ -1493,5 +1493,203 @@ Dwa cache'e robiące to samo, ale inaczej. Jeden działał, drugi nie. Klasyczny
 
 ---
 
+## SHORT-ON-BOUNCE Filter - "Nie goń dna, shortuj na odbicie" (02.02.2026)
+
+### Problem: Bot shortuje w najgorszym momencie
+
+Wyobraź sobie scenariusz. Generałowie mają $11M short na LIT. Bot dostaje rozkaz: FOLLOW_SM_SHORT. I co robi? Natychmiast składa aski (zlecenia sprzedaży). Nawet jeśli cena właśnie spadła 5% w ciągu godziny.
+
+Czy tak robią prawdziwi wieloryby? **Nie.** Trader 0x38042d (nasz Generał) czeka na **bounce** - chwilowe odbicie ceny w górę - i dopiero wtedy dokłada do shorta. Dlaczego? Bo shortując na górce masz lepszą cenę wejścia i mniejsze ryzyko.
+
+```
+CO ROBIŁ BOT:                       CO ROBIĄ WIELORYBY:
+
+Cena: $1.60 ──────────╮             Cena: $1.60 ──────────╮
+                       │                                    │
+       $1.50 ─────────┤                    $1.50 ─────────┤
+                       │ ← Bot shortuje                    │
+       $1.40 ──────╮  │   TU (na dnie!)    $1.40 ──────╮  │
+                   │  │                                │  │
+       $1.35 ─────┤  │                    $1.35 ─────┤  │
+                   │  │                                │  │ ← Bounce!
+       $1.30 ────╮│  │                    $1.30 ────╮│  │
+                 ││  │                              ││  ╰── Wieloryb shortuje
+       $1.25 ───╯╯  │                    $1.25 ───╯╯       TU (na bouncie!)
+                     │
+              Dalszy spadek                     Dalszy spadek
+
+Entry: $1.40 (złe)                   Entry: $1.50 (dobre!)
+Różnica: 7% gorszy entry             → lepszy PnL na shorcie
+```
+
+### Rozwiązanie: Trzy strefy
+
+Zamiast ślepo shortować, bot teraz sprawdza `change1h` (zmianę ceny w ostatniej godzinie) i decyduje:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                   │
+│  change1h < -2%        │  -2% ... +0.3%     │  >= +0.3%          │
+│  ─────────────         │  ──────────────     │  ──────────        │
+│  🏃 CHASE              │  ⚠️ NEUTRAL         │  🎯 BOUNCE         │
+│                        │                     │                    │
+│  "Cena spada mocno.    │  "Cena płaska.      │  "Cena odbija!     │
+│   Nie goń dna!"        │   Ostrożnie..."     │   TERAZ shortuj!"  │
+│                        │                     │                    │
+│  → ZERO asków          │  → Aski × 0.5      │  → PEŁNE aski      │
+│  → Czekaj na bounce    │  → Zmniejszona      │  → Agresywne       │
+│                        │    ekspozycja       │    shortowanie"     │
+│                        │                     │                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Analogia: to jak łowienie ryb. Nie wskakujesz do wody gdy prąd jest najsilniejszy (CHASE). Czekasz aż prąd się uspokoi (NEUTRAL) albo zacznie cofać (BOUNCE), i wtedy zarzucasz wędkę.
+
+### Per-token progi
+
+Nie każdy token porusza się tak samo. FARTCOIN i HYPE są bardziej zmienne niż LIT czy ENA, więc potrzebują szerszych progów:
+
+| Token | CHASE (blokuj) | BOUNCE (pełne aski) | Dlaczego? |
+|-------|---------------|--------------------:|-----------|
+| **Default** | < -2.0% | >= +0.3% | Standardowy altcoin |
+| **FARTCOIN** | < -3.0% | >= +0.5% | Memecoin, dużo szumu cenowego |
+| **HYPE** | < -3.0% | >= +0.5% | Wysoka zmienność, duży OI |
+
+Konfiguracja w jednym miejscu (`src/config/short_only_config.ts`):
+
+```typescript
+export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
+  chaseThreshold: -2.0,
+  bounceThreshold: 0.3,
+  neutralAskMult: 0.5,
+  enabled: true,
+}
+
+export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>> = {
+  'FARTCOIN': { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+  'HYPE':     { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+}
+```
+
+Chcesz dodać custom progi dla SUI? Jedna linia: `'SUI': { chaseThreshold: -2.5 }`. Reszta dziedziczy z DEFAULTS.
+
+### Jak to działa w kodzie
+
+Filtr ma dwie fazy w `mm_hl.ts`:
+
+**Faza 1 (pre-grid):** PRZED `generateGridOrders()` - sprawdza `change1h` i albo ustawia flagę `bounceFilterChaseBlock` (CHASE), albo modyfikuje `sizeMultipliers.ask` (NEUTRAL), albo nic nie robi (BOUNCE).
+
+**Faza 2 (post-grid):** PO generowaniu gridOrders - jeśli flaga CHASE jest ustawiona, **usuwa WSZYSTKIE aski** z grida. Wzór identyczny jak istniejący ZEC trend-stop filter.
+
+```
+GENERALS_OVERRIDE → FOLLOW_SM_SHORT (bid=0, ask=1.5)
+        ↓
+[BOUNCE_FILTER] change1h check:          ← Faza 1
+  < -2%      → CHASE:   flag = true
+  -2%..+0.3% → NEUTRAL: ask × 0.5
+  >= +0.3%   → BOUNCE:  pełne aski
+        ↓
+Grid generuje ordery
+        ↓
+[BOUNCE_FILTER] if chase → usuń aski     ← Faza 2
+        ↓
+HOLD_FOR_TP → bidy usunięte (bez zmian)
+```
+
+Ważne: HOLD_FOR_TP i BOUNCE_FILTER nie kolidują. HOLD_FOR_TP dotyczy **bidów** (nie kupuj, trzymaj shorta). BOUNCE_FILTER dotyczy **asków** (nie shortuj na dnie). Działają na różnych stronach orderbooka.
+
+### Edge case: brak danych
+
+Gdy `HyperliquidDataFetcher` nie ma jeszcze danych (np. tuż po restarcie), `change1h` defaultuje do 0:
+
+```typescript
+const change1h = snapshot?.momentum?.change1h ?? 0
+```
+
+Zero mieści się w strefie NEUTRAL (-2% < 0 < +0.3%), więc bot zmniejszy aski o 0.5x zamiast wysyłać pełne. Bezpieczny default - nie shortuje agresywnie bez danych, ale też nie blokuje shortowania całkowicie.
+
+### Bug po drodze: "Data Fetcher nie sięga do naszych coinów"
+
+Po deploy filtr działał, ale HYPE, LIT, FARTCOIN i ENA ciągle pokazywały `change1h: +0.00%`. Tylko SUI miał prawdziwe dane. Co się działo?
+
+`HyperliquidDataFetcher.refreshAllData()` iteruje przez **WSZYSTKIE** coiny na Hyperliquid (300+), fetchując candle'e jeden po drugim. To wymaga osobnego API call per coin. Problem: Hyperliquid ma rate limit, i po ~50 coinach bot zaczyna dostawać 429 (Too Many Requests).
+
+SUI jest "dużym" coinem z niskim indeksem w API (majors mają indeksy 0-30). Nasze altcoiny (HYPE index ~100+, LIT ~200+) nigdy nie były osiągane zanim rate limity zablokowały refresh.
+
+Dwa fixy:
+
+**Fix 1: Priority coins - "VIPy najpierw"**
+
+```typescript
+// src/api/hyperliquid_data_fetcher.ts
+private static readonly PRIORITY_COINS: Set<string> = new Set([
+  'HYPE', 'LIT', 'FARTCOIN', 'ENA', 'SUI', 'PUMP'
+])
+
+// W refreshAllData():
+const sorted = [...assetCtxs].sort((a, b) => {
+  const ap = HyperliquidDataFetcher.PRIORITY_COINS.has(a.coin.toUpperCase()) ? 0 : 1
+  const bp = HyperliquidDataFetcher.PRIORITY_COINS.has(b.coin.toUpperCase()) ? 0 : 1
+  return ap - bp
+})
+```
+
+Nasze coiny są fetchowane PIERWSZE, zanim rate limity uderzą. Reszta (300 losowych coinów) fetcho jest po nich - jeśli się nie zmieszczą, trudno. Nasze dane są bezpieczne.
+
+**Fix 2: Concurrent refresh storm prevention**
+
+`getMarketSnapshotSync()` (metoda sync) odpalała `refreshAllData()` w tle, ale **nigdy nie aktualizowała `lastFetch`**. To oznaczało, że KAŻDE wywołanie sync metody (5 tokenów × ~3 razy na pętlę = 15 razy co minutę) odpalało nowy concurrent refresh. 15 równoległych refresh'ów to 15 × 300 API calls. Rate limit gwarantowany.
+
+```typescript
+// PRZED: storm
+getMarketSnapshotSync(coin) {
+  if (now - this.lastFetch >= CACHE_TTL_MS) {
+    this.refreshAllData()  // fire and forget, lastFetch NIGDY nie aktualizowane!
+  }
+}
+
+// PO: jeden refresh na raz
+getMarketSnapshotSync(coin) {
+  if (now - this.lastFetch >= CACHE_TTL_MS && !this.refreshInProgress) {
+    this.refreshInProgress = true
+    this.lastFetch = now  // natychmiastowa aktualizacja, zapobiega kolejnym odpaleniom
+    this.refreshAllData()
+      .finally(() => { this.refreshInProgress = false })
+  }
+}
+```
+
+Efekt natychmiastowy: po restart wszystkie coiny pokazują prawdziwe `change1h`:
+
+```
+🎯 [BOUNCE_FILTER] HYPE: NEUTRAL (1h: +0.02%) → ask×0.25→0.13
+🎯 [BOUNCE_FILTER] FARTCOIN: NEUTRAL (1h: -0.11%) → ask×2.43→1.21
+🎯 [BOUNCE_FILTER] ENA: NEUTRAL (1h: -0.02%) → ask×0.35→0.17
+🎯 [BOUNCE_FILTER] SUI: BOUNCE (1h: +0.35%) → FULL asks
+```
+
+SUI nawet przeszedł do strefy BOUNCE (+0.35% > threshold +0.3%) - pełne aski! Filtr działa.
+
+### Lekcja #23: Priority Queuing - "VIPy idą bez kolejki"
+
+Gdy masz ograniczony budżet API calls i 300 coinów do sprawdzenia, **nie traktuj wszystkich równo**. Handlujesz 6 coinami? To te 6 coinów powinno być ZAWSZE na pierwszym miejscu.
+
+To ta sama zasada co tier-based polling w VIP Spy - priorytetyzuj to co jest ważne, resztę rób "best effort".
+
+Analogia: szpital z 300 pacjentami i 50 zestawów do badania krwi. Nie testujesz w kolejce zgłoszeń. Pacjenci na OIOM-ie (Twoje aktywne tokeny) idą pierwsi. Reszta czeka. Jeśli zabraknie zestawów - trudno, OIOMowcy mają swoje wyniki.
+
+### Lekcja #24: Sync methods that fire async work - "Brudna bomba"
+
+`getMarketSnapshotSync()` to wzorzec który wygląda niewinnie: "zwróć dane z cache, a w tle odśwież". Problem: "w tle" to niekontrolowane terytorium. Kto śledzi ile refresh'ów jest w locie? Kto aktualizuje `lastFetch`? Kto zapobiega storms?
+
+Jeśli musisz użyć tego wzorca, **zawsze** dodaj:
+1. **Guard flag** (`refreshInProgress`) - jeden refresh na raz
+2. **Eager timestamp update** (`lastFetch = now` przed async call) - zapobiega kolejnym odpaleniom
+3. **Finally cleanup** (`.finally(() => { flag = false })`) - zawsze resetuj stan
+
+Bez tych trzech: sync method z async fire-and-forget = race condition waiting to happen.
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
