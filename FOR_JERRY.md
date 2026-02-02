@@ -998,5 +998,200 @@ Każda kopia to "dług techniczny" - działa dziś, ale jutro gdy zmienisz orygi
 
 ---
 
+## Bug #6: "PURE_MM zamyka Ci shorty za plecami" (02.02.2026)
+
+### Problem: HYPE short zamykany na minus
+
+HYPE short z entry $28.99 był zamykany kupowaniem po $32+ (~10% strata). Bot **aktywnie składał BUY ordery** na HYPE, mimo że HYPE jest na liście SHORT_ONLY_TOKENS i powinien mieć HOLD_FOR_TP.
+
+Jak to możliwe? Przecież mamy:
+- `GENERALS_OVERRIDE` → wymusza FOLLOW_SM_SHORT
+- `HOLD_FOR_TP` → blokuje bidy
+- `FORCE_SHORT_ONLY` → ASK only
+- `REGIME` → bull_trend_no_shorting_pump (longs only, no shorts)
+
+**Pięć warstw ochrony** - i BUY ordery i tak przechodziły. Brzmi jak horror. Bo to jest horror.
+
+### Root Cause: Łańcuch upadku
+
+Problem zaczyna się niewinnie, w SmAutoDetector:
+
+```
+1. GENERALS_OVERRIDE sprawdza HYPE:
+   ratio = 1.04x  (prawie neutralny - SM mają tyle samo long co short)
+   threshold = 2.0x
+   → ratio < threshold → SKIP!
+   → "Fall through to normal analysis"
+
+2. Normalna analiza patrzy na whale_tracker.py:
+   trading_mode = "FOLLOW_SM_LONG" (confidence 86%)
+   → Chwila... HYPE SM jest prawie neutralny, ale bias 0.49 daje "LONG"
+
+3. SignalEngine dostaje to:
+   Score = 18 (WAIT zone, za niski na SHORT czy LONG)
+   → Mode = PURE_MM
+   → signalEngineOverride = true
+   → signalEngineAllowLongs = true   ← TU ZACZYNA SIĘ PROBLEM
+```
+
+OK, SmAutoDetector mówi PURE_MM z `allowLongs=true`. Ale dalej mamy zabezpieczenia... prawda?
+
+```
+4. mm_hl.ts → FORCE_SHORT_ONLY:
+   "HYPE jest na SHORT_ONLY_TOKENS..."
+   ALE: isSignalEnginePureMmFso = true (PURE_MM)
+   → "PURE_MM mode → FORCE_SHORT_ONLY bypassed, both sides enabled"
+   → Warstwa 1 wyłączona ❌
+
+5. mm_hl.ts → REGIME:
+   "HYPE: bull_trend_no_shorting_pump (Longs: true, Shorts: false)"
+   → OK, REGIME mówi "tylko longs" - to pasuje
+
+6. mm_hl.ts → SIGNAL_ENGINE MASTER OVERRIDE (linia 7090):
+   isPureMmMode = true
+   → permissions.allowLongs = true    ← FORCE BOTH SIDES
+   → permissions.allowShorts = true
+   → Warstwa 2 wyłączona ❌
+
+7. Wynik: Grid generuje BID (buy) ordery
+   → HYPE short zamykany po $32+ ze stratą ~10%
+```
+
+Cały problem to **jedna linia kodu**:
+
+```typescript
+// mm_hl.ts:7095 - PURE_MM MASTER OVERRIDE
+permissions.allowLongs = true;  // ← TO ZABIJAŁO NASZEGO SHORTA
+```
+
+Ta linia istnieje po to, żeby PURE_MM mode mógł robić "normalny market making" na obie strony. Słuszne dla tokenów bez pozycji. **Katastrofalne** dla tokenów z istniejącym shortem trzymanym na HOLD_FOR_TP.
+
+### Analogia wojskowa
+
+Wyobraź sobie taką sytuację:
+
+```
+Generał (GENERALS_OVERRIDE):
+  "HYPE - sygnał za słaby (ratio 1.04x), odpuść."
+  → Generał wychodzi z pokoju
+
+Oficer wywiadu (SmAutoDetector):
+  "Skoro Generał nie chce, to... whale_tracker mówi 'neutral'.
+   Dajmy PURE_MM - niech bot handluje normalnie."
+
+Dowódca polowy (mm_hl.ts MASTER OVERRIDE):
+  "PURE_MM? Włączam OBE strony - bidy i aski!"
+  → Otwiera bidy na HYPE
+
+Strażnik (HOLD_FOR_TP):
+  "Czekaj, HYPE ma shorta! Nie otwieraj bidów!"
+
+Dowódca polowy:
+  "Sorki, MASTER OVERRIDE. Generał nie jest w pokoju,
+   więc PURE_MM ma najwyższy priorytet."
+  → Bidy przechodzą → Short zamykany na minus
+```
+
+Problem: gdy Generał "odpuścił" (SKIP), nikt nie przejął odpowiedzialności za ochronę istniejącej pozycji. Oficer wywiadu oddał kontrolę PURE_MM, a PURE_MM ma override na wszystko.
+
+### Fix: Dwa zabezpieczenia
+
+**Fix 1: SmAutoDetector - Tryb DEFENSIVE (nie "spadaj")**
+
+Zamiast "fall through to normal analysis" (co prowadzi do PURE_MM), SmAutoDetector teraz zwraca tryb DEFENSIVE:
+
+```typescript
+// PRZED: "Generał odchodzi, rób co chcesz"
+if (ratio < GENERALS_MIN_SHORT_RATIO) {
+  // Fall through to normal analysis below
+}
+
+// PO: "Generał odchodzi, ale każe pilnować fortu"
+if (ratio < GENERALS_MIN_SHORT_RATIO) {
+  return {
+    bidEnabled: false,              // BLOKUJ kupowanie
+    askEnabled: true,               // Pozwól na shorty
+    bidMultiplier: 0.0,
+    askMultiplier: 1.0,             // Normalne (nie agresywne)
+    mode: MmMode.FOLLOW_SM_SHORT,   // NIE PURE_MM!
+    signalEngineOverride: true,     // Override SignalEngine
+    signalEngineAllowLongs: false,  // KRYTYCZNE: blokuj longi
+    signalEngineAllowShorts: true,
+    convictionScore: 60,            // Niższa pewność
+  }
+}
+```
+
+Kluczowa zmiana: `mode: MmMode.FOLLOW_SM_SHORT` zamiast fallthrough do PURE_MM. Dzięki temu `isPureMmMode` w mm_hl.ts będzie FALSE i MASTER OVERRIDE się nie odpali.
+
+**Fix 2: mm_hl.ts - PURE_MM respektuje HOLD_FOR_TP**
+
+Nawet jeśli Fix 1 z jakiegoś powodu nie zadziała, mm_hl.ts teraz sprawdza:
+
+```typescript
+if (isPureMmMode) {
+  const hasShortPos = actualSkew < -0.05;
+  const isHoldTp = isHoldForTpToken(pair);
+
+  if (isHoldTp && hasShortPos) {
+    // NIE OTWIERAJ LONGÓW - mamy shorta na HOLD_FOR_TP!
+    permissions.allowLongs = false;
+    permissions.allowShorts = true;
+  } else {
+    // Normalne PURE_MM - obe strony
+    permissions.allowLongs = true;
+    permissions.allowShorts = true;
+  }
+}
+```
+
+### Defense in Depth - znowu
+
+Dwa fixy, nie jeden. Bo:
+
+```
+Fix 1 (SmAutoDetector):  Zapobiega powstaniu PURE_MM w ogóle
+Fix 2 (mm_hl.ts):        Nawet jeśli PURE_MM powstanie, nie zamknie shorta
+
+Oba muszą JEDNOCZEŚNIE zawieść, żeby bug wrócił.
+Prawdopodobieństwo: (p1 failure) × (p2 failure) ≈ bardzo niskie
+```
+
+### Weryfikacja po deploy
+
+Logi po fix:
+
+```
+☢️ [GENERALS_OVERRIDE] HYPE: WYMUSZONY FOLLOW_SM_SHORT (ratio: 3.50x >= 2x)
+💎 [HOLD_FOR_TP] HYPE: Holding SHORT -16% for TP. BIDs BLOCKED, ASKs for TP.
+💎 [HOLD_FOR_TP] HYPE removed 8 BIDS - holding SHORT for TP (actualSkew -16%)
+🏛️  HYPE Multi-Layer: 0 orders  ← ZERO BUY ORDERÓW!
+🛑 [BULL_TRAP] HYPE cancelled existing BID order @ $32.301  ← Anulowane stare bidy!
+```
+
+Bot natychmiast anulował istniejące BID ordery i przestał generować nowe. Short chroniony.
+
+### Lekcja #15: Override Chains - "Kto ma FAKTYCZNIE ostatnie słowo?"
+
+Ten bug jest przykładem **niekontrolowanego łańcucha override'ów**. Każdy override z osobna miał sens:
+- GENERALS_OVERRIDE: "wymuszaj short dla wybranych tokenów"
+- GENERALS_MIN_SHORT_RATIO: "ale nie ślepo, sprawdź dane"
+- PURE_MM MASTER OVERRIDE: "gdy brak sygnału, daj obe strony"
+- HOLD_FOR_TP: "chroń istniejącą pozycję"
+
+Problem: nikt nie narysował **mapy priorytetów** dla edge case'u "Generał odpuścił, ale pozycja istnieje". Każda warstwa wiedziała o swoich sąsiadach, ale nie o pełnym łańcuchu.
+
+**Zasada:** Gdy masz 5+ warstw override'ów, **narysuj schemat** kto co może nadpisać. Jeśli nie jesteś w stanie narysować go w 2 minuty, system jest za skomplikowany. Uprość, zanim bug narysuje go za Ciebie - Twoimi stratami.
+
+### Lekcja #16: "Fall Through" to ukryty goto
+
+W programowaniu "fall through" (gdy warunek nie pasuje i kod przechodzi do następnej logiki) to mini-`goto`. Jest niewidoczny - nie ma explicit instrukcji "skocz tam", po prostu... kod leci dalej. A gdzie leci? Do PURE_MM, które wymusza `allowLongs=true`, które zamyka Twojego shorta.
+
+**Zasada:** Każdy `if` z `// fall through` komentarzem powinien być traktowany podejrzliwie. Jeśli token jest na liście SHORT_ONLY i Generał go odpuścił - to NIE znaczy "rób co chcesz". To znaczy "chroń pozycję i czekaj na lepszy sygnał".
+
+W naszym fixie zamieniliśmy komentarz `// Fall through to normal analysis below` na explicit `return { ... DEFENSIVE mode ... }`. Teraz kod mówi jasno: "wracam z tymi instrukcjami", a nie "lecę dalej i ktoś tam w dole mnie złapie... albo nie".
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
