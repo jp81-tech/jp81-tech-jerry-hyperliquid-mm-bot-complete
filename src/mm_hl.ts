@@ -5308,7 +5308,7 @@ class HyperliquidMMBot {
 
       // Send Telegram alert for significant flips
       if (isDirectionChange || Math.abs(signal.score) > 30) {
-        mmAlertBot.sendRiskAlert(flipMsg, 'warning').catch(() => {})
+        sendRiskAlert(flipMsg).catch(() => {})
       }
     }
 
@@ -5406,24 +5406,21 @@ class HyperliquidMMBot {
   private async getGoldenDuoSignalForPair(pair: string): Promise<GoldenDuoSignal | null> {
     try {
       const symbol = pair.split(/[-_]/)[0].toUpperCase()
-      const now = Date.now()
 
-      // Check cache
-      const cached = this.goldenDuoCache.get(symbol)
-      if (cached && (now - cached.timestamp) < this.goldenDuoCacheTTL) {
-        return cached.signal
+      // Use already-synced goldenDuoData from syncGoldenDuo() (runs every 60s)
+      const gdData = this.goldenDuoData[symbol]
+      if (gdData) {
+        // Convert bias (0-1 scale, 0=bearish 1=bullish) to positionBias (-1 to +1)
+        const positionBias = (gdData.bias - 0.5) * 2  // 0->-1, 0.5->0, 1->+1
+        return {
+          symbol,
+          positionBias: Math.max(-1, Math.min(1, positionBias)),
+          flowSkew: gdData.flowSkew ?? 0
+        }
       }
 
-      // Fetch fresh signal from Golden Duo Proxy
-      const signal = await getGoldenDuoSignal(symbol)
-
-      // Update cache
-      this.goldenDuoCache.set(symbol, { signal, timestamp: now })
-
-      return signal
+      return null
     } catch (error) {
-      // Fail gracefully - return null if proxy is unavailable
-      console.warn(`[Golden Duo] Failed to fetch signal for ${pair}:`, error)
       return null
     }
   }
