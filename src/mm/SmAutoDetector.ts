@@ -15,6 +15,9 @@ import { StrategyPriority } from './dynamic_config.js'
 // Signal Engine Integration (v3 - Data Fusion Core with MASTER CONTROL)
 import { SignalEngine, TOKEN_CONFIGS } from '../core/strategy/SignalEngine.js'
 
+// Centralized SHORT-ONLY config
+import { SHORT_ONLY_TOKENS, GENERALS_MAX_INVENTORY_USD, GENERALS_MIN_SHORT_RATIO } from '../config/short_only_config.js'
+
 // Re-export for backward compatibility
 export { TOKEN_CONFIGS }
 
@@ -93,6 +96,25 @@ export const TOKEN_VOLATILITY_CONFIG: Record<string, TokenVolatilityConfig> = {
     maxLeverage: 5,
     atrMultiplier: 1.8,
     description: 'Hyperliquid token - medium volatility'
+  },
+  // DeFi / L1 tokens - medium volatility
+  'ENA': {
+    minStopLossPercent: 3.5,
+    maxLeverage: 5,
+    atrMultiplier: 1.8,
+    description: 'DeFi token (Ethena) - medium volatility'
+  },
+  'SUI': {
+    minStopLossPercent: 3.5,
+    maxLeverage: 5,
+    atrMultiplier: 1.8,
+    description: 'L1 blockchain - medium volatility'
+  },
+  'PUMP': {
+    minStopLossPercent: 5.0,
+    maxLeverage: 3,
+    atrMultiplier: 2.5,
+    description: 'Memecoin - high volatility (STICKY position)'
   },
   // Default for other tokens
   'DEFAULT': {
@@ -972,24 +994,32 @@ export function getAutoEmergencyOverrideSync(token: string): {
   signalEngineAllowLongs: boolean
   signalEngineAllowShorts: boolean
 } | undefined {
-  // ☢️ GENERALS_OVERRIDE: Generał ($8.5M) i Wice-Generał ($11.5M) dokładają shorty
+  // ☢️ GENERALS_OVERRIDE: Armia ($185M equity, $547M pozycji) gra na spadki
   // Wymuszamy FOLLOW_SM_SHORT dla tych tokenów BEZWARUNKOWO
-  const GENERALS_FORCE_SHORT = ['HYPE', 'LIT', 'FARTCOIN']
+  // 🔧 FIX 2026-02-01: Centralized config - SHORT_ONLY_TOKENS
+  const GENERALS_FORCE_SHORT = SHORT_ONLY_TOKENS
 
   if (GENERALS_FORCE_SHORT.includes(token)) {
-    console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT - Generałowie shortują!`)
-    return {
-      bidEnabled: false,           // ZAKAZ KUPOWANIA
-      askEnabled: true,            // Zezwól na shorty
-      bidMultiplier: 0.0,          // Zero bidów
-      askMultiplier: 1.5,          // Agresywne aski
-      maxInventoryUsd: 10000,      // Max pozycja
-      reason: `☢️ GENERALS_OVERRIDE - Generał + Wice-Generał shortują`,
-      mode: MmMode.FOLLOW_SM_SHORT,
-      convictionScore: 95,         // Wysoka pewność
-      signalEngineOverride: true,  // Nadpisz SignalEngine
-      signalEngineAllowLongs: false,
-      signalEngineAllowShorts: true
+    // CHECK BIAS THRESHOLD - nie shortuj przy neutralnym sygnale
+    const preAnalysis = cachedAnalysis.get(token)
+    if (preAnalysis && preAnalysis.ratio < GENERALS_MIN_SHORT_RATIO) {
+      console.log(`⚠️ [GENERALS_OVERRIDE] ${token}: SKIP - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (za neutralny, potrzeba min ${GENERALS_MIN_SHORT_RATIO}x)`)
+      // Fall through to normal analysis below
+    } else {
+      console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT (ratio: ${preAnalysis?.ratio.toFixed(2) ?? '?'}x >= ${GENERALS_MIN_SHORT_RATIO}x)`)
+      return {
+        bidEnabled: false,           // ZAKAZ KUPOWANIA
+        askEnabled: true,            // Zezwól na shorty
+        bidMultiplier: 0.0,          // Zero bidów
+        askMultiplier: 1.5,          // Agresywne aski
+        maxInventoryUsd: GENERALS_MAX_INVENTORY_USD,  // $5K per pair (6 par, $10K equity)
+        reason: `☢️ GENERALS_OVERRIDE - Generał + Wice-Generał shortują (ratio: ${preAnalysis?.ratio.toFixed(2) ?? '?'}x)`,
+        mode: MmMode.FOLLOW_SM_SHORT,
+        convictionScore: 95,         // Wysoka pewność
+        signalEngineOverride: true,  // Nadpisz SignalEngine
+        signalEngineAllowLongs: false,
+        signalEngineAllowShorts: true
+      }
     }
   }
 
