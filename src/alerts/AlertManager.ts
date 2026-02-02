@@ -200,9 +200,10 @@ export class AlertManager extends EventEmitter {
   evaluateSnapshot(snapshot: TelemetrySnapshot): void {
     const alerts: Alert[] = []
     alerts.push(...this.checkWhaleUnderwater(snapshot))
-    alerts.push(...this.checkConcentration(snapshot))
+    // Concentration risk and volatility spike disabled - informational noise every tick
+    // alerts.push(...this.checkConcentration(snapshot))
     alerts.push(...this.checkBiasShift(snapshot))
-    alerts.push(...this.checkVolatility(snapshot))
+    // alerts.push(...this.checkVolatility(snapshot))
     alerts.push(...this.checkContrarian(snapshot))
     alerts.push(...this.checkSmartSignal(snapshot))
 

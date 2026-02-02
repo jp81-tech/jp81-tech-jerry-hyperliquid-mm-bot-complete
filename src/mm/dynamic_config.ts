@@ -1548,11 +1548,14 @@ export class DynamicConfigManager {
       const alertLevel = smReversal.strength === 'EXTREME' ? '🚨🚨🚨' :
                          smReversal.strength === 'STRONG' ? '🚨🚨' : '⚠️'
 
-      this.notifier.warn(
-        `${alertLevel} [AUTO-REVERSAL] ${token} | ${smReversal.type} (${smReversal.strength}) ` +
-        `| Conf: ${smReversal.confidence}% | Sustained: ${sustainedEmoji} ${trendAnalysis.sustainedHours.toFixed(1)}h ` +
-        `| ${smReversal.action.reason}`
-      )
+      // Only log STRONG/EXTREME reversals as warnings; WEAK is noise when GENERALS_OVERRIDE active
+      if (smReversal.strength === 'STRONG' || smReversal.strength === 'EXTREME') {
+        this.notifier.warn(
+          `${alertLevel} [AUTO-REVERSAL] ${token} | ${smReversal.type} (${smReversal.strength}) ` +
+          `| Conf: ${smReversal.confidence}% | Sustained: ${sustainedEmoji} ${trendAnalysis.sustainedHours.toFixed(1)}h ` +
+          `| ${smReversal.action.reason}`
+        )
+      }
 
       // Only apply reversal blocks if trend is SUSTAINED or signal is EXTREME
       const shouldApplyBlocks = sustainedCheck.confirmed || smReversal.strength === 'EXTREME'
