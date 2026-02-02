@@ -746,5 +746,140 @@ Nasz `GENERALS_MIN_SHORT_RATIO` to taki mini risk committee. Mały, szybki check
 
 ---
 
+## Nansen API Credit Leak - "Kran odkręcony na full" (02.02.2026)
+
+### Problem: 50 000 kredytów w miesiąc
+
+Nansen API daje Ci 50 000 kredytów miesięcznie. Brzmi dużo? Nasz bot zużywał ~2 000 kredytów na godzinę. To 48 000 dziennie. Całe 50K wyparowało w nieco ponad dobę intensywnego użycia.
+
+Jak to wyglądało na wykresie:
+```
+Kredyty/dzień
+22K │  ██
+20K │  ██
+18K │  ██ ██
+    │  ██ ██
+ 6K │              ██ ██
+    │  ↑               ↑
+    Jan 5          Jan 25
+    "Kto zostawił   "Znowu nam
+     kran?"          kapie..."
+```
+
+### Diagnoza: Pięć warstw problemów
+
+Problem nie był w jednym miejscu. To była kaskada wzajemnie pogarszających się błędów:
+
+**Warstwa 1: Brak cache'a na najwyższym poziomie**
+
+`getGenericTokenGuard()` - funkcja wywoływana co 60 sekund dla KAŻDEGO tokena - nie miała żadnego cache'a. Wyobraź sobie, że za każdym razem gdy chcesz sprawdzić pogodę, dzwonisz do meteorologa osobiście, zamiast zerknąć na apkę. 5 tokenów x 60 razy na godzinę = 300 telefonów na godzinę.
+
+**Warstwa 2: Kaskada fallbacków**
+
+`getTokenOverview()` miała "backup plan" - jeśli główny endpoint nie odpowiedział, próbowała 3 inne endpointy jako fallback:
+```
+getTokenOverview() → 403 (brak kredytów)
+  ↓ fallback
+/tgm/token-recent-flows-summary → 403
+  ↓ fallback
+/tgm/dex-trades → 403
+  ↓ fallback
+/tgm/holders → 403 (i to za 5 kredytów!)
+```
+
+Jeden "sprawdź pogodę" = 4 telefony. A potem `getTokenFlowSignals()` dzwoniła do tych SAMYCH endpointów osobno. Podwójna robota.
+
+**Warstwa 3: Porażki nie były cache'owane**
+
+Komentarz w kodzie mówił `// Removed: Do not cache failures`. Logika była taka: "jak się nie udało, może za chwilę się uda". Problem: gdy API zwraca 403 (brak kredytów), "za chwilę" nic się nie zmieni. Ale bot tego nie wiedział i próbował co 60 sekund.
+
+```
+Cykl 1: getHolders() → 403 → return [] (nie cache'uj!)
+Cykl 2: getHolders() → 403 → return [] (nie cache'uj!)
+Cykl 3: getHolders() → 403 → return [] (nie cache'uj!)
+...tak w nieskończoność, 5 kredytów za każdą próbę
+```
+
+**Warstwa 4: Circuit breaker za miękki**
+
+Istniał circuit breaker (wyłącznik), ale resetował się co 60 sekund (`cooldownMs = 60_000`). Wyobraź sobie bezpiecznik, który po wybiciu sam się naprawia po minucie. Prąd dalej leci, bezpiecznik dalej wybija, w kółko.
+
+**Warstwa 5: Osobny moduł bez ochrony**
+
+`nansen_scoring.ts` - oddzielny plik, oddzielny klient HTTP - robił własne zapytania do `/perp-screener` bez jakiejkolwiek ochrony na porażkę. Jak tajne drugie konto w banku, o którym nikt nie wiedział.
+
+### Rozwiązanie: Pięć warstw obrony
+
+Zamiast jednego fixa, zbudowaliśmy **warstwowy system ochrony** - jak zabezpieczenia w elektrowni atomowej:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  WARSTWA 5: Global 403 Kill Switch (nowa)                    │
+│  "5 porażek 403 z rzędu? WYŁĄCZ WSZYSTKO na 30 min"        │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 4: Guard Result Cache (nowa, 5 min)                 │
+│  "Wynik getGenericTokenGuard() jest ważny 5 minut"          │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 3: Flow Signals Cache (nowa, 10 min)                │
+│  "Połączony wynik 4 endpointów cache'owany jako pakiet"     │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 2: Failure Caching (naprawiona)                     │
+│  "Jak endpoint zwraca 403, cache'uj porażkę też"            │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 1: Individual Endpoint Caches (istniejące)          │
+│  "getHolders: 30min, getFlowIntelligence: 15min, etc."      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Plus dodatkowe fixy:
+- **Usunięcie kaskady fallbacków** z `getTokenOverview` i `getSmartMoneyNetflows`
+- **Cache na `getTokenOverview`** (jedyny endpoint, który w ogóle nie miał cache'a!)
+- **Failure cache w `nansen_scoring.ts`** (1h TTL)
+
+### Efekt
+
+```
+PRZED:
+- ~2,000 kredytów / godzinę
+- 50K miesięcznego limitu znikało w ~1 dzień
+- Bot walił w martwe API w kółko
+
+PO:
+- ~100 kredytów / godzinę (95% redukcja)
+- 50K limitu starcza na ~20 dni
+- Gdy API padnie, bot przestaje pytać na 30 min
+```
+
+### Lekcja #10: Defense in Depth (Obrona w głąb)
+
+To jest fundamentalna zasada security, ale sprawdza się wszędzie:
+
+**Nigdy nie polegaj na jednej warstwie obrony.**
+
+Gdybyśmy dodali TYLKO kill switch, cache'e dalej marnowałyby kredyty w normalnej pracy. Gdybyśmy dodali TYLKO cache'e, 403-y dalej biłyby w API co minutę po resecie circuit breakera. Każda warstwa łata lukę, którą inna warstwa pozostawia.
+
+Analogia: dom ma zamek w drzwiach (cache), alarm (circuit breaker), i monitoring (kill switch). Sam zamek nie wystarczy, bo włamywacz może wyważyć drzwi. Sam alarm nie wystarczy, bo może mieć opóźnienie. Razem tworzą system, w którym każda warstwa chroni przed scenariuszem, w którym inna zawodzi.
+
+### Lekcja #11: Cache Failures, Not Just Successes
+
+To jeden z najczęstszych błędów w integracji z API. Developerzy myślą: "Cache'uj sukces, żeby nie pytać ponownie. Ale nie cache'uj porażki - może za chwilę się uda."
+
+Problem: jest wielka różnica między **transient failure** (sieć migotała, serwer był chwilowo zajęty) a **persistent failure** (brak kredytów, zły API key, endpoint nie istnieje).
+
+```
+TRANSIENT (429 Rate Limit):   → Poczekaj 5 sekund, spróbuj ponownie
+PERSISTENT (403 Forbidden):    → Nie próbuj ponownie przez X minut
+```
+
+Nasza stara logika traktowała wszystkie porażki jak transient - "spróbuj za minutę". Nowa logika rozróżnia: 403 to signal "przestań pytać", nie "spróbuj ponownie".
+
+### Lekcja #12: Redundancja to nie zawsze dobrze
+
+Fallback endpoints w `getTokenOverview` brzmiały jak dobry pomysł: "Jeśli A nie odpowie, spróbuj B, C, D." Problem: gdy przyczyną jest 403 (brak kredytów), ŻADEN endpoint nie odpowie. Fallbacki tylko mnożą liczbę nieudanych prób - i każda kosztuje kredyty.
+
+Zasada: **Fallbacki mają sens przy losowych awariach, nie przy systemowych problemach.** Jeśli cały serwis jest down (brak kredytów), próbowanie innych endpointów tego samego serwisu to definicja szaleństwa.
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
