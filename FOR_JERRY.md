@@ -1193,5 +1193,150 @@ W naszym fixie zamieniliśmy komentarz `// Fall through to normal analysis below
 
 ---
 
+## Bug #7: "Trzy duchy w maszynie" (02.02.2026)
+
+### Problem: Trzy niezależne błędy, jedna strata
+
+Podczas debugowania HYPE (Bug #6) odkryliśmy, że problem nie był jeden - były **trzy**, działające razem jak nieszczęśliwy splot okoliczności. Jak w katastrofie lotniczej - nigdy nie jest to jeden błąd, zawsze łańcuch.
+
+### Duch #1: Stary plik w złym miejscu
+
+```
+~/hyperliquid-mm-bot-complete/smart_money_data.json   ← 22 DNI STARY (11 stycznia!)
+/tmp/smart_money_data.json                             ← aktualny (2 lutego)
+```
+
+`dynamic_config.ts` szuka danych SM w kilku lokalizacjach, po kolei:
+1. `options.dataPath` (nie ustawione)
+2. `runtime/smart_money_data.json` (nie istnieje)
+3. `smart_money_data.json` (CWD) ← **TEN PLIK!**
+4. `/tmp/smart_money_data.json`
+
+Bierze **pierwszy znaleziony**. Stary plik w katalogu roboczym miał HYPE ratio 3.50x (ze stycznia, gdy wieloryby shortowały mocno). Aktualny w `/tmp/` miał 1.04x. Bot ładował stare dane i shortował HYPE na podstawie danych sprzed 22 dni.
+
+**Fix:** Usunięcie starego pliku z CWD. Teraz jedynym źródłem jest `/tmp/smart_money_data.json`.
+
+### Duch #2: `npm start` ignoruje skompilowany kod
+
+```json
+// package.json
+"start": "TS_NODE_TRANSPILE_ONLY=1 node --loader ts-node/esm src/mm_hl.ts"
+```
+
+Bot uruchamiany jest przez `ts-node` - czyta **bezpośrednio pliki `.ts`**, nie skompilowane `.js` z `dist/`. Cały czas deployowaliśmy fix przez `rsync dist/ → serwer`, a bot czytał stary `src/`. Jak wysyłanie nowej wersji mapy do garnizonu, ale żołnierze nadal używają starej bo ktoś zapomniał zabrać ją ze stołu.
+
+**Fix:** Deploy przez `rsync src/*.ts → serwer` zamiast `dist/*.js`.
+
+### Duch #3: ENA na ślepo
+
+```
+☢️ [GENERALS_OVERRIDE] ENA: WYMUSZONY FOLLOW_SM_SHORT (ratio: ?x >= 2x)
+```
+
+ENA jest w `SHORT_ONLY_TOKENS`, ale `whale_tracker.py` nie miał ENA w `TRACKED_COINS`. Zero danych SM. Gdy `cachedAnalysis.get('ENA')` zwraca `undefined`:
+
+```typescript
+const preAnalysis = cachedAnalysis.get(token)  // undefined
+if (preAnalysis && preAnalysis.ratio < GENERALS_MIN_SHORT_RATIO) {
+  // undefined && ... = false → SKIP
+} else {
+  // → FORCE SHORT z ratio "?x"
+}
+```
+
+Bot shortował ENA **bez żadnych danych o pozycjach wielorybów**. Działało na zasadzie "token jest na liście SHORT → shortuj", bez weryfikacji czy SM faktycznie shortują.
+
+**Fix:** Dodanie `"ENA"` do `TRACKED_COINS` w `whale_tracker.py`. Natychmiast pojawiły się dane: ratio 24.29x ($5.85M shorts vs $240K longs). Silny short potwierdzony danymi.
+
+### Jak te trzy duchy współpracowały
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  RESTART BOTA                                               │
+│                                                              │
+│  1. dynamic_config.ts czyta CWD/smart_money_data.json       │
+│     → HYPE ratio 3.50x (stare dane z 11.01!)               │
+│     → cachedAnalysis.set('HYPE', {ratio: 3.50})             │
+│                                                              │
+│  2. GENERALS_OVERRIDE: ratio 3.50x >= 2.0x                  │
+│     → FORCE SHORT! (na starych danych)                      │
+│                                                              │
+│  3. loadAndAnalyzeAllTokens() czyta /tmp/...                │
+│     → HYPE ratio 1.04x (aktualne)                           │
+│     → cachedAnalysis.set('HYPE', {ratio: 1.04})             │
+│                                                              │
+│  4. GENERALS_OVERRIDE: ratio 1.04x < 2.0x                   │
+│     → SKIP! Fall through to PURE_MM                         │
+│     → PURE_MM forces allowLongs=true (Bug #6)               │
+│     → Grid generuje BUY ordery                              │
+│     → Short zamykany na minus                                │
+│                                                              │
+│  5. Deploy fix (dist/*.js) → bot nadal czyta src/*.ts       │
+│     → Fix nie działa!                                        │
+│                                                              │
+│  6. ENA shortowana bez danych → ratio "?x"                  │
+│     → Brak weryfikacji SM pozycji                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Gdyby **którykolwiek** z trzech duchów nie istniał, strata byłaby mniejsza:
+- Bez starego pliku → ratio od razu 1.04x, DEFENSIVE mode od startu
+- Bez ts-node problemu → fix zadziałałby od pierwszego deploya
+- Z danymi ENA → świadoma decyzja zamiast ślepego shortowania
+
+### Lekcja #17: "Data Provenance" - Skąd pochodzą Twoje dane?
+
+Trzy pytania które powinieneś zadać zanim zaufasz jakimkolwiek danym w systemie:
+
+1. **Skąd?** - Który plik/API/endpoint dostarczył te dane?
+2. **Kiedy?** - Jak stare są? Czy są fresh czy stale?
+3. **Czy jest backup?** - Jeśli główne źródło padnie, skąd biorę dane?
+
+Nasz bot nie zadawał tych pytań. Czytał "pierwszy plik który znalazł" bez sprawdzania jego daty. Jak jedzenie z lodówki bez patrzenia na datę ważności - może być OK, może być food poisoning.
+
+**Zasada:** Każdy data pipeline powinien logować: **"Załadowałem dane z X, timestamp Y, Z rekordów"**. Jeśli nie wiesz skąd dane przyszły, nie wiesz czy im ufać.
+
+### Lekcja #18: "Verify Your Deploy Pipeline"
+
+Nasz deploy wyglądał tak:
+```
+1. Edytuj .ts na laptopie
+2. npm run build → dist/*.js
+3. rsync dist/ → serwer
+4. pm2 restart
+```
+
+Problem: krok 3 był bez sensu, bo bot uruchamia się przez `ts-node src/mm_hl.ts`, nie `node dist/mm_hl.js`. Nigdy tego nie sprawdziliśmy.
+
+**Zasada:** Po każdym deploy sprawdź czy zmiana jest aktywna. Nie przez "nie ma błędów w logach" (brak błędu ≠ zmiana działa). Sprawdź przez **pozytywny dowód**: nowy log message, zmienione zachowanie, test smoke.
+
+W naszym przypadku nowy log `🛡️ DEFENSIVE` zamiast starego `⚠️ SKIP` był takim dowodem. Gdybyśmy sprawdzili od razu po pierwszym deploy, zaoszczędzilibyśmy 30 minut debugowania.
+
+### Lekcja #19: "Phantom Dependencies" - Rzeczy o których zapomniałeś
+
+Bot zależał od 3 rzeczy o których nikt nie pamiętał:
+1. Pliku `smart_money_data.json` w CWD (nikt go tam celowo nie zostawił)
+2. Faktu że `npm start` używa `ts-node` a nie `dist/` (ustawione dawno, zapomniane)
+3. Braku ENA w `whale_tracker.py` (dodane do bota, zapomniane w trackerze)
+
+To są **phantom dependencies** - zależności których nie ma w żadnej dokumentacji, nie widać ich w kodzie, odkrywasz je dopiero gdy coś się psuje.
+
+**Zasada:** Gdy dodajesz token do bota, przejdź CAŁĄ ścieżkę danych od źródła do egzekucji:
+```
+whale_tracker.py → TRACKED_COINS ← czy token jest tu?
+     ↓
+/tmp/smart_money_data.json ← czy dane się generują?
+     ↓
+dynamic_config.ts → loadSmartMoneyFile() ← który plik czyta?
+     ↓
+SmAutoDetector → cachedAnalysis ← czy ratio jest realne?
+     ↓
+GENERALS_OVERRIDE → decyzja ← czy oparta na danych?
+```
+
+Jedna pominięta stacja = ślepy trade.
+
+---
+
 *Ostatnia aktualizacja: 2026-02-02*
 *Autor: Claude (z pomocą Jerry'ego)*
