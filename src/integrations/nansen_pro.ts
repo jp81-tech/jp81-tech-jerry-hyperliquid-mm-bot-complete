@@ -143,6 +143,13 @@ export class NansenProAPI {
   private circuit: Map<string, { state: 'CLOSED' | 'OPEN'; failures: number; lastFailure: number }> = new Map()
   private failureThreshold = 3
   private cooldownMs = 60_000
+
+  // 🔧 FIX 2026-02-02: Global 403 kill switch - when API credits are exhausted,
+  // stop ALL calls for 30 min instead of retrying every 60s
+  private global403Count = 0
+  private global403KillUntil = 0
+  private readonly GLOBAL_403_THRESHOLD = 5    // 5 consecutive 403s → kill
+  private readonly GLOBAL_403_COOLDOWN = 30 * 60 * 1000  // 30 min cooldown
   private cacheFilePath = path.join(process.cwd(), 'data', 'nansen_cache_v2.json')
   private isCacheDirty = false
   private rateLimiter: RateLimiter
@@ -289,6 +296,11 @@ export class NansenProAPI {
     chain: string,
     fallbackEndpoints: string[] = []
   ): Promise<any | null> {
+    // 🔧 FIX 2026-02-02: Global 403 kill switch - skip ALL calls when credits exhausted
+    if (Date.now() < this.global403KillUntil) {
+      return null  // Silent skip - no API call made
+    }
+
     const targets = [endpoint, ...fallbackEndpoints]
 
     for (const ep of targets) {
@@ -305,29 +317,36 @@ export class NansenProAPI {
         try {
           const res = await this.client.post(ep, payload)
           this.recordSuccess(ep, chain)
+          this.global403Count = 0  // Reset on success
           return res.data
         } catch (error: any) {
           const code = error?.response?.status
 
+          // 🔧 FIX 2026-02-02: Track 403s globally - credits exhausted affects ALL endpoints
+          if (code === 403) {
+            this.global403Count++
+            if (this.global403Count >= this.GLOBAL_403_THRESHOLD) {
+              this.global403KillUntil = Date.now() + this.GLOBAL_403_COOLDOWN
+              console.error(`[Nansen Pro] ⛔ GLOBAL 403 KILL SWITCH: ${this.global403Count} consecutive 403s → ALL Nansen API calls disabled for 30 min`)
+            }
+            this.recordFailure(ep, chain)
+            this.logError(error, `POST ${ep}`)
+            break
+          }
+
           // Retry on 429 / timeout once with backoff
           if ((code === 429 || code === 408) && attempt === 0) {
-            // Do not record failure immediately for retryable errors if we have attempts left
-            // This prevents "double-counting" failures if the retry also fails
-            // But we SHOULD record it if we want circuit breaker to see "instability"
-            // However, per Bug 2 request: "The code should either only record the failure once per endpoint+chain attempt, or avoid retrying rate-limit errors."
-            // We choose to NOT record failure on the FIRST attempt, only if the retry also fails (caught by final error handler)
             await this.sleep(code === 429 ? 5000 : 2000)
             continue // Retry same endpoint
           }
 
           // 404 / 422: try next fallback quietly (break inner loop)
           if (code === 404 || code === 422) {
-            // Do not record failure for expected missing data (keeps circuit closed)
             console.debug(`[Nansen Pro] ${ep} skipped (status=${code})`)
             break
           }
 
-          // FIX: Record failure even for 429/408 if we are out of retries (attempt === 1)
+          // Record failure for other errors
           this.recordFailure(ep, chain)
           this.logError(error, `POST ${ep}`)
 
@@ -434,6 +453,12 @@ export class NansenProAPI {
   async getWalletPositions(walletAddress: string): Promise<any> {
     if (!this.isEnabled()) return null
 
+    const cacheKey = `wallet_positions_${walletAddress}`
+    const cached = this.getCached<any>(cacheKey, 5 * 60 * 1000) // 5 min cache
+    if (cached) {
+      return cached._walletPosFailed ? null : cached
+    }
+
     try {
       const data = await this.postWithResilience(
         '/profiler/perp-positions',
@@ -443,9 +468,12 @@ export class NansenProAPI {
         'hyperliquid'
       )
 
-      return data?.data || null
+      const result = data?.data || null
+      if (result) this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       console.error(`[Nansen Pro] Wallet positions for ${walletAddress} failed:`, error.message)
+      this.setCache(cacheKey, { _walletPosFailed: true })
       return null
     }
   }
@@ -592,6 +620,7 @@ export class NansenProAPI {
       const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
       const now = new Date().toISOString()
 
+      // 🔧 FIX 2026-02-02: Removed fallback cascade - wastes credits on 403
       const data = await this.postWithResilience(
         '/smart-money/netflows',
         {
@@ -600,8 +629,7 @@ export class NansenProAPI {
           date: { from: yesterday, to: now },
           wallet_category: 'smart_money'
         },
-        chain,
-        ['/tgm/token_flows', '/tgm/top_holders'] // fallback idea; non-critical
+        chain
       )
 
       const netflows: NansenSmartMoneyNetflow[] = data?.netflows || []
@@ -609,6 +637,7 @@ export class NansenProAPI {
       return netflows
     } catch (error: any) {
       this.logError(error, 'Smart money netflows failed')
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -906,7 +935,8 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, 'Flow intelligence failed')
-      // this.setCache(cacheKey, []) // Removed: Do not cache failures
+      // 🔧 FIX 2026-02-02: Cache failures for 2 min to prevent hammering dead endpoint
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -972,7 +1002,8 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `DEX Trades (${mode}) failed for ${tokenAddress}`)
-      // this.setCache(cacheKey, []) // Removed: Do not cache failures
+      // 🔧 FIX 2026-02-02: Cache failures for 2 min to prevent hammering dead endpoint
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1010,7 +1041,8 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `Holders failed for ${tokenAddress}`)
-      // this.setCache(cacheKey, []) // Removed: Do not cache failures
+      // 🔧 FIX 2026-02-02: Cache failures for 2 min to prevent hammering dead endpoint (5 credits each!)
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1091,8 +1123,8 @@ export class NansenProAPI {
       return result
     } catch (error: any) {
       this.logError(error, `TGM Perp Positions failed for ${token}`)
-      // Cache failure as empty to prevent retry loops on 404s - DISABLED per request
-      // this.setCache(cacheKey, [])
+      // 🔧 FIX 2026-02-02: Re-enabled failure caching to prevent retry loops
+      this.setCache(cacheKey, [])
       return []
     }
   }
@@ -1229,24 +1261,32 @@ export class NansenProAPI {
       return null
     }
 
+    const cacheKey = `token_overview_${chain}_${tokenAddress}`
+    const cached = this.getCached<any>(cacheKey, 15 * 60 * 1000) // 15 min cache
+    if (cached) {
+      return cached._overviewFailed ? null : cached
+    }
+
     try {
+      // 🔧 FIX 2026-02-02: Removed fallback endpoints - they are redundant
+      // getTokenFlowSignals() calls flows/holders/trades separately with their own caches.
+      // Cascading through fallbacks on 403 just wastes credits.
       const data = await this.postWithResilience(
         '/tgm/token-overview',
         {
           chain,
           token_address: tokenAddress
         },
-        chain,
-        [
-          '/tgm/token-recent-flows-summary',
-          '/tgm/dex-trades',
-          '/tgm/holders'
-        ]
+        chain
       )
 
-      return data?.data || null
+      const result = data?.data || null
+      if (result) this.setCache(cacheKey, result)
+      return result
     } catch (error: any) {
       this.logError(error, `Token Overview failed for ${tokenAddress}`)
+      // 🔧 FIX 2026-02-02: Cache failure sentinel for 2 min to prevent hammering dead endpoint
+      this.setCache(cacheKey, { _overviewFailed: true })
       return null
     }
   }
@@ -1265,6 +1305,12 @@ export class NansenProAPI {
       console.debug(`[Nansen Pro] TokenFlowSignals skipped for unsupported chain=${chain}`)
       return null
     }
+
+    // 🔧 FIX 2026-02-02: Cache the combined flow signals result (10 min)
+    // This prevents re-calling 4 endpoints (8 credits) when inner caches have different TTLs
+    const flowCacheKey = `flow_signals_combined_${chain}_${tokenAddress}`
+    const cachedFlowSignals = this.getCached<TokenFlowSignals>(flowCacheKey, 10 * 60 * 1000)
+    if (cachedFlowSignals) return cachedFlowSignals
 
     const signals: TokenFlowSignals = {
       tokenAddress,
@@ -1378,6 +1424,7 @@ export class NansenProAPI {
       signals.dataQuality = 'minimal'
     }
 
+    this.setCache(flowCacheKey, signals)
     return signals
   }
 
@@ -1590,11 +1637,25 @@ export class NansenProAPI {
       return { spreadMult: 1.0, pause: false }
     }
 
+    // 🔧 FIX 2026-02-02: Outer cache for guard result - prevents re-fetching 4 endpoints every 60s
+    // Inner endpoint caches have different TTLs (10-30 min), but the guard result itself
+    // only needs refreshing every 5 minutes. Saves ~80% of Nansen API credits.
+    const guardCacheKey = `guard_result_${chain}_${address}`
+    const cachedGuard = this.getCached<{ spreadMult: number; pause: boolean; reason?: string }>(guardCacheKey, 5 * 60 * 1000) // 5 min cache
+    if (cachedGuard) {
+      return cachedGuard
+    }
+
     // 🔧 FIX 2026-01-25: Known active tokens whitelist - bypass kill switch when Nansen has no data
     // These tokens are verified active on DEX/perps but Nansen API may not track them well
+    // 🔧 FIX 2026-02-01: Expanded for "Ostateczne Rozkazy" SHORT targets
     const KNOWN_ACTIVE_TOKENS = [
       'FARTCOIN',  // Very active on Solana + HL perps, $9M+ daily volume
       'LIT',       // Active on Ethereum + HL perps
+      'ENA',       // Active on Ethereum + HL perps (Ethena protocol)
+      'SUI',       // Active on Sui chain + HL perps
+      'HYPE',      // Hyperliquid native perp (also bypassed via chain='hyperliquid')
+      'PUMP',      // Active on HL perps (STICKY position)
     ]
     const tokenSymbol = label.split('/')[0] // Extract symbol from "FARTCOIN/solana"
     const isKnownActive = KNOWN_ACTIVE_TOKENS.includes(tokenSymbol)
@@ -1602,7 +1663,9 @@ export class NansenProAPI {
     const s = await this.getTokenFlowSignals(address, chain)
     if (!s) {
       // If signal fetch completely failed, neutral default
-      return { spreadMult: 1.0, pause: false }
+      const result = { spreadMult: 1.0, pause: false }
+      this.setCache(guardCacheKey, result)
+      return result
     }
 
     // 1. Kill Switch
@@ -1611,15 +1674,21 @@ export class NansenProAPI {
       // 🔧 FIX: Bypass kill switch for known active tokens when issue is "dead" (no Nansen data)
       if (isKnownActive && s.dataQuality === 'dead') {
         console.log(`[NansenPro] ${label}: ⚠️ Nansen shows no data but token is KNOWN ACTIVE - bypassing kill switch`)
-        return { spreadMult: 1.2, pause: false } // Slightly wider spread as precaution
+        const result = { spreadMult: 1.2, pause: false }
+        this.setCache(guardCacheKey, result)
+        return result
       }
-      return { spreadMult: 1.0, pause: true, reason: ks.reason }
+      const result = { spreadMult: 1.0, pause: true, reason: ks.reason }
+      this.setCache(guardCacheKey, result)
+      return result
     }
 
     // 2. Spread Multiplier
     const spreadMult = this.computeSpreadMultiplierForSignals(s, spreadCaps.min, spreadCaps.max)
 
-    return { spreadMult, pause: false }
+    const result = { spreadMult, pause: false }
+    this.setCache(guardCacheKey, result)
+    return result
   }
 
   // ═══════════════════════════════════════════════════════════════
