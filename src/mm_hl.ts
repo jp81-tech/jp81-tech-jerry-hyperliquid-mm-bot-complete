@@ -3873,8 +3873,8 @@ class HyperliquidMMBot {
     // Replaces Python whale_tracker.py JSON file reading with real-time signals
     // ════════════════════════════════════════════════════════════════════════
     try {
-      await alphaEngineIntegration.start(30_000) // 30s update interval
-      this.notifier.info('🚀 AlphaExtractionEngine started (30s interval)')
+      await alphaEngineIntegration.start(60_000) // 60s interval (reduced from 30s to avoid 429 rate limits)
+      this.notifier.info('🚀 AlphaExtractionEngine started (60s interval)')
 
       // Subscribe to immediate signals for fast reaction
       alphaEngineIntegration.on('immediate_signal', (command: TradingCommand) => {
@@ -6456,14 +6456,22 @@ class HyperliquidMMBot {
           ? (midPrice - entryPx) / entryPx
           : (entryPx - midPrice) / entryPx
 
-        // 🐍 Anaconda: dynamic stop price based on PnL phase
+        // 🛡️ Structure data: 4h support/resistance (preferred) with 24h high/low fallback
+        const mktSnapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const structureAnalysis = this.marketVision?.getPairAnalysis(pair)
+        const recentHigh = structureAnalysis?.resistance4h || mktSnapshot?.momentum?.high24h
+        const recentLow = structureAnalysis?.support4h || mktSnapshot?.momentum?.low24h
+
+        // 🐍 Anaconda + Structure: dynamic stop price based on PnL phase + key levels
         const visionStopPrice = TokenRiskCalculator.calculateVisionStopLoss(
           posSide === 'long' ? 'LONG' : 'SHORT',
           {
             symbol: pair,
             volatility: visionRisk.volatility,
             confidence: 50,
-            current_price: midPrice
+            current_price: midPrice,
+            recent_high: recentHigh,
+            recent_low: recentLow
           },
           entryPx,
           pnlPct

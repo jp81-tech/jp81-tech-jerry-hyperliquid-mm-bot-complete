@@ -726,7 +726,7 @@ export class NansenFeed extends EventEmitter {
     const payload = { type: 'clearinghouseState', user: address }
 
     try {
-      const response = await axios.post(HL_API_URL, payload, { timeout: 10000 })
+      const response = await axios.post(HL_API_URL, payload, { timeout: 5000 })
       const data = response.data
 
       const positions: Position[] = []
@@ -766,8 +766,9 @@ export class NansenFeed extends EventEmitter {
     const addresses = Object.keys(WHALES)
     const results = new Map<string, AccountState>()
 
-    // Fetch in batches of 10 to avoid rate limiting
-    const batchSize = 10
+    // Fetch in small batches with generous delays to avoid 429s
+    // 43 addresses ÷ 3/batch = 15 batches × 500ms = ~7.5s spread (vs old: 43 in 500ms)
+    const batchSize = 3
     for (let i = 0; i < addresses.length; i += batchSize) {
       const batch = addresses.slice(i, i + batchSize)
       const promises = batch.map(async (addr) => {
@@ -780,9 +781,9 @@ export class NansenFeed extends EventEmitter {
         results.set(address, state)
       }
 
-      // Small delay between batches
+      // 800ms between batches — leaves room for trading API calls
       if (i + batchSize < addresses.length) {
-        await new Promise(resolve => setTimeout(resolve, 100))
+        await new Promise(resolve => setTimeout(resolve, 800))
       }
     }
 
