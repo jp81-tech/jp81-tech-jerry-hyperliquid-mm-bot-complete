@@ -1059,4 +1059,4 @@ export const alertParser = new NansenAlertParserV2();
 // Additional exports:
 // ═══════════════════════════════════════════════════════════════
 export { MM_ALERT_THRESHOLDS };
-export type { MMSignalState };
+// MMSignalState already exported via 'export interface' above

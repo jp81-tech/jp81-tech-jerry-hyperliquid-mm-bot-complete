@@ -4,7 +4,7 @@
  */
 
 import 'dotenv/config'
-import { getNansenProAPI } from './src/integrations/nansen_pro.js'
+import { getNansenProAPI } from './nansen_pro.js'
 
 async function testNansenAPI() {
   console.log('🧪 NANSEN PRO API TESTER\n')

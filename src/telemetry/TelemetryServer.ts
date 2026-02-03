@@ -162,23 +162,25 @@ export class TelemetryServer {
       return
     }
 
-    this.server = http.createServer((req, res) => {
+    const server = http.createServer((req, res) => {
       this.handleRequest(req, res)
     })
 
-    this.server.listen(port, () => {
-      this.logger.info(`[TelemetryServer] ✅ Listening on port ${port}`)
-    })
-
-    this.server.on('error', (err: NodeJS.ErrnoException) => {
+    // Register error handler BEFORE listen to avoid unhandled error events
+    server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         this.logger.warn(`[TelemetryServer] Port ${port} in use, trying ${port + 1}...`)
-        this.server?.close()
+        server.close()
         this.server = null
         this.tryPort(port + 1, attempts + 1)
       } else {
         this.logger.error(`[TelemetryServer] Error: ${err.message}`)
       }
+    })
+
+    server.listen(port, () => {
+      this.server = server
+      this.logger.info(`[TelemetryServer] ✅ Listening on port ${port}`)
     })
   }
 

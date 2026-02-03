@@ -306,6 +306,7 @@ export class SafetyFilter {
         alertLevel: 'SAFE',
         spreadMultiplier: 1.0,
         inventoryMultiplier: 1.0,
+        bidAggressiveness: 0,
         message: 'No summary'
       };
     }

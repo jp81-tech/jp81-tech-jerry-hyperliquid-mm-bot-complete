@@ -73,7 +73,8 @@ export class GridManager {
     inventorySkew: number = 0, // Combined Skew (Position + Vision)
     permissions: { allowLongs: boolean, allowShorts: boolean, reason?: string } = { allowLongs: true, allowShorts: true },
     actualSkew: number = 0, // Real Inventory Skew (without Vision)
-    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 }
+    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 },
+    _sizeMultipliers?: { bid: number, ask: number } // Size multipliers from dynamic config (reserved for future use)
   ): GridOrder[] {
     if (!this.config.enableMultiLayer) {
       return [] // Fallback to legacy single-layer
