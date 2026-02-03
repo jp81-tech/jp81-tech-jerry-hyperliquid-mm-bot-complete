@@ -6599,6 +6599,22 @@ class HyperliquidMMBot {
       }
     }
 
+    // UTILIZATION CAP: Limit total notional so margin never exceeds MAX_UTIL% of equity
+    const MAX_UTILIZATION = Number(process.env.MAX_UTILIZATION_PCT || 0.80)
+    if (this.positionRiskManager) {
+      const utilEquity = this.positionRiskManager.getStatus().equity
+      const leverage = 2  // current leverage setting
+      const maxTotalNotional = utilEquity * MAX_UTILIZATION * leverage
+      const maxNotionalPerPair = maxTotalNotional / MAX_ACTIVE_PAIRS
+      if (capitalPerPair > maxNotionalPerPair) {
+        console.log(
+          `[UTIL CAP] ${pair}: Cap $${capitalPerPair.toFixed(0)} -> $${maxNotionalPerPair.toFixed(0)} ` +
+          `(equity=$${utilEquity.toFixed(0)} × ${(MAX_UTILIZATION * 100)}% × ${leverage}x / ${MAX_ACTIVE_PAIRS} pairs)`
+        )
+        capitalPerPair = maxNotionalPerPair
+      }
+    }
+
     let inventorySkew = 0
     if (position) {
       const positionValueUsd = Math.abs(position.size) * midPrice
