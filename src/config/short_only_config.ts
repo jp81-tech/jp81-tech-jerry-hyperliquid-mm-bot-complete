@@ -9,19 +9,12 @@
  * Used by: GENERALS_FORCE_SHORT, HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
  *          FORCE_SHORT_ONLY, MM_TOKENS, KNOWN_ACTIVE_TOKENS
  */
-export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN']
+export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'PUMP']
 
 /**
- * Tokens protected by STICKY_PAIRS (existing positions we protect).
- * These get HOLD_FOR_TP treatment but are managed separately
- * (not in GENERALS_FORCE_SHORT - won't aggressively open new shorts).
+ * All tokens that get HOLD_FOR_TP treatment.
  */
-export const STICKY_SHORT_TOKENS: string[] = ['PUMP']
-
-/**
- * All tokens that get HOLD_FOR_TP treatment (SHORT_ONLY + STICKY).
- */
-export const ALL_HOLD_FOR_TP_TOKENS: string[] = [...SHORT_ONLY_TOKENS, ...STICKY_SHORT_TOKENS]
+export const ALL_HOLD_FOR_TP_TOKENS: string[] = SHORT_ONLY_TOKENS
 
 /**
  * Max inventory per pair in USD for GENERALS_FORCE_SHORT.

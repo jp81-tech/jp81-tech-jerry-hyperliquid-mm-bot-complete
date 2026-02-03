@@ -1011,4 +1011,4 @@ export class AlphaExtractionEngine extends EventEmitter {
 export const alphaEngine = new AlphaExtractionEngine()
 
 // Export classes for testing
-export { NansenFeed } from './data/NansenFeed'
+export { NansenFeed } from './data/NansenFeed.js'
