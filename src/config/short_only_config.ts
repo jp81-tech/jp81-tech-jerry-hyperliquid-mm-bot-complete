@@ -5,8 +5,8 @@
 // ============================================================
 
 /**
- * All tokens that are in SHORT-ONLY mode following Generals.
- * Used by: GENERALS_FORCE_SHORT, HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
+ * All tokens that are in SHORT-ONLY mode following SM.
+ * Used by: HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
  *          FORCE_SHORT_ONLY, MM_TOKENS, KNOWN_ACTIVE_TOKENS
  */
 export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'PUMP']
@@ -15,20 +15,6 @@ export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'PUMP']
  * All tokens that get HOLD_FOR_TP treatment.
  */
 export const ALL_HOLD_FOR_TP_TOKENS: string[] = SHORT_ONLY_TOKENS
-
-/**
- * Max inventory per pair in USD for GENERALS_FORCE_SHORT.
- * With $10K equity across 6 pairs (5 manual + PUMP sticky):
- * ~$5K per pair at 2x leverage
- */
-export const GENERALS_MAX_INVENTORY_USD = 5000
-
-/**
- * Minimum short/long ratio required for GENERALS_OVERRIDE to force SHORT.
- * If SM ratio is below this (e.g. HYPE at 1.06x), skip the force override
- * and let normal analysis logic decide. Prevents shorting near-neutral tokens.
- */
-export const GENERALS_MIN_SHORT_RATIO = 2.0
 
 // ============================================================
 // RATIO MONITORING / ALERTS
@@ -56,7 +42,7 @@ export const RATIO_ALERTS: RatioAlert[] = [
 export const RATIO_ALERT_COOLDOWN_MS = 5 * 60 * 1000  // 5 minutes
 
 /**
- * Helper: check if a token is in SHORT_ONLY mode (GENERALS_FORCE_SHORT)
+ * Helper: check if a token is in SHORT_ONLY mode
  */
 export function isShortOnlyToken(token: string): boolean {
   return SHORT_ONLY_TOKENS.includes(token.toUpperCase())

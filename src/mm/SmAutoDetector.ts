@@ -16,7 +16,7 @@ import { StrategyPriority } from './dynamic_config.js'
 import { SignalEngine, TOKEN_CONFIGS } from '../core/strategy/SignalEngine.js'
 
 // Centralized SHORT-ONLY config
-import { SHORT_ONLY_TOKENS, GENERALS_MAX_INVENTORY_USD, GENERALS_MIN_SHORT_RATIO, RATIO_ALERTS, RATIO_ALERT_COOLDOWN_MS } from '../config/short_only_config.js'
+import { RATIO_ALERTS, RATIO_ALERT_COOLDOWN_MS } from '../config/short_only_config.js'
 
 // Re-export for backward compatibility
 export { TOKEN_CONFIGS }
@@ -1076,49 +1076,6 @@ export function getAutoEmergencyOverrideSync(token: string): {
   signalEngineAllowLongs: boolean
   signalEngineAllowShorts: boolean
 } | undefined {
-  // ☢️ GENERALS_OVERRIDE: Armia ($185M equity, $547M pozycji) gra na spadki
-  // Wymuszamy FOLLOW_SM_SHORT dla tych tokenów BEZWARUNKOWO
-  // 🔧 FIX 2026-02-01: Centralized config - SHORT_ONLY_TOKENS
-  const GENERALS_FORCE_SHORT = SHORT_ONLY_TOKENS
-
-  if (GENERALS_FORCE_SHORT.includes(token)) {
-    // CHECK BIAS THRESHOLD - nie shortuj przy neutralnym sygnale
-    const preAnalysis = cachedAnalysis.get(token)
-    if (preAnalysis && preAnalysis.ratio < GENERALS_MIN_SHORT_RATIO) {
-      // 🛡️ DEFENSIVE MODE: Ratio too low for forced SHORT, but PROTECT existing short
-      // Don't force new shorts, but BLOCK LONGS to prevent closing existing short at a loss
-      console.log(`🛡️ [GENERALS_OVERRIDE] ${token}: DEFENSIVE - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (blocking longs to protect existing short, no new shorts forced)`)
-      return {
-        bidEnabled: false,           // BLOCK LONGS - protect existing short
-        askEnabled: true,            // Allow shorts if grid wants
-        bidMultiplier: 0.0,          // Zero bids
-        askMultiplier: 1.0,          // Normal asks (not aggressive)
-        maxInventoryUsd: GENERALS_MAX_INVENTORY_USD,
-        reason: `🛡️ GENERALS_DEFENSIVE - ratio ${preAnalysis.ratio.toFixed(2)}x < ${GENERALS_MIN_SHORT_RATIO}x (protecting short, no forced entry)`,
-        mode: MmMode.FOLLOW_SM_SHORT,  // Keep SHORT mode to prevent PURE_MM override
-        convictionScore: 60,         // Lower conviction - not forcing, just protecting
-        signalEngineOverride: true,  // Override SignalEngine to prevent PURE_MM
-        signalEngineAllowLongs: false,  // CRITICAL: Block longs
-        signalEngineAllowShorts: true
-      }
-    } else {
-      console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT (ratio: ${preAnalysis?.ratio.toFixed(2) ?? '?'}x >= ${GENERALS_MIN_SHORT_RATIO}x)`)
-      return {
-        bidEnabled: false,           // ZAKAZ KUPOWANIA
-        askEnabled: true,            // Zezwól na shorty
-        bidMultiplier: 0.0,          // Zero bidów
-        askMultiplier: 1.5,          // Agresywne aski
-        maxInventoryUsd: GENERALS_MAX_INVENTORY_USD,  // $5K per pair (6 par, $10K equity)
-        reason: `☢️ GENERALS_OVERRIDE - Generał + Wice-Generał shortują (ratio: ${preAnalysis?.ratio.toFixed(2) ?? '?'}x)`,
-        mode: MmMode.FOLLOW_SM_SHORT,
-        convictionScore: 95,         // Wysoka pewność
-        signalEngineOverride: true,  // Nadpisz SignalEngine
-        signalEngineAllowLongs: false,
-        signalEngineAllowShorts: true
-      }
-    }
-  }
-
   const analysis = cachedAnalysis.get(token)
 
   if (!analysis) {

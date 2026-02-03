@@ -12,7 +12,6 @@ export class TelegramAlertBot {
         'BULL TRAP',
         'BULL_TRAP',
         'DEAD CAT',
-        'GENERALS_OVERRIDE',
         'PURE_MM',
         'BidLocked:',
         'AskLocked:',
