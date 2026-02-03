@@ -19,7 +19,7 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, MmMode } from './mm/SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode } from './mm/SmAutoDetector.js'
 import { isShortOnlyToken, isHoldForTpToken, SHORT_ONLY_TOKENS, getBounceFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
@@ -4126,6 +4126,16 @@ class HyperliquidMMBot {
           this.notifier.info(`[INFO] ROTATION_MODE=manual`)
           this.notifier.info(`[INFO] Using MANUAL_ACTIVE_PAIRS=${manualPairs.join(',')}`)
           activePairs = manualPairs
+        } else if (rotationMode === 'sm') {
+          // Auto-select top 3 by SM conviction (from SmAutoDetector cache)
+          const smPairs = getTopSmPairs(3)
+          if (smPairs.length > 0) {
+            activePairs = smPairs
+            this.notifier.info(`[INFO] ROTATION_MODE=sm → Top SM pairs: ${smPairs.join(',')}`)
+          } else {
+            activePairs = this.rotation.getCurrentPairs()
+            this.notifier.warn(`[WARN] SM auto-select: no SM data, fallback to volatility rotation`)
+          }
         } else {
           // Get active pairs from rotation (top by volatility + Nansen)
           activePairs = this.rotation.getCurrentPairs()
