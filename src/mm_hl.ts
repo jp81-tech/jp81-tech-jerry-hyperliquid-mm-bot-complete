@@ -19,7 +19,8 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection } from './mm/SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams } from './mm/SmAutoDetector.js'
+import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
 import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
@@ -4583,9 +4584,16 @@ class HyperliquidMMBot {
         }
 
         if (!this.isDryRun && this.trading instanceof LiveTrading) {
-          const targetLeverage = Number(process.env.LEVERAGE || 1)
+          const fallbackLeverage = Number(process.env.LEVERAGE || 1)
           for (const pair of newPairs) {
-            try { await (this.trading as LiveTrading).setLeverage(pair, targetLeverage) } catch (e) { }
+            const riskParams = getTokenRiskParams(pair)
+            const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+            try {
+              await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
+              if (riskParams) {
+                console.log(`🎯 [DYNAMIC LEV] ${pair}: ${targetLeverage}x (conviction+vol) | Vision SL: ${(riskParams.visionSlPct * 100).toFixed(1)}%`)
+              }
+            } catch (e) { }
           }
         }
 
@@ -6402,6 +6410,50 @@ class HyperliquidMMBot {
         }
       }
     }
+
+    // ============================================================
+    // 🎯 VISION SL: ATR-based dynamic stop loss (all positions)
+    // Runs OUTSIDE the contrarian block — protects SM-aligned positions too.
+    // Priority: manual stopLossPrice (tuning) > Vision SL > PositionProtector (15% hard stop)
+    // ============================================================
+    if (position && Math.abs(position.size) > 0 && position.entryPrice) {
+      const visionRisk = getTokenRiskParams(pair)
+      const hasManualSl = overridesConfig?.stopLossPrice && overridesConfig.stopLossPrice > 0
+
+      if (visionRisk && !hasManualSl) {
+        const entryPx = position.entryPrice
+        const posSide: 'long' | 'short' = position.size > 0 ? 'long' : 'short'
+        const slDistance = entryPx * visionRisk.visionSlPct
+        const visionStopPrice = posSide === 'long'
+          ? entryPx - slDistance
+          : entryPx + slDistance
+
+        const shouldStop = posSide === 'long'
+          ? midPrice <= visionStopPrice
+          : midPrice >= visionStopPrice
+
+        if (shouldStop) {
+          const pnlPct = posSide === 'long'
+            ? ((midPrice - entryPx) / entryPx) * 100
+            : ((entryPx - midPrice) / entryPx) * 100
+
+          this.notifier.error(
+            `🎯 [VISION SL] ${pair} HIT! Price $${midPrice.toFixed(4)} reached ATR stop $${visionStopPrice.toFixed(4)} ` +
+            `(${(visionRisk.visionSlPct * 100).toFixed(1)}% from entry $${entryPx.toFixed(4)}) ` +
+            `| ${posSide.toUpperCase()} | PnL: ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}% | CLOSING...`
+          )
+
+          try {
+            await (this.trading as LiveTrading).closePositionForPair(pair, 'vision_sl')
+            this.notifier.info(`✅ [VISION SL] ${pair} position closed at $${midPrice.toFixed(4)}`)
+            return // Exit after closing
+          } catch (err: any) {
+            this.notifier.error(`❌ [VISION SL FAILED] ${pair}: ${err?.message || err}`)
+          }
+        }
+      }
+    }
+
     capitalPerPair *= capitalMultiplier
     capitalPerPair = Math.max(50, capitalPerPair)
 
@@ -6465,6 +6517,25 @@ class HyperliquidMMBot {
           `FlashCrash:${analysis?.isFlashCrash ? 'YES' : 'no'} | ` +
           `${nearS}${nearR})`
         );
+      }
+    }
+
+    // RISK-BASED POSITION SIZING
+    // Normalize position size so dollar risk is equal across tokens
+    // Formula: maxPos = (equity x riskPct) / visionSlPct
+    const riskParams = getTokenRiskParams(pair)
+    if (riskParams && this.positionRiskManager) {
+      const equity = this.positionRiskManager.getStatus().equity
+      const riskPct = Number(process.env.RISK_PER_TRADE_PCT || 0.05)
+      const riskBasedMax = TokenRiskCalculator.calculateRiskBasedMaxPosition(
+        equity, riskParams.visionSlPct, riskPct
+      )
+      if (capitalPerPair > riskBasedMax) {
+        console.log(
+          `[RISK SIZING] ${pair}: Cap $${capitalPerPair.toFixed(0)} -> $${riskBasedMax.toFixed(0)} ` +
+          `(equity=$${equity.toFixed(0)} x ${(riskPct * 100)}% / ${(riskParams.visionSlPct * 100).toFixed(1)}% SL)`
+        )
+        capitalPerPair = riskBasedMax
       }
     }
 
