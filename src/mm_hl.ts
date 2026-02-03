@@ -3350,6 +3350,9 @@ class HyperliquidMMBot {
   private maxDailyLossUsd: number
   private lastRotationTime: number = 0
 
+  // Bounce Peak Tracker: stores highest price seen during a bounce per pair
+  private bounceHighs: Map<string, { price: number, ts: number }> = new Map()
+
   // Risk Management (Hard Stop Protection)
   private riskManager?: RiskManager
   private currentRiskState?: RiskCheckResult
@@ -3815,12 +3818,15 @@ class HyperliquidMMBot {
       // AUTOMATIC CLEANUP ON STARTUP (optional via SKIP_STARTUP_CLEANUP env var)
       const skipCleanup = process.env.SKIP_STARTUP_CLEANUP === 'true'
       const rotationMode = process.env.ROTATION_MODE ?? 'auto'
-      const preservePositions = process.env.PRESERVE_POSITIONS_ON_START === 'true'
+      // Default: preserve positions on restart (closing is destructive and costly)
+      // Set CLOSE_POSITIONS_ON_START=true to force clean slate
+      const forceClosePositions = process.env.CLOSE_POSITIONS_ON_START === 'true'
+      const preservePositions = process.env.PRESERVE_POSITIONS_ON_START !== 'false' // default: true
 
       if (skipCleanup) {
         this.notifier.info('⏭️  Skipping startup cleanup - keeping existing positions')
       } else {
-        const skipClosePositions = rotationMode === 'manual' || preservePositions
+        const skipClosePositions = (rotationMode === 'manual' || preservePositions) && !forceClosePositions
         this.notifier.info(
           skipClosePositions
             ? '🧹 Startup cleanup: canceling all open orders (preserving positions)...'
@@ -7290,7 +7296,11 @@ class HyperliquidMMBot {
       console.log(`[FARTCOIN GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
     }
 
-    // 🎯 SHORT-ON-BOUNCE: Nie goń dna, shortuj na bounce'u (applies when SM says SHORT)
+    // 🎯 SHORT-ON-BOUNCE v2: Czekaj na SZCZYT bounce, potem shortuj
+    // CHASE:  cena spada mocno → blokuj aski (nie goń dna)
+    // NEUTRAL: cena stabilna → zmniejsz aski
+    // RISING: bounce trwa, cena wciąż rośnie → czekaj na szczyt (mała moc)
+    // FADING: cena spadła od szczytu bounce → TERAZ shortuj (pełna moc)
     let bounceFilterChaseBlock = false
     if (getSmDirection(pair) === 'SHORT' && sizeMultipliers.ask > 0) {
       const bounceConfig = getBounceFilterConfig(pair)
@@ -7299,16 +7309,53 @@ class HyperliquidMMBot {
         const change1h = snapshot?.momentum?.change1h ?? 0
 
         if (change1h < bounceConfig.chaseThreshold) {
-          // CHASE: cena spada mocno, nie gonimy
+          // CHASE: cena spada mocno, nie gonimy dna
           bounceFilterChaseBlock = true
+          // Clear bounce high — no longer in bounce
+          this.bounceHighs.delete(pair)
         } else if (change1h < bounceConfig.bounceThreshold) {
           // NEUTRAL: zmniejsz aski
           const prev = sizeMultipliers.ask
           sizeMultipliers.ask *= bounceConfig.neutralAskMult
           console.log(`🎯 [BOUNCE_FILTER] ${pair}: NEUTRAL (1h: ${change1h >= 0 ? '+' : ''}${change1h.toFixed(2)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+          // Clear bounce high — no longer in bounce
+          this.bounceHighs.delete(pair)
         } else {
-          // BOUNCE: odbicie potwierdzone!
-          console.log(`🎯 [BOUNCE_FILTER] ${pair}: BOUNCE (1h: +${change1h.toFixed(2)}%) → FULL asks`)
+          // BOUNCE detected (1h >= bounceThreshold)
+          // Track the peak and wait for price to turn down
+          const prevHigh = this.bounceHighs.get(pair)
+          const now = Date.now()
+
+          if (!prevHigh || midPrice > prevHigh.price) {
+            // New high — bounce still climbing, update tracker
+            this.bounceHighs.set(pair, { price: midPrice, ts: now })
+            // RISING: don't chase the top, use reduced asks
+            const prev = sizeMultipliers.ask
+            sizeMultipliers.ask *= bounceConfig.risingAskMult
+            console.log(
+              `🎯 [BOUNCE_FILTER] ${pair}: RISING (1h: +${change1h.toFixed(2)}%, high: $${midPrice.toFixed(2)}) → ` +
+              `ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)} (czekam na szczyt)`
+            )
+          } else {
+            // Price below recent bounce high — check if fading
+            const dropFromHigh = (prevHigh.price - midPrice) / prevHigh.price * 100
+            if (dropFromHigh >= bounceConfig.fadingDropPct) {
+              // FADING: bounce peaked and price is pulling back → SHORT NOW
+              console.log(
+                `🎯 [BOUNCE_FILTER] ${pair}: FADING (1h: +${change1h.toFixed(2)}%, -${dropFromHigh.toFixed(2)}% od szczytu $${prevHigh.price.toFixed(2)}) → FULL asks`
+              )
+              // Clear tracker — we're now shorting
+              this.bounceHighs.delete(pair)
+            } else {
+              // Still near the top, not confirmed fading yet
+              const prev = sizeMultipliers.ask
+              sizeMultipliers.ask *= bounceConfig.risingAskMult
+              console.log(
+                `🎯 [BOUNCE_FILTER] ${pair}: PEAK_WAIT (1h: +${change1h.toFixed(2)}%, -${dropFromHigh.toFixed(2)}% od $${prevHigh.price.toFixed(2)}) → ` +
+                `ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)} (czekam na potwierdzenie)`
+              )
+            }
+          }
         }
       }
     }

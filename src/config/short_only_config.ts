@@ -40,6 +40,8 @@ export interface BounceFilterConfig {
   chaseThreshold: number      // blokuj aski gdy change1h < tego (cena spada mocno)
   bounceThreshold: number     // pełne aski gdy change1h >= tego (odbicie potwierdzone)
   neutralAskMult: number      // mnożnik ask w strefie neutralnej
+  fadingDropPct: number       // % spadku od szczytu bounce = potwierdzenie szczytu (np. 0.15 = 0.15%)
+  risingAskMult: number       // mnożnik ask gdy bounce wciąż rośnie (czekamy na szczyt)
   enabled: boolean
 }
 
@@ -47,11 +49,15 @@ export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
   chaseThreshold: -2.0,
   bounceThreshold: 0.3,
   neutralAskMult: 0.5,
+  fadingDropPct: 0.15,        // 0.15% pullback od szczytu = bounce się kończy → shortuj
+  risingAskMult: 0.25,        // 25% mocy gdy bounce wciąż rośnie (nie goń szczytu)
   enabled: true,
 }
 
 export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>> = {
   'FARTCOIN': { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+  'BTC': { fadingDropPct: 0.10 },      // BTC: tighter — 0.10% drop = fading
+  'ETH': { fadingDropPct: 0.12 },      // ETH: tighter — 0.12% drop = fading
 }
 
 export function getBounceFilterConfig(token: string): BounceFilterConfig {
