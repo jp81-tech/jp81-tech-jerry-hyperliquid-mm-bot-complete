@@ -50,12 +50,20 @@ export class TokenRiskCalculator {
     return Math.min(Math.max(Math.floor(rawLev), 1), MAX_LEV)
   }
 
+  // Majors get tighter caps (lower volatility, more liquid)
+  private static readonly MAJOR_TOKENS = ['BTC', 'ETH', 'SOL', 'BNB']
+
+  private static getHardStopPct(symbol: string): number {
+    return this.MAJOR_TOKENS.includes(symbol.toUpperCase()) ? 0.07 : 0.12
+  }
+
   /**
    * Vision SL (ATR-based)
    * Calculates stop loss price dynamically adapted to token's noise level.
    * Uses estimated ATR from daily volatility if real ATR not available.
    *
-   * ATR_MULTIPLIER = 2.5 (standard for Swing Trading - gives "breathing room")
+   * ATR_MULTIPLIER = 1.5 (tightened from 2.5 — swing trading with SM confirmation)
+   * Hard Stop: 7% majors (BTC/ETH/SOL/BNB), 12% alts/memes
    *
    * @param direction - LONG or SHORT
    * @param profile - Token risk profile
@@ -67,7 +75,7 @@ export class TokenRiskCalculator {
     profile: TokenRiskProfile,
     entryPrice: number
   ): number {
-    const ATR_MULTIPLIER = 2.5
+    const ATR_MULTIPLIER = 1.5
 
     // Estimate ATR from daily volatility if real ATR not available
     // ATR ~ Price x Volatility
@@ -82,8 +90,9 @@ export class TokenRiskCalculator {
       stopPrice = entryPrice - buffer  // SL below entry
     }
 
-    // Safety: SL cannot be wider than 15% (Hard Stop)
-    const hardStopDist = entryPrice * 0.15
+    // Smart cap: 7% for majors, 12% for alts
+    const hardStopPct = this.getHardStopPct(profile.symbol)
+    const hardStopDist = entryPrice * hardStopPct
 
     if (direction === 'SHORT') {
       return Math.min(stopPrice, entryPrice + hardStopDist)
@@ -94,20 +103,22 @@ export class TokenRiskCalculator {
 
   /**
    * Convenience: Calculate SL as a percentage of entry price.
-   * Returns a value like 0.125 (= 12.5%).
+   * Returns a value like 0.067 (= 6.7%).
    * Useful when entry price isn't known yet (SmAutoDetector).
    *
-   * Examples:
-   *   BTC (vol~4.5%) -> 11.3% SL
-   *   LIT (vol~7.2%) -> 15.0% SL (capped)
-   *   VIRTUAL (vol~12.5%) -> 15.0% SL (capped)
+   * Examples (ATR_MULT=1.5):
+   *   BTC (vol~4.5%) -> 6.75% SL (cap 7%)
+   *   SOL (vol~4.5%) -> 6.75% SL (cap 7%)
+   *   LIT (vol~7.2%) -> 10.8% SL (cap 12%)
+   *   FARTCOIN (vol~12.5%) -> 12.0% SL (capped)
+   *   VIRTUAL (vol~12.5%) -> 12.0% SL (capped)
    */
-  public static calculateVisionSlPercent(volatility: number): number {
-    const ATR_MULTIPLIER = 2.5
-    const HARD_STOP_PCT = 0.15
+  public static calculateVisionSlPercent(volatility: number, symbol: string = ''): number {
+    const ATR_MULTIPLIER = 1.5
+    const hardStopPct = this.getHardStopPct(symbol)
 
     const slPct = volatility * ATR_MULTIPLIER
-    return Math.min(slPct, HARD_STOP_PCT)
+    return Math.min(slPct, hardStopPct)
   }
 
   /**

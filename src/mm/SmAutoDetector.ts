@@ -807,7 +807,7 @@ export function analyzeTokenSm(
     confidence: convictionScore * 100,
     current_price: 0  // Price not available in SmAutoDetector; used by calculateVisionStopLoss with entryPrice
   })
-  const visionSlPct = TokenRiskCalculator.calculateVisionSlPercent(dailyVol)
+  const visionSlPct = TokenRiskCalculator.calculateVisionSlPercent(dailyVol, token)
 
   console.log(`🤖 [SmAutoDetector] ${token}:`, {
     rawLongs: `$${(rawLongsUsd / 1e6).toFixed(2)}M`,

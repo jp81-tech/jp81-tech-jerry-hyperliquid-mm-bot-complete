@@ -3516,7 +3516,7 @@ class HyperliquidMMBot {
     const totalCapitalUsd = Number(process.env.RISK_TOTAL_CAPITAL_USD || process.env.ACCOUNT_VALUE_USD || 20000)
     this.positionRiskManager = new PositionRiskManager({
       totalCapitalUsd,
-      maxPerTokenUsd: Number(process.env.RISK_MAX_TOKEN_EXPOSURE_USD || 1500),
+      maxPerTokenUsd: Number(process.env.RISK_MAX_TOKEN_EXPOSURE_USD || 5000),
       maxTotalExposureUsd: Number(
         process.env.RISK_MAX_TOTAL_EXPOSURE_USD || totalCapitalUsd * (1 - Number(process.env.RISK_RESERVE_RATIO || 0.2))
       ),
