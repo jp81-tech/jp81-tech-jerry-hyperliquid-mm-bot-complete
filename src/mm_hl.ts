@@ -4864,7 +4864,7 @@ class HyperliquidMMBot {
           const pairConfig = NANSEN_TOKENS[pair.toUpperCase()]?.tuning
           const isFollowSmMode = pairConfig?.followSmMode === 'FOLLOW_SM_SHORT' ||
                                   pairConfig?.followSmMode === 'FOLLOW_SM_LONG' ||
-                                  pair === 'FARTCOIN' || pair === 'HYPE' || pair === 'LIT'
+                                  isShortOnlyToken(pair)
 
           if (isFollowSmMode) {
             this.notifier.warn(
