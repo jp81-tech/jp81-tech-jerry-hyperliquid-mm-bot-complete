@@ -40,12 +40,22 @@ export interface NansenAlert {
     address?: string;
     label?: string;
     value_usd?: number;
-    direction?: 'inflow' | 'outflow';
+    direction?: 'inflow' | 'outflow' | 'reversal';
     timeframe?: '1h' | '24h' | '7d';
     action?: 'buy' | 'sell' | 'open' | 'close' | 'add' | 'reduce';
-    side?: 'long' | 'short';
+    side?: 'long' | 'short' | null;
     entry_price?: number;
     pnl_usd?: number;
+    source?: string;
+    trader_label?: string;
+    is_significant?: boolean;
+    is_short_signal?: boolean;
+    is_long_signal?: boolean;
+    signal_strength?: string;
+    threshold_ratio?: number;
+    thresholds?: any;
+    logic?: string;
+    [key: string]: any;
   };
 }
 

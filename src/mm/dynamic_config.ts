@@ -1189,8 +1189,8 @@ export class DynamicConfigManager {
 
     const snapshot = this.buildSnapshot(token, entry, marketData, next)
     if (snapshot) {
-      this.telemetryCollector?.recordSnapshot(snapshot)
-      this.alertManager?.evaluateSnapshot(snapshot)
+      this.telemetryCollector?.recordSnapshot(snapshot as any)
+      this.alertManager?.evaluateSnapshot(snapshot as any)
       this.telemetryCollector?.recordDiagnostics({
         timestamp: new Date(),
         token,
@@ -1805,7 +1805,7 @@ export class DynamicConfigManager {
     // SQUEEZE TIMEOUT PROTECTION - Force exit if squeeze didn't materialize
     // When squeezeFailed=true (>12h in CONTRARIAN without squeeze), exit position
     // ============================================================
-    if (tradingModeInfo?.squeezeFailed) {
+    if (tradingModeInfo?.squeezeFailed && !isShortOnlyToken(token)) {
       const squeezeDuration = tradingModeInfo.squeezeDurationHours ?? 0
       this.notifier.warn(
         `⏰ [SQUEEZE TIMEOUT] ${token} | CONTRARIAN mode for ${squeezeDuration.toFixed(1)}h without squeeze - FORCING EXIT!`
@@ -1836,7 +1836,8 @@ export class DynamicConfigManager {
       nansenBoost.alertValue >= 50_000 &&
       (nansenBoost.alertType === 'SM_DISTRIBUTION' || nansenBoost.alertType === 'WHALE_ACTIVITY')
 
-    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed) {
+    // ☢️ SHORT_ONLY_TOKENS: GENERALS_OVERRIDE ma ostatnie słowo - CONTRARIAN nie może overridować
+    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isShortOnlyToken(token)) {
       // Calculate contrarian multipliers with Nansen boost
       // 🔔 Apply Nansen boost to make contrarian more aggressive when we have SM alert confirmation
       const boostFactor = nansenBoost.boostMultiplier

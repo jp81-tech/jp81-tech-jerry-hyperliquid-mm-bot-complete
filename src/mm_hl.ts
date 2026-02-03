@@ -3315,6 +3315,7 @@ class HyperliquidMMBot {
   private orderReporter: OrderReporter
   private chaseConfig: ChaseConfig | null = null
   private gridManager: GridManager | null = null
+  private tickCount: number = 0
   private legacyUnwinder: LegacyUnwinder
   private lastWhaleCheck = 0;
   private _contrarianLogAt: Record<string, number> = {};  // Throttle contrarian status logs
@@ -6235,9 +6236,10 @@ class HyperliquidMMBot {
 
     // ═══════════════════════════════════════════════════════════════════════════
 
-    if (overridesConfig && overridesConfig.enabled) {
+    if (overridesConfig && overridesConfig.enabled && !isShortOnlyToken(symbol)) {
       // ============================================================
       // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
+      // ☢️ Disabled for SHORT_ONLY_TOKENS - GENERALS_OVERRIDE has final say
       // ============================================================
       if (position && Math.abs(position.size) > 0) {
         const positionSide = position.size > 0 ? 'long' : 'short'
@@ -6410,7 +6412,8 @@ class HyperliquidMMBot {
 
     // 🔮⚔️ SHADOW-CONTRARIAN CONFLICT DETECTION
     // If we have a contrarian position AND strong shadow signal in opposite direction
-    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE') {
+    // ☢️ Disabled for SHORT_ONLY_TOKENS - GENERALS_OVERRIDE has final say
+    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isShortOnlyToken(symbol)) {
       const positionSideForConflict: 'long' | 'short' | 'none' =
         position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none'
 

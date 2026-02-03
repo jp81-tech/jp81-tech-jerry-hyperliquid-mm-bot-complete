@@ -6,6 +6,13 @@ export interface SmartMoneyEntry {
   momentum?: number
   velocity?: number
   flow_change_7d?: number
+  flow_1h?: number
+  netflow_1h?: number
+  flow_24h?: number
+  netflow_24h?: number
+  flow_7d?: number
+  netflow_7d?: number
+  cex_netflow_7d?: number
   current_longs_usd?: number
   current_shorts_usd?: number
   longs_upnl?: number

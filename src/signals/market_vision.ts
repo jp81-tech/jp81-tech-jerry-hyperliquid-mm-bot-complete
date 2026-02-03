@@ -17,6 +17,23 @@ export type CoinTuning = {
   inventorySkewMult: number;     // Jak agresywnie reagować na inventory
   maxLeverage: number;
   stopLossPct: number;
+
+  // Dynamic runtime properties (set by DynamicConfigManager)
+  bidSizeMultiplier?: number;
+  askSizeMultiplier?: number;
+  capitalMultiplier?: number;
+  targetInventory?: number;
+  followSmMode?: string;
+  squeezeTriggerPrice?: number;
+  stopLossPrice?: number;
+  smConflictSeverity?: string;
+  smSignalType?: string;
+  smSignalDirection?: string;
+  smSignalConfidence?: number;
+  smSignalReasons?: string[];
+  smSignalWarnings?: string[];
+  onChainDivergence?: string;
+  bottomSignalType?: string;
 };
 
 export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spreadCaps?: { min: number; max: number }; tuning?: CoinTuning }> = {

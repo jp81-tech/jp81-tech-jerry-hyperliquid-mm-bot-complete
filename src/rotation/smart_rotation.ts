@@ -11,6 +11,14 @@ export interface PairAnalysisLite {
   nansenBias?: NansenBias             // bull / bear / neutral / unknown
   nansenScore?: number                // 0..100 – Smart Money / netflow score
   nansenWhaleRisk?: NansenWhaleRisk   // low / medium / high / unknown
+
+  // Optional market data inputs
+  vpin?: number                        // Volume-weighted Price Impact (0..1)
+  fundingRate?: number                 // Current funding rate
+  whaleIntelShift?: number             // Whale intelligence bias shift
+  smartMoneyData?: { netBalance: number; netBalanceUsd: number; holders: number; longs24hUsd: number; shorts24hUsd: number }
+  whaleData?: { netBalance: number; netBalanceUsd: number; holders: number; longs24hUsd: number; shorts24hUsd: number }
+  priceUsd?: number
 }
 
 export interface RankedPair extends PairAnalysisLite {
