@@ -1,5 +1,122 @@
 # FOR JERRY: The Hyperliquid Smart Money Bot
 
+---
+
+## Autonomous Fund Manager — Status Report (03.02.2026)
+
+**Status:** ONLINE (Pro Mode Active)
+**Strategy:** Capital Dominance (Net USD Imbalance) + Dynamic Risk Management
+**Active pairs:** SOL, BTC, ETH (locked for 4H)
+
+### Deployed Upgrades (February 2026)
+
+#### 1. Intelligent Selection ("Capital Dominance")
+
+Zamiast arbitralnych ratio, bot wybiera cele na podstawie **absolutnej kwoty netto Smart Money**.
+
+- **Logika:** `abs(Longs - Shorts)` — posortowane malejąco, top 3 wygrywa
+- **Dlaczego?** $114M SHORT na SOL przeważa $6.5M SHORT na LIT. Pieniądze mówią.
+- **Rotacja:** Co 4 godziny (stabilna) LUB natychmiastowa gdy pojawi się >$10M nowy imbalance (Flash Override)
+- **Plik:** `SmAutoDetector.ts` → `getTopSmPairs()`
+
+#### 2. Dynamic Risk Management
+
+Dźwignia nie jest już statyczna. Adaptuje się do klasy aktywów.
+
+- **Formuła:** `Base(5x) × Conviction(0.5-1.0) × VolatilityDampener(TARGET_VOL / actual_vol)`
+- **Majors (BTC/SOL) przy 43% conviction:** 2x leverage
+- **Majors przy 85%+ conviction:** do 4x leverage
+- **Memecoiny (PUMP/WIF/FARTCOIN):** 1x leverage (volatility dampener dominuje)
+- **Plik:** `TokenRiskCalculator.ts` → `calculateLeverage()`
+
+#### 3. Vision SL (ATR-Based)
+
+Stały 15% SL z `PositionProtector` to teraz "Catastrophe Stop" — ostatnia linia obrony. Aktywny stop jest dynamiczny.
+
+- **Mechanizm:** ATR estymowany z dziennej zmienności tokena
+- **Logika:** `Entry ± (2.5 × ATR)`, z twardym limitem 15%
+- **Zachowanie:** Ciche monitorowanie co ~90s. Zamyka pozycję natychmiast gdy cena przebije strukturę.
+- **Hierarchia:** Manual SL (tuning) > Vision SL (ATR) > PositionProtector (15% hard stop)
+- **Plik:** `TokenRiskCalculator.ts` → `calculateVisionSlPercent()`, egzekucja w `mm_hl.ts`
+
+#### 4. Risk-Based Position Sizing (Equal Dollar Risk)
+
+Statyczny `capitalPerPair = $5000` dawał wildly różne ryzyko per token. LIT z 15% SL = $750 dollar risk, SOL z 11.3% SL = $565. Teraz pozycje są normalizowane tak, że **dollar risk jest identyczny** niezależnie od volatility tokena.
+
+- **Formuła:** `maxPosition = (equity × riskPerTradePct) / visionSlPct`
+- **Default risk:** 5% equity per trade (`RISK_PER_TRADE_PCT` env)
+- **Zachowanie:** Działa jako **ostatni cap** po wszystkich upstream multiplierach (adaptive, tuning, MarketVision)
+- **Graceful fallback:** Gdy brak danych SM lub equity — cap pomijany, stare zachowanie
+- **Plik:** `TokenRiskCalculator.ts` → `calculateRiskBasedMaxPosition()`, egzekucja w `mm_hl.ts`
+
+**Przykład** (equity=$12,372, risk=5%):
+
+| Token | Vision SL | Max Position | Dollar Risk |
+|-------|-----------|-------------|-------------|
+| SOL | 11.3% | $5,474 | $618 |
+| BTC | 11.3% | $5,474 | $618 |
+| LIT | 15.0% | $4,124 | $618 |
+| FARTCOIN | 15.0% | $4,124 | $618 |
+
+Dollar risk = $618 dla KAŻDEGO tokena. Jednakowe ryzyko, różne pozycje.
+
+### Aktualne wartości (live z serwera)
+
+| Token | SM Direction | Net Imbalance | Leverage | Vision SL |
+|-------|-------------|---------------|----------|-----------|
+| SOL | SHORT | $113.6M | 2x | 11.2% |
+| BTC | SHORT | $108.6M | 2x | 11.2% |
+| ETH | SHORT | $25.6M | 2x | 11.2% |
+| LIT | SHORT | $6.5M | 1x | 15.0% |
+| ENA | SHORT | $5.6M | 1x | 15.0% |
+
+### Jak monitorować
+
+```bash
+# Cele i Capital Dominance ranking
+ssh hl-mm 'pm2 logs mm-bot --lines 100 --nostream' | grep "Capital Dominance" -A 6
+
+# Dynamic Risk — leverage i SL per token
+ssh hl-mm 'pm2 logs mm-bot --lines 200 --nostream' | grep -E "leverage|visionSL"
+
+# Flash Rotation — nagłe zmiany portfela
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "FLASH ROTATION"
+
+# Vision SL triggery — zamknięcia pozycji przez ATR stop
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "VISION SL"
+
+# Dynamic Leverage — ustawienia przy rotacji par
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "DYNAMIC LEV"
+```
+
+### Architektura plików
+
+| Plik | Rola | Status |
+|------|------|--------|
+| `src/mm/TokenRiskCalculator.ts` | Oblicza leverage + Vision SL + Risk-Based Position Sizing | NOWY |
+| `src/mm/SmAutoDetector.ts` | Capital Dominance, 4H lock, flash rotation, `getTokenRiskParams()` | ZMODYFIKOWANY |
+| `src/mm_hl.ts` | Egzekucja: `setLeverage()` przy rotacji, Vision SL co cykl, Risk cap per pair | ZMODYFIKOWANY |
+| `src/risk/RiskManager.ts` | Portfolio-level: drawdown, inventory, emergency liquidation | BEZ ZMIAN |
+
+### Jak monitorować Risk Sizing
+
+```bash
+# Risk cap w akcji — ile pozycja została zmniejszona
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "RISK SIZING"
+
+# Przykładowy output:
+# [RISK SIZING] LIT: Cap $6418 -> $4124 (equity=$12372 x 5% / 15.0% SL)
+```
+
+### Następne kroki
+
+- Monitorować `VISION SL` logi — jeśli SL zbyt ciasny (whipsaw), zwiększ `ATR_MULTIPLIER` w `TokenRiskCalculator.ts`
+- Monitorować `RISK SIZING` logi — sprawdzić czy cap nie jest zbyt agresywny (jeśli tak, zwiększ `RISK_PER_TRADE_PCT`)
+- Po tygodniu sprawdzić Win Rate — jeśli >60%, rozważyć zwiększenie `MAX_LEV` z 5x do 7x dla majors
+- Rozważyć dodanie prawdziwego ATR ze świec (zamiast estymacji z `TOKEN_VOLATILITY_CONFIG`)
+
+---
+
 ## The Big Picture: What We Built
 
 Wyobraź sobie, że masz znajomego który pracuje w Goldman Sachs. Codziennie przy kawie mówi Ci: "Hej, nasi najlepsi traderzy właśnie otworzyli OGROMNEGO shorta na LIT. Mają $11 milionów w grze."
@@ -117,7 +234,7 @@ Pomyśl o tym bocie jak o **armii z łańcuchem dowodzenia**:
 |------|------|----------|---------|
 | `SignalEngine.ts` | The General | Generał | Najwyższy priorytet. Gdy mówi "SHORT" - bot shortuje |
 | `dynamic_config.ts` | The Gatekeeper | Strażnik bramy | HARD_BLOCK tokeny, zarządza limitami, może być overridowany przez Generała |
-| `GENERALS_OVERRIDE` | Nuclear Button | Przycisk nuklearny | Wymusza FOLLOW_SM_SHORT niezależnie od innych sygnałów |
+| `TokenRiskCalculator.ts` | The Quartermaster | Kwatermistrz | Oblicza ile dźwigni, gdzie SL, i jak dużą pozycję można otworzyć |
 
 ### Wykonanie (Execution)
 
@@ -415,12 +532,12 @@ private tryPort(port: number, attempts: number = 0): void {
 ```
    Priorytet 1 (Najwyższy)     Priorytet 2              Priorytet 3
 ┌─────────────────────────┐ ┌─────────────────────┐ ┌─────────────────────┐
-│   GENERALS_OVERRIDE     │ │   SignalEngine      │ │   HARD_BLOCK        │
-│   (Nuclear option)      │ │   (The General)     │ │   (The Gatekeeper)  │
+│   SignalEngine          │ │   HARD_BLOCK        │ │   Risk Cap          │
+│   (The General)         │ │   (The Gatekeeper)  │ │   (The Quartermaster)│
 └─────────────────────────┘ └─────────────────────┘ └─────────────────────┘
 ```
 
-**Zasada:** Wyższy priorytet ZAWSZE wygrywa. Nie próbuj być mądrzejszy od Generała.
+**Zasada:** Wyższy priorytet ZAWSZE wygrywa. Generał decyduje o kierunku, Strażnik blokuje niebezpieczne tokeny, Kwatermistrz kontroluje wielkość pozycji.
 
 ### 2. Logowanie jest Twój Przyjaciel
 
@@ -1691,5 +1808,591 @@ Bez tych trzech: sync method z async fire-and-forget = race condition waiting to
 
 ---
 
-*Ostatnia aktualizacja: 2026-02-02*
+## Capital Dominance v3 -- Smart Merge + USD-Based Scoring (03.02.2026)
+
+### Problem: Jeden wiersz kodu niszczył $114M sygnału
+
+Wyobraz sobie sytuacje: masz satelitarne zdjecie pola bitwy. Widac na nim, ze wrog ma $114 milionow w pozycjach short na SOL. Wtedy przychodzi zwiadowca z rozmazanym zdjeciem z telefonu - "$62 tysiecy ruchu on-chain na Solanie". I co robi stary kod? **Wyrzuca zdjecie satelitarne i zostawia tylko rozmazane zdjecie z telefonu.**
+
+Dokladnie to robila funkcja `injectProxyData()` w `SmAutoDetector.ts`:
+
+```typescript
+enrichedData[perpSymbol] = proxyData    // <-- TEN JEDEN WIERSZ
+```
+
+Bezwarunkowy replace. Dla kazdego tokena z mapy `PERP_TO_ONCHAIN_PROXY` pobieral dane on-chain z Nansen i **calkowicie nadpisywal** to co whale_tracker.py zebrarl z Hyperliquid perps.
+
+### Skala zniszczen
+
+| Token | whale_tracker (perps) | Nansen (on-chain) | Po starym inject | Co poszlo nie tak |
+|-------|----------------------|-------------------|-----------------|-------------------|
+| **SOL** | $1.03M L / **$114.76M S** | SM=$62k | rawL=$0.06M, rawS=$0 | **$114M shorts ZNIKNELO** |
+| **LIT** | $1.68M L / **$8.21M S** | SM=$0 | rawL=$0, rawS=$0 | **$8.21M shorts ZNIKNELO** |
+| **DOGE** | $0.18M L / $0.16M S | SM=-$235k | rawL=$0, rawS=$0.23M | Dzialalo z farta |
+| **VIRTUAL** | ~$0 | SM=$5k | rawL=$0.01M | OK (nie bylo czego stracic) |
+
+SOL dostal Engine score +21 (WAIT/PURE_MM) zamiast FOLLOW_SM_SHORT. Bot dosłownie nie widzial $114 milionow shortow wielorybow.
+
+### Analogia: Generał i zwiadowca
+
+Pomysl o tym tak:
+
+```
+STARY KOD:
+  Generał (whale_tracker): "Mam zdjęcie satelitarne. $114M SHORT na SOL."
+  Zwiadowca (Nansen): "Widziałem $62k ruchu na Solanie."
+  System: *wyrzuca zdjęcie satelitarne* "Używamy danych zwiadowcy."
+  Generał: "...ale ja mam 1800 razy więcej danych?!"
+
+NOWY KOD:
+  System: "Kto ma więcej danych?"
+  Generał: "$115.8M łącznie"
+  Zwiadowca: "$0.06M łącznie"
+  System: "Generał wygrywa. Zachowuję satelitę, notuję raport zwiadowcy."
+```
+
+### Fix #1: Smart Merge w `injectProxyData()`
+
+**Plik:** `src/mm/SmAutoDetector.ts`
+
+Zamiast slepego nadpisywania, porownujemy wolumeny:
+
+```
+JESLI perpVolume > onchainVolume:
+  → ZACHOWAJ dane perps (whale_tracker) — glowne zrodlo
+  → DODAJ on-chain jako pola suplementarne (onchain_sm_net, onchain_whale_net...)
+  → Log: "PERP dominates"
+
+W PRZECIWNYM RAZIE:
+  → UZYJ on-chain jako glowne (stare zachowanie dla VIRTUAL, ZEC)
+  → Log: "ONCHAIN primary"
+```
+
+Cztery nowe pola w `SmartMoneyEntry` (plik `src/types/smart_money.ts`):
+- `onchain_sm_net` — Smart Money net flow w USD
+- `onchain_whale_net` — Whale net flow w USD
+- `onchain_chain` — ktory chain (solana, base, bnb)
+- `onchain_confidence` — pewnosc Nansen 0-100
+
+### Fix #2: Capital Dominance Sorting w `getTopSmPairs()`
+
+**Plik:** `src/mm/SmAutoDetector.ts`
+
+**Przed:** Sortowanie po `|engineScore|` ktory jest ograniczony do -50..+50. SOL ($114M net short) i LIT ($6.5M net short) oba mialy score ~-47 do -49 — prawie nie do odroznienia.
+
+**Po:** Sortowanie po `|rawLongsUsd - rawShortsUsd|` — rzeczywista nierownowaga w dolarach.
+
+```
+[SM Auto-Select] Capital Dominance Leaders:
+   SOL: 🟥 SHORT $113.7M net | Engine: -49
+   BTC: 🟥 SHORT $108.5M net | Engine: -43
+   ETH: 🟥 SHORT $25.6M net | Engine: -36
+   LIT: 🟥 SHORT $6.5M net | Engine: -47
+```
+
+**Zasada:** Sortuj po metryce najblizszej rzeczywistosci (USD), nie po pochodnym score'u.
+
+### Fix #3: Flow Attenuation (Tlumienie szumu)
+
+**Plik:** `src/mm/SmAutoDetector.ts` (przed oboma wywolaniami `SignalEngine.analyze()`)
+
+Gdy perps data jest dużo wieksza niz on-chain flows, wartosci flow podawane do `SignalEngine.analyze()` sa tlumione (skalowane w dol), zeby nie mylily silnika.
+
+| Stosunek Perps/Onchain | Wspolczynnik | Znaczenie |
+|------------------------|-------------|-----------|
+| >10x | 0.1 | On-chain to szum |
+| 3-10x | 0.3 | Zmniejsz wage on-chain |
+| <3x | 1.0 | Oba zrodla rowne |
+
+Dla tokenow BEZ proxy (BTC, ETH, HYPE, FARTCOIN) — `onchain_sm_net` jest undefined, wiec `flowAttenuation = 1.0` → **zero wplywu**.
+
+### Wyniki po fixie
+
+| Token | Przed | Po | Dlaczego |
+|-------|-------|-----|----------|
+| **SOL** | PURE_MM (+21 WAIT) | **FOLLOW_SM_SHORT** (-49) | $114M shorts zachowane |
+| **LIT** | PURE_MM (0 WAIT) | **FOLLOW_SM_SHORT** (-47) | $8.21M shorts zachowane |
+| **BTC** | FOLLOW_SM_SHORT (-43) | FOLLOW_SM_SHORT (-43) | Nie w proxy map, bez zmian |
+| **DOGE** | FOLLOW_SM_SHORT (-46) | FOLLOW_SM_SHORT (-46) | Perps zachowane, on-chain dodany |
+| **VIRTUAL** | PURE_MM (+14) | PURE_MM (+14) | On-chain primary, bez zmian |
+
+### Lekcja #25: "Last Writer Wins" anti-pattern
+
+Bug byl klasycznym przypadkiem "last writer wins" — destruktywne nadpisanie ktore wygladalo niewinnie gdy bylo pisane (pewnie gdy w proxy map byl tylko VIRTUAL, ktory nie mial danych perps do nadpisania). Gdy dodawalismy kolejne tokeny (SOL, LIT, DOGE), blast radius rosl po cichu.
+
+**Zasada:** Gdy laczysz dane z dwoch zrodel, ZAWSZE zadaj pytanie: "Co jesli oba zrodla maja dane? Ktore wygrywa?" Zrob strategie merge'u jawna i logowana.
+
+### Lekcja #26: Volume-Weighted Data Fusion
+
+Gdy masz dwa zrodla danych o drastycznie roznych skalach ($114M perps vs $62k on-chain), nie mozesz ich traktowac rowno. Wzorzec atenuacji jest przydatny wszedzie gdzie laczysz sygnaly roznych skal:
+
+```typescript
+if (sourceA >> sourceB) {
+  weight_B *= 0.1   // sourceB to szum wzgledem sourceA
+}
+```
+
+To jak nasluchiwanie dwoch radiostacji: jedna nadaje z wiezy transmisyjnej (100kW), druga z walkie-talkie (5W). Jesli zmieszasz je po rowno, walkie-talkie bedzie nieslyšalne. Ale jesli odfiltrujés szum z duzej stacji, wyłowisz informacje z malej.
+
+### Lekcja #27: Sort by reality, not by score
+
+Engine score kompresuje zupelnie rozne sytuacje do zakresu -50..+50. SOL z $114M net short i LIT z $6.5M net short oba dostaly ~-49. Sortowanie po surowych dolarach zachowuje prawdziwa skale sygnalu.
+
+**Analogia:** Oceny w szkole (1-6) kompresują wiedze. Uczen z 6 z matmy moze umiec "troche wiecej" albo "drastycznie wiecej" od ucznia z 5. Ale na olimpiadzie liczy sie surowy wynik, nie ocena.
+
+---
+
+## TokenRiskCalculator - "Dynamiczna dźwignia + inteligentny Stop Loss" (03.02.2026)
+
+### Problem: Jeden rozmiar nie pasuje do wszystkich
+
+Bot miał dwie sztywne liczby: **leverage** i **stop loss 12%**. Każdy token dostawał to samo traktowanie. To tak, jakby dawać identyczne okulary korekcyjne każdemu w pokoju — BTC i FARTCOIN to zupełnie inne bestie.
+
+Przy **5x leverage na BTC**, 12% ruch ceny = **60% kapitału** gone. To nie stop loss, to likwidacja.
+Przy **1x leverage na FARTCOIN**, 12% to zaledwie jedna świeca. Bot wyleciałby na szumie.
+
+### Rozwiązanie: Dwa współpracujące systemy
+
+#### System 1: Dynamic Leverage (Combined Strategy)
+
+Formuła:
+```
+Leverage = MAX_LEV × ConvictionFactor × VolatilityDampener
+         = 5       × (0.5 - 1.0)      × (TARGET_VOL / actual_vol)
+```
+
+**ConvictionFactor** = atak. Jak bardzo SM są pewni swojego? 90% conviction = factor 0.90. To przyspieszenie.
+
+**VolatilityDampener** = obrona. Kalibrowane do 5% dziennej zmienności. Token z 5% vol (BTC) → dampener 1.0. Token z 12.5% vol (FARTCOIN) → dampener 0.4 (hamulec).
+
+| Token | Dz. Vol | Conviction | Leverage | Dlaczego |
+|-------|---------|------------|----------|----------|
+| BTC | ~4.5% | 85% | **4x** | Spokojny major + silny sygnał = agresywnie |
+| SOL | ~4.5% | 70% | **3x** | Spokojny, ale conviction niższe |
+| LIT | ~7.2% | 90% | **3x** | Bardzo pewny sygnał, ale volatile |
+| HYPE | ~7.2% | 86% | **3x** | Podobnie do LIT |
+| VIRTUAL | ~12.5% | 80% | **1x** | Memecoin = hamulec dominuje |
+| FARTCOIN | ~12.5% | 95% | **1x** | 95% conviction, ALE vol 12.5% = 1x |
+
+Zwróć uwagę na FARTCOIN: wieloryby są prawie na 100% pewne, ale volatility override dominuje. Możesz być pewien co do memcoina i DALEJ nie ryzykować 5x leverage. Obrona > Atak.
+
+#### System 2: Vision SL (ATR-based Stop Loss)
+
+```
+Vision SL% = Daily Volatility × ATR_MULTIPLIER (2.5x)
+           z twardym limitem 15%
+```
+
+**Mnożnik 2.5x** to standard swing tradingu. Znaczy: "wychodzimy TYLKO gdy ruch jest 2.5x większy niż normalny dzień." Filtruje szum — losowe knoty i fake pumpy nie trafią w SL, ale prawdziwy trend reversal tak.
+
+| Token | Dz. Vol | Vision SL | Stary SL | Zmiana |
+|-------|---------|-----------|----------|--------|
+| BTC | ~4.5% | **11.3%** | 12% | Ciut ciaśniej (mniej risk przy 4x lev) |
+| SOL | ~4.5% | **11.3%** | 12% | Podobnie |
+| LIT | ~7.2% | **15.0%** | 12% | Szerzej — oddycha z volatility |
+| HYPE | ~7.2% | **15.0%** | 12% | Szerzej |
+| VIRTUAL | ~12.5% | **15.0%** | 12% | Szerzej — nie whipsawuje na spikach |
+| FARTCOIN | ~12.5% | **15.0%** | 12% | Szerzej |
+
+### Dlaczego te dwa systemy muszą współpracować
+
+Wyobraź to sobie jako huśtawkę:
+
+```
+Volatile token (FARTCOIN):       Stabilny token (BTC):
+  Lev: NISKO (1x)                  Lev: WYSOKO (4x)
+  SL:  SZEROKO (15%)               SL:  CIASNO (11.3%)
+  Risk = 1 × 15% = 15%             Risk = 4 × 11.3% = 45%
+```
+
+45% na BTC brzmi dużo — i celowo. Bot bierze 4x leverage TYLKO gdy SM conviction jest 85%+. Przy niższym conviction (50%) leverage spada do 2x → risk = 2 × 11.3% = 22.6%. Conviction działa jako **zawór ryzyka**.
+
+Gdyby SL był sztywny 12% a dźwignia dynamiczna, byłby disconnect. Gdyby SL był dynamiczny a dźwignia sztywna — też. Oba muszą reagować na tę samą zmienność, żeby system był spójny.
+
+**Analogia wojskowa:** ConvictionFactor mówi "jak daleko się zagłębiamy w terytorium wroga" (leverage). VolatilityDampener mówi "jak szeroki jest obszar wycofania" (SL). Agresywne zagłębienie w spokojnym terenie (BTC) = OK. Agresywne zagłębienie w dżungli pełnej pułapek (FARTCOIN) = samobójstwo.
+
+### Skąd bierzemy volatility (bez świec)?
+
+SmAutoDetector nie ma historii cen. Estymujemy z istniejącej `TOKEN_VOLATILITY_CONFIG`:
+
+```typescript
+dailyVol = (minStopLossPercent / 100) × atrMultiplier
+```
+
+Oba pola już istniały (ustawione ręcznie na podstawie obserwacji tokenów). Mnożenie ich daje rozsądne przybliżenie dziennej zmienności. Gdy dodasz prawdziwe dane ATR ze świec, przekaż je jako `atr_value` — calculator użyje ich zamiast estymaty.
+
+### Architektura: Dwa moduły ryzyka
+
+```
+TokenRiskCalculator.ts (NOWY — src/mm/)
+  ├── calculateLeverage()        ← conviction × vol → 1-5x
+  ├── calculateVisionStopLoss()  ← entry price + ATR → cena SL
+  └── calculateVisionSlPercent() ← vol → SL jako % (bez ceny)
+
+RiskManager.ts (BEZ ZMIAN — src/risk/)
+  └── Ochrona portfela (drawdown, inventory, emergency liquidation)
+```
+
+**Dlaczego dwa?**
+- `RiskManager` = **strażnik portfela** → "Czy za dużo dzisiaj straciłem?"
+- `TokenRiskCalculator` = **sizer pozycji** → "Ile dźwigni na TEN token? Gdzie SL?"
+
+Działają na różnych poziomach. RiskManager haltuje bota (ostatnia linia obrony). TokenRiskCalculator pomaga podejmować mądrzejsze decyzje indywidualnie.
+
+### Lekcja #28: Naming Collisions — "Nudne ale jasne > Sprytne"
+
+Oryginalny plan nazywał nowy moduł `RiskManager` — identycznie jak istniejący plik w `src/risk/`. TypeScript by to skompilował (różne ścieżki importu), ale człowiek czytający `import { RiskManager } from './RiskManager'` vs `import { RiskManager } from '../risk/RiskManager'` byłby zdezorientowany. Zmiana na `TokenRiskCalculator` kosztuje zero wysiłku i eliminuje kategorię błędów.
+
+### Lekcja #29: Static methods dla pure calculations
+
+`TokenRiskCalculator` używa `public static` — bez instancji, bez stanu. Wołasz `TokenRiskCalculator.calculateLeverage(profile)` bezpośrednio. To właściwy wzorzec dla czystych obliczeń matematycznych. Portfolio-level `RiskManager` używa instancji bo śledzi stan (high water mark, equity sesji). Różne narzędzia do różnych zadań.
+
+### Lekcja #30: Floor, nie Round
+
+Leverage używa `Math.floor` — 2.8x staje się 2x, nie 3x. Celowo. Przy dźwigni zawsze zaokrąglaj w DÓŁ. Zaokrąglanie w górę zwiększa ryzyko w marginalnych przypadkach. Na rynkach krypto, ten jeden x leverage w górę może być różnicą między przetrwaniem a likwidacją.
+
+---
+
+## Wiring: Dynamic Leverage + Vision SL do mm_hl.ts (03.02.2026)
+
+### Problem: Kalkulator istnieje, ale nikt go nie słucha
+
+Po stworzeniu `TokenRiskCalculator.ts` i wpięciu go w `SmAutoDetector.ts`, logi pokazywały piękne wartości: `leverage: '2x', visionSL: '11.2%'`. Ale to było jak sporządzenie recepty bez jej realizacji — **obliczenia istniały w logach, ale bot dalej używał sztywnego `process.env.LEVERAGE` i starego 15% hard stop**.
+
+Trzeba było "wpić" te wartości w trzy miejsca w `mm_hl.ts` (główny silnik, ~9000 linii kodu):
+
+### Zmiana 1: Dynamic Leverage przy rotacji par
+
+**Plik:** `mm_hl.ts` linia ~4585
+**Kontekst:** Gdy SM rotation wybierze nowe pary (co 4H lub flash rotation), bot ustawia leverage dla każdej pary na Hyperliquid.
+
+```
+PRZED:
+  const targetLeverage = Number(process.env.LEVERAGE || 1)
+  // Wszystkie pary dostają tę samą dźwignię — BTC, SOL, FARTCOIN = identycznie
+
+PO:
+  for (const pair of newPairs) {
+    const riskParams = getTokenRiskParams(pair)
+    const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+    await setLeverage(pair, targetLeverage)
+    // SOL → 2x, BTC → 2x, FARTCOIN → 1x — każdy wg swojego profilu ryzyka
+  }
+```
+
+**Kluczowa decyzja:** Leverage ustawiamy TYLKO przy rotacji par, NIE co cykl (~90s). Dlaczego?
+
+Zmiana leverage na otwartej pozycji zmienia cenę likwidacji. Wyobraź sobie, że masz SHORT SOL z 3x leverage. Nagle conviction spada, kalkulator mówi "zmniejsz do 1x". Jeśli to zrobimy w środku trade'u, margin requirements się zmienią. Na giełdach to może spowodować natychmiastową likwidację, jeśli akurat masz dużą pozycję blisko progu.
+
+Bezpieczniej: ustaw leverage RAZ (przy wejściu), trzymaj go do wyjścia.
+
+**Analogia:** Jak ustawianie lustra i fotela w samochodzie. Robisz to PRZED jazdą, nie na autostradzie przy 140 km/h.
+
+### Zmiana 2: Vision SL — nowy blok w executeMultiLayerMM
+
+**Plik:** `mm_hl.ts` linia ~6412 (po bloku "contrarian")
+**Kontekst:** `executeMultiLayerMM()` to serce bota — wywoływane co ~90 sekund dla każdej aktywnej pary. Wewnątrz jest kilka systemów stop loss:
+
+```
+Hierarchia Stop Loss (od najwyższego priorytetu):
+
+1. 🎯 Manual stopLossPrice (z tuning config)
+   → Ręcznie ustawiony SL z DynamicConfig
+   → Tylko dla CONTRARIAN pozycji
+
+2. 🎯 VISION SL (NOWY — ATR-based)
+   → Dynamiczny SL z TokenRiskCalculator
+   → Działa na WSZYSTKIE pozycje (SM-aligned + contrarian)
+   → Uruchamia się TYLKO gdy nie ma manual SL
+
+3. 🛡️ PositionProtector (15% hard stop)
+   → Ostatnia linia obrony
+   → Zawsze aktywny, niezależnie od powyższych
+```
+
+Kluczowe: Vision SL jest umieszczony **PO** bloku contrarian (który ma manual SL) ale **PRZED** logiką grid/orderów. Działa na WSZYSTKIE pozycje — to ważne, bo stary manual SL chronił tylko pozycje contrarian. Pozycje SM-aligned (np. SHORT SOL gdy SM też shortują) nie miały żadnego SL oprócz globalnego 15% hard stop.
+
+Teraz SOL SHORT z `visionSL: 11.2%` zostanie zamknięty zanim dotrze do 15% hard stop.
+
+```typescript
+// Nowy blok w executeMultiLayerMM — działa na KAŻDEJ pozycji
+if (position && position.entryPrice) {
+  const visionRisk = getTokenRiskParams(pair)
+  const hasManualSl = overridesConfig?.stopLossPrice > 0
+
+  if (visionRisk && !hasManualSl) {
+    const slDistance = entryPx * visionRisk.visionSlPct
+    const visionStopPrice = posSide === 'short'
+      ? entryPx + slDistance    // SHORT: SL powyżej entry
+      : entryPx - slDistance    // LONG: SL poniżej entry
+
+    if (midPrice crossed visionStopPrice) {
+      → closePositionForPair(pair, 'vision_sl')
+      → return  // Wyjdź z executeMultiLayerMM — pozycja zamknięta
+    }
+  }
+}
+```
+
+### Zmiana 3: getTokenRiskParams() — nowy getter w SmAutoDetector
+
+**Plik:** `SmAutoDetector.ts`
+**Problem:** `mm_hl.ts` potrzebowało `recommendedLeverage` i `visionSlPct`, ale nie miało jak je dostać. Istniejące gettery (`getAutoEmergencyOverrideSync`, `getSmDirection`) nie zwracają danych ryzyka.
+
+Mogliśmy:
+- **Opcja A:** Dodać pola do `getAutoEmergencyOverrideSync` → Zły pomysł. Ta funkcja zwraca `undefined` dla PURE_MM tokenów, a leverage/SL potrzebujemy dla WSZYSTKICH tokenów.
+- **Opcja B:** Nowy dedykowany getter → Prosty, czysty, zawsze działa.
+
+```typescript
+export function getTokenRiskParams(token: string): {
+  recommendedLeverage: number
+  visionSlPct: number
+} | undefined {
+  const analysis = cachedAnalysis.get(token)
+  if (!analysis) return undefined
+  return { recommendedLeverage: analysis.recommendedLeverage, visionSlPct: analysis.visionSlPct }
+}
+```
+
+Jedna funkcja, zero efektów ubocznych, sync (używa cache'u).
+
+### Jak to wygląda w praktyce (live logi po deploy)
+
+```
+🤖 [SmAutoDetector] SOL: {
+  rawShorts: '$114.68M',
+  ratio: '103.62',
+  mode: 'FOLLOW_SM_SHORT',
+  leverage: '2x',          ← TokenRiskCalculator obliczył
+  visionSL: '11.2%'        ← ATR-based, ciaśniejszy niż stary 15%
+}
+
+🚨 [SM ROTATION] FLASH ROTATION — new >$10M imbalance detected
+[SM Auto-Select] Capital Dominance Leaders:
+   SOL: 🟥 SHORT $113.6M net | Engine: -42.65
+   BTC: 🟥 SHORT $108.6M net | Engine: -42.65
+   ETH: 🟥 SHORT $25.6M net | Engine: -35.65
+[SM ROTATION] Locked pairs for 4H: SOL, BTC, ETH
+
+🎯 [DYNAMIC LEV] SOL: 2x (conviction+vol) | Vision SL: 11.2%
+🎯 [DYNAMIC LEV] BTC: 2x (conviction+vol) | Vision SL: 11.2%
+🎯 [DYNAMIC LEV] ETH: 2x (conviction+vol) | Vision SL: 11.2%
+```
+
+A gdy SL uderzy (hipotetycznie):
+```
+🎯 [VISION SL] SOL HIT! Price $225.40 reached ATR stop $224.80
+    (11.2% from entry $201.30) | SHORT | PnL: -11.9% | CLOSING...
+✅ [VISION SL] SOL position closed at $225.40
+```
+
+### Cały flow od danych do egzekucji
+
+```
+whale_tracker.py (co 15-30 min)
+  → /tmp/smart_money_data.json
+    → SmAutoDetector.loadAndAnalyzeAllTokens()
+      → analyzeTokenSm() per token
+        → SignalEngine.analyze() → mode, conviction
+        → TokenRiskCalculator.calculateLeverage() → 1-5x
+        → TokenRiskCalculator.calculateVisionSlPercent() → 0-15%
+      → getTopSmPairs(3) → 4H lock, flash rotation
+        → mm_hl.ts applyRotationPairs()
+          → setLeverage(pair, recommendedLeverage)  ← NOWE
+    → executeMultiLayerMM() co ~90s per pair
+      → Vision SL check (entry ± visionSlPct)      ← NOWE
+        → if triggered: closePositionForPair('vision_sl')
+      → Grid generation (bid/ask multipliers)
+      → Order placement
+```
+
+### Lekcja #31: "Calculate once, enforce everywhere"
+
+`TokenRiskCalculator` oblicza wartości RAZ w `analyzeTokenSm()`. Potem te wartości żyją w `TokenSmAnalysis` i są dostępne przez `getTokenRiskParams()`. Nie ma duplikacji obliczeń — jeden kalkulator, wiele konsumentów:
+
+- `SmAutoDetector` → loguje leverage i SL w analizie tokena
+- `mm_hl.ts` rotation → czyta `recommendedLeverage` do `setLeverage()`
+- `mm_hl.ts` execution → czyta `visionSlPct` do sprawdzenia SL
+
+Gdybyśmy obliczali leverage w jednym miejscu a SL w innym, z czasem parametry by się rozjechały (różne wersje volatility, inne progi). Centralizacja zapewnia spójność.
+
+**Analogia:** Jak centralny system dowodzenia w NATO. Jeden ośrodek wydaje rozkazy (TokenRiskCalculator), różne jednostki je wykonują (rotation, execution). Gdyby każda jednostka sama obliczała strategię, miałbyś chaos.
+
+### Lekcja #32: "Silent success, loud failure"
+
+Vision SL nie loguje nic w normalnej pracy. Logi pojawiają się TYLKO gdy SL zostanie trafiony. To celowe — w systemie tradingowym masz setki cykli na minutę. Logowanie "SL OK" co cykl zaśmieciłoby logi tak, że prawdziwe alarmy byłyby niewidoczne.
+
+Pattern: normalny przebieg = cicho. Problem = głośno. Tak działa dobry monitoring.
+
+**Anty-pattern:** Logowanie wszystkiego "na wszelki wypadek". W produkcyjnym bocie z 3 parami × 90s cyklami × 24h = ~2880 wpisów dziennie PER PAR. Razy 3 pary = 8640 linii "SL OK". Nikt tego nie przeczyta.
+
+### Lekcja #33: "Rotation-time vs cycle-time decisions"
+
+Nie wszystkie decyzje powinny być podejmowane z tą samą częstotliwością:
+
+| Decyzja | Częstotliwość | Dlaczego |
+|---------|--------------|----------|
+| **Leverage** | Co rotację (4H) | Zmiana leverage na otwartej pozycji = ryzyko. Ustaw raz. |
+| **Vision SL** | Co cykl (90s) | SL musi reagować natychmiast na cenę. Opóźnienie = strata. |
+| **Pair selection** | Co 4H (z flash override) | Zbyt częsta rotacja = churn, prowizje, slippage. |
+| **Grid orders** | Co cykl (90s) | Rynek się zmienia, grid musi nadążać. |
+
+Kluczowa intuicja: **im większe konsekwencje decyzji, tym rzadziej ją podejmuj**. Zmiana leverage to "duża" decyzja (wpływa na liquidation price). Sprawdzenie SL to "mała" decyzja (nie zmienia nic, jeśli cena jest OK). Złe dopasowanie częstotliwości do wagi decyzji to klasyczny błąd.
+
+### Lekcja #34: "Priority chains need escape hatches"
+
+Hierarchia SL: manual > Vision SL > PositionProtector (15%). Ale co gdy Vision SL jest zbyt ciasny? Co gdy kalkulator volatility się myli i SL wynosi 5% na tokenie który regularnie robi 7% dzienne wahania?
+
+Dlatego `hasManualSl` sprawdzany jest PIERWSZY. Jeśli ustawisz ręczny `stopLossPrice` w tuning config, Vision SL zostaje pominięty. To "escape hatch" — możesz nadpisać algorytm ręcznie w każdym momencie.
+
+A na samym końcu jest PositionProtector z 15% hard stop — nawet jeśli Vision SL zawiedzie (bug w kalkulatorze, brak danych), 15% złapie katastrofę.
+
+**Analogia:** Systemy bezpieczeństwa w samolocie. Pilot może ręcznie sterować (manual SL). Autopilot reaguje na warunki (Vision SL). Ale nawet jeśli oba zawiodą, jest fizyczny ogranicznik przeciążenia (PositionProtector). Trzy warstwy, każda niezależna.
+
+---
+
+## Risk-Based Position Sizing — "Kwatermistrz" (03.02.2026)
+
+### Problem: Jednakowy budżet, nierówne ryzyko
+
+Bot dawał każdemu tokenowi taki sam `capitalPerPair` — np. $5000. Brzmi sprawiedliwie? Nie jest.
+
+```
+Token A (SOL):  $5000 pozycja × 11.3% SL = $565 ryzyko na trade
+Token B (LIT):  $5000 pozycja × 15.0% SL = $750 ryzyko na trade
+
+Różnica: 33% WIĘCEJ ryzyka na LIT niż na SOL.
+Przy tych samych pieniądzach.
+```
+
+To tak, jakby każdy żołnierz dostał identyczny plecak na wyprawę — bez względu na to, czy idzie w góry czy na plażę. Żołnierz w górach (LIT) niesie 33% więcej ciężaru (ryzyka) niż żołnierz na plaży (SOL), mimo że obaj mają "ten sam budżet".
+
+### Rozwiązanie: Normalizacja dollar-risk
+
+Jedna elegancka formuła:
+
+```
+maxPosition = (accountEquity × riskPerTradePct) / visionSlPct
+```
+
+Rozbijmy to na części:
+- **accountEquity** = ile masz na koncie ($12,372)
+- **riskPerTradePct** = ile % chcesz zaryzykować na jeden trade (5%)
+- **visionSlPct** = Vision SL tego tokena (11.3% dla SOL, 15% dla LIT)
+
+```
+SOL: ($12,372 × 5%) / 11.3% = $5,474 max pozycja
+     → Dollar risk: $5,474 × 11.3% = $618
+
+LIT: ($12,372 × 5%) / 15.0% = $4,124 max pozycja
+     → Dollar risk: $4,124 × 15.0% = $618
+
+Identyczny dollar risk: $618 na OBA tokeny. 🎯
+```
+
+Memecoin z szerokim SL (15%) dostaje MNIEJSZĄ pozycję. Major z ciasnym SL (11.3%) dostaje WIĘKSZĄ. Ale ryzyko w dolarach jest takie samo. To jest esencja risk management — nie "ile kupuję", ale "ile mogę stracić".
+
+### Gdzie to siedzi w pipeline
+
+```
+upstream multipliers → MarketVision → RISK CAP (nowy) → inventorySkew → grid
+                                          ↑
+                                    OSTATNI CAP
+                                    Nic powyżej nie
+                                    może go przekroczyć
+```
+
+Risk Cap jest umieszczony CELOWO jako **ostatni filtr** przed gridów. To znaczy:
+- MarketVision może powiększyć pozycję (1.25x trend confidence) ✅
+- Adaptive sizing może zwiększyć (1.5x) ✅
+- Ale ŻADEN z nich nie przebije limitu risk cap ❌
+
+Analogia: to jak limit na karcie kredytowej. Możesz kupować co chcesz, ale powyżej limitu — odmowa. Nie ważne ile razy klikniesz "kup".
+
+### Graceful fallback — "Kwatermistrz nie blokuje, gdy nie ma danych"
+
+```typescript
+const riskParams = getTokenRiskParams(pair)
+if (riskParams && this.positionRiskManager) {
+  // Risk cap aktywny — mamy dane SM i equity
+} else {
+  // Brak danych? Skip. Stare zachowanie.
+}
+```
+
+Dwa warunki muszą być spełnione:
+1. `getTokenRiskParams(pair)` zwraca dane (SmAutoDetector ma analizę tego tokena)
+2. `positionRiskManager` istnieje (bot zna swoje equity)
+
+Jeśli którykolwiek brakuje — risk cap nie działa, a `capitalPerPair` przepływa bez zmian. Zero ryzyka awarii przy starcie bota lub brakujących danych.
+
+### Konfiguracja
+
+Jeden env var: `RISK_PER_TRADE_PCT` (default: `0.05` = 5%)
+
+- **5%** = konserwatywne. Przy $12K equity ryzykujesz max $618 na trade.
+- **10%** = agresywne. $1,237 na trade.
+- **2%** = ultra-safe. $247 na trade.
+
+Zmiana nie wymaga restartu kodu — env var czytany co cykl.
+
+### Weryfikacja (live logi)
+
+```
+[RISK SIZING] LIT: Cap $6418 -> $4124 (equity=$12372 x 5% / 15.0% SL)
+```
+
+Czytamy: "LIT chciał $6418 pozycję, ale Risk Cap ograniczył do $4124 (bo equity $12,372 × 5% ryzyka / 15% SL = $4,124)."
+
+Matematyka się zgadza: $12,372 × 0.05 / 0.15 = $4,124. ✅
+
+### Lekcja #35: "Equal Risk, Not Equal Capital"
+
+To jest fundamentalna zasada zarządzania portfelem. Prawdziwe fundusze hedgingowe nie dają $1M na każdą pozycję — dają **tyle, żeby ryzyko było jednakowe**.
+
+Wyobraź sobie, że masz 10 pozycji w portfelu. 5 z nich to majors (BTC, ETH, SOL) z 11% SL, 5 to altcoiny (LIT, FARTCOIN) z 15% SL. Jeśli dajesz każdej $5000:
+
+```
+Najgorszy scenariusz (wszystkie SL trafione):
+  Majors:  5 × $5000 × 11% = $2,750 strata
+  Altcoiny: 5 × $5000 × 15% = $3,750 strata
+  RAZEM: $6,500
+
+Altcoiny stanowią 57.7% straty mimo że to "połowa portfela".
+```
+
+Z risk-based sizing:
+```
+  Majors:  5 × $5,474 × 11.3% = $3,093 strata
+  Altcoiny: 5 × $4,124 × 15.0% = $3,093 strata
+  RAZEM: $6,186
+
+Każda strona = dokładnie 50%. Portfel jest ZBALANSOWANY pod kątem ryzyka.
+```
+
+### Lekcja #36: "Last Word Architecture"
+
+Risk Cap siedzi na końcu łańcucha celowo. To wzorzec "Last Word" — ostatni filtr w pipeline ma prawo weta nad wszystkim powyżej.
+
+Alternatywa (zła): umieścić risk cap PRZED MarketVision. Wtedy MarketVision mogłoby powiększyć pozycję powyżej risk-normalized limitu. "Trend jest silny, daj 1.25x!" → $5,155 na LIT zamiast $4,124. Dollar risk = $773 zamiast $618. Risk normalizacja złamana.
+
+**Zasada:** Filtr bezpieczeństwa ZAWSZE na końcu pipeline. Nigdy na początku, nigdy w środku. Jak zawór bezpieczeństwa w rurociągu — musi być na samym końcu, bo inaczej ciśnienie za nim może dalej rosnąć.
+
+### Lekcja #37: "Infinity as Safe Default"
+
+```typescript
+if (visionSlPct <= 0 || accountEquity <= 0) return Infinity
+```
+
+Gdy dane są brakujące lub błędne, `calculateRiskBasedMaxPosition()` zwraca `Infinity`. To znaczy: "nie mam danych, nie nakładam limitu". Brzmi kontr-intuicyjnie? Ale to bezpieczne, bo:
+
+1. `Infinity` nigdy nie jest mniejsze od `capitalPerPair` → warunek `capitalPerPair > riskBasedMax` jest false → cap nie działa
+2. Stare zachowanie jest zachowane w 100%
+3. Brak danych ≠ "ustaw limit 0" (co by zablokowało handel)
+
+**Pattern:** W systemach bezpieczeństwa, "brak danych" powinien oznaczać "zachowaj status quo", nie "zablokuj wszystko" (chyba że konsekwencje są katastrofalne). Risk cap to optymalizacja, nie ochrona krytyczna. PositionProtector (15% hard stop) to ochrona krytyczna — ON nigdy nie zwraca Infinity.
+
+---
+
+*Ostatnia aktualizacja: 2026-02-03*
 *Autor: Claude (z pomocą Jerry'ego)*

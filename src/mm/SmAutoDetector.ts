@@ -11,9 +11,13 @@
 import { promises as fsp } from 'fs'
 import { SmartMoneyEntry, SmartMoneyFile } from '../types/smart_money.js'
 import { StrategyPriority } from './dynamic_config.js'
+import { getNansenProAPI } from '../integrations/nansen_pro.js'
 
 // Signal Engine Integration (v3 - Data Fusion Core with MASTER CONTROL)
 import { SignalEngine, TOKEN_CONFIGS } from '../core/strategy/SignalEngine.js'
+
+// Dynamic Leverage + Vision SL
+import { TokenRiskCalculator } from './TokenRiskCalculator.js'
 
 // Centralized SHORT-ONLY config
 import { RATIO_ALERTS, RATIO_ALERT_COOLDOWN_MS } from '../config/short_only_config.js'
@@ -41,9 +45,42 @@ export const PERP_TO_ONCHAIN_PROXY: Record<string, OnChainProxy> = {
     chain: 'base',
     tokenAddress: '0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b',
     description: 'Virtual Protocol on Base'
+  },
+  'ZEC': {
+    chain: 'solana',
+    tokenAddress: 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS',
+    description: 'Zcash on Solana'
+  },
+  'LIT': {
+    chain: 'ethereum',
+    tokenAddress: '0xb59490ab09a0f526cc7305822ac65f2ab12f9723',
+    description: 'Litentry on Ethereum'
+  },
+  'SOL': {
+    chain: 'solana',
+    tokenAddress: 'So11111111111111111111111111111111111111112',
+    description: 'Solana native (Wrapped SOL)'
+  },
+  'WIF': {
+    chain: 'solana',
+    tokenAddress: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+    description: 'dogwifhat on Solana'
+  },
+  'kPEPE': {
+    chain: 'ethereum',
+    tokenAddress: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+    description: 'Pepe on Ethereum (1000x = kPEPE on HL)'
+  },
+  'DOGE': {
+    chain: 'bnb',
+    tokenAddress: '0xba2ae424d960c26247dd6c32edc70b295c744c43',
+    description: 'Dogecoin on BNB Chain'
+  },
+  'XRP': {
+    chain: 'bnb',
+    tokenAddress: '0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe',
+    description: 'XRP Token on BNB Chain'
   }
-  // Add more mappings as needed:
-  // 'AIXBT': { chain: 'base', tokenAddress: '0x...', description: 'aixbt by Virtuals' }
 }
 
 // ============================================================
@@ -207,6 +244,9 @@ export interface TokenSmAnalysis {
   signalEngineAllowShorts: boolean  // SignalEngine says SHORTS are OK
   signalEngineOverride: boolean     // SignalEngine wants to override REGIME
   engineScore: number               // Raw Engine score (-50 to +50)
+  // 🎯 DYNAMIC RISK (TokenRiskCalculator)
+  recommendedLeverage: number       // Dynamic leverage (1-5x)
+  visionSlPct: number               // ATR-based SL as fraction of entry (e.g., 0.125 = 12.5%)
 }
 
 // ============================================================
@@ -515,6 +555,26 @@ export function smEntryToSignals(token: string, entry: SmartMoneyEntry): SignalS
 }
 
 // ============================================================
+// VOLATILITY ESTIMATION
+// Maps existing TOKEN_VOLATILITY_CONFIG to daily vol estimate
+// ============================================================
+
+/**
+ * Estimates daily volatility for a token using existing volatility config.
+ * Formula: minStopLossPercent × atrMultiplier (both are token-specific).
+ *
+ * Examples:
+ *   VIRTUAL: (5/100) × 2.5 = 0.125 (12.5% daily vol)
+ *   LIT:     (4/100) × 1.8 = 0.072 (7.2% daily vol)
+ *   ENA:     (3.5/100) × 1.8 = 0.063 (6.3% daily vol)
+ *   DEFAULT: (3/100) × 1.5 = 0.045 (4.5% daily vol)
+ */
+function estimateDailyVolatility(token: string): number {
+  const config = getTokenVolatilityConfig(token)
+  return (config.minStopLossPercent / 100) * config.atrMultiplier
+}
+
+// ============================================================
 // MAIN AUTO-DETECTION FUNCTION
 // ============================================================
 
@@ -602,14 +662,31 @@ export function analyzeTokenSm(
 
     console.log(`🎯 [${token}] Using whale_tracker confidence: ${whaleTrackerConfidence}% (${whaleTrackerMode})`)
 
+    // Capital Dominance v3: Attenuate on-chain flows when perps dominate
+    let flowAttenuation = 1.0
+    const onchainSmNet = smData.onchain_sm_net ?? 0
+    const onchainWhaleNet = smData.onchain_whale_net ?? 0
+    const onchainAbsVol = Math.abs(onchainSmNet) + Math.abs(onchainWhaleNet)
+
+    if (totalExposure > 0 && onchainAbsVol > 0) {
+      const volumeRatio = totalExposure / onchainAbsVol
+      if (volumeRatio > 10) {
+        flowAttenuation = 0.1  // Perps 10x+ bigger → on-chain noise
+        console.log(`📉 [${token}] Capital Dominance: perps $${(totalExposure/1e6).toFixed(1)}M >> onchain $${(onchainAbsVol/1e6).toFixed(1)}M → attenuation=0.1`)
+      } else if (volumeRatio > 3) {
+        flowAttenuation = 0.3  // Perps 3-10x → reduce on-chain weight
+        console.log(`📉 [${token}] Capital Dominance: perps $${(totalExposure/1e6).toFixed(1)}M > onchain $${(onchainAbsVol/1e6).toFixed(1)}M → attenuation=0.3`)
+      }
+    }
+
     // 🧠 SIGNAL ENGINE v3 - Data Fusion Analysis (MASTER CONTROL)
     const engineSignal = SignalEngine.analyze(
       token,
       {
-        flow_1h: smData.flow_1h ?? smData.netflow_1h ?? 0,
-        flow_24h: smData.netflow_24h ?? smData.flow_24h ?? 0,
-        flow_7d: smData.netflow_7d ?? smData.flow_7d ?? 0,
-        cex_flow: smData.cex_netflow_7d ?? 0
+        flow_1h: (smData.flow_1h ?? smData.netflow_1h ?? 0) * flowAttenuation,
+        flow_24h: (smData.netflow_24h ?? smData.flow_24h ?? 0) * flowAttenuation,
+        flow_7d: (smData.netflow_7d ?? smData.flow_7d ?? 0) * flowAttenuation,
+        cex_flow: (smData.cex_netflow_7d ?? 0) * flowAttenuation
       },
       {
         ratio: ratio,
@@ -656,13 +733,30 @@ export function analyzeTokenSm(
     // FALLBACK: No whale_tracker confidence — still run SignalEngine for validation
     console.log(`⚠️ [${token}] No whale_tracker confidence, running Engine with ratio-only data`)
 
+    // Capital Dominance v3: Attenuate on-chain flows when perps dominate (fallback path)
+    let flowAttenuationFb = 1.0
+    const onchainSmNetFb = smData.onchain_sm_net ?? 0
+    const onchainWhaleNetFb = smData.onchain_whale_net ?? 0
+    const onchainAbsVolFb = Math.abs(onchainSmNetFb) + Math.abs(onchainWhaleNetFb)
+
+    if (totalExposure > 0 && onchainAbsVolFb > 0) {
+      const volumeRatioFb = totalExposure / onchainAbsVolFb
+      if (volumeRatioFb > 10) {
+        flowAttenuationFb = 0.1
+        console.log(`📉 [${token}] Capital Dominance (fb): perps $${(totalExposure/1e6).toFixed(1)}M >> onchain $${(onchainAbsVolFb/1e6).toFixed(1)}M → attenuation=0.1`)
+      } else if (volumeRatioFb > 3) {
+        flowAttenuationFb = 0.3
+        console.log(`📉 [${token}] Capital Dominance (fb): perps $${(totalExposure/1e6).toFixed(1)}M > onchain $${(onchainAbsVolFb/1e6).toFixed(1)}M → attenuation=0.3`)
+      }
+    }
+
     const engineSignal = SignalEngine.analyze(
       token,
       {
-        flow_1h: smData.flow_1h ?? smData.netflow_1h ?? 0,
-        flow_24h: smData.netflow_24h ?? smData.flow_24h ?? 0,
-        flow_7d: smData.netflow_7d ?? smData.flow_7d ?? 0,
-        cex_flow: smData.cex_netflow_7d ?? 0
+        flow_1h: (smData.flow_1h ?? smData.netflow_1h ?? 0) * flowAttenuationFb,
+        flow_24h: (smData.netflow_24h ?? smData.flow_24h ?? 0) * flowAttenuationFb,
+        flow_7d: (smData.netflow_7d ?? smData.flow_7d ?? 0) * flowAttenuationFb,
+        cex_flow: (smData.cex_netflow_7d ?? 0) * flowAttenuationFb
       },
       {
         ratio: ratio,
@@ -705,6 +799,16 @@ export function analyzeTokenSm(
     trendStrength
   )
 
+  // 🎯 DYNAMIC RISK: Leverage + Vision SL
+  const dailyVol = estimateDailyVolatility(token)
+  const recommendedLeverage = TokenRiskCalculator.calculateLeverage({
+    symbol: token,
+    volatility: dailyVol,
+    confidence: convictionScore * 100,
+    current_price: 0  // Price not available in SmAutoDetector; used by calculateVisionStopLoss with entryPrice
+  })
+  const visionSlPct = TokenRiskCalculator.calculateVisionSlPercent(dailyVol)
+
   console.log(`🤖 [SmAutoDetector] ${token}:`, {
     rawLongs: `$${(rawLongsUsd / 1e6).toFixed(2)}M`,
     rawShorts: `$${(rawShortsUsd / 1e6).toFixed(2)}M`,
@@ -714,7 +818,9 @@ export function analyzeTokenSm(
     trend: `${trend} (${trendStrength})`,
     mode,
     bidMult: multipliers.bid.toFixed(2),
-    askMult: multipliers.ask.toFixed(2)
+    askMult: multipliers.ask.toFixed(2),
+    leverage: `${recommendedLeverage}x`,
+    visionSL: `${(visionSlPct * 100).toFixed(1)}%`
   })
 
   return {
@@ -738,7 +844,10 @@ export function analyzeTokenSm(
     signalEngineAllowLongs,
     signalEngineAllowShorts,
     signalEngineOverride,
-    engineScore
+    engineScore,
+    // 🎯 DYNAMIC RISK
+    recommendedLeverage,
+    visionSlPct
   }
 }
 
@@ -1008,9 +1117,13 @@ export async function loadAndAnalyzeAllTokens(forceReload = false): Promise<Map<
     const content = await fsp.readFile(smDataPath, 'utf-8')
     const smFile: SmartMoneyFile = JSON.parse(content)
 
+    // Inject on-chain proxy data for tokens with weak HL perps data (ZEC, VIRTUAL)
+    const nansenClient = getNansenProAPI()
+    const enrichedSmData = await injectProxyData(smFile.data, nansenClient)
+
     const newAnalysis = new Map<string, TokenSmAnalysis>()
 
-    for (const [token, smData] of Object.entries(smFile.data)) {
+    for (const [token, smData] of Object.entries(enrichedSmData)) {
       const analysis = analyzeTokenSm(token, smData)
       newAnalysis.set(token, analysis)
     }
@@ -1156,6 +1269,22 @@ export function isFollowSmToken(token: string): boolean {
 }
 
 /**
+ * Gets dynamic risk parameters for a token from cached analysis.
+ * Used by mm_hl.ts for per-token leverage and Vision SL.
+ */
+export function getTokenRiskParams(token: string): {
+  recommendedLeverage: number
+  visionSlPct: number
+} | undefined {
+  const analysis = cachedAnalysis.get(token)
+  if (!analysis) return undefined
+  return {
+    recommendedLeverage: analysis.recommendedLeverage,
+    visionSlPct: analysis.visionSlPct
+  }
+}
+
+/**
  * Get SM direction for a token: 'SHORT', 'LONG', or null.
  */
 export function getSmDirection(token: string): 'SHORT' | 'LONG' | null {
@@ -1178,31 +1307,86 @@ export function shouldHoldForTp(token: string, positionSide: 'short' | 'long' | 
   return (positionSide === 'short' && dir === 'SHORT') || (positionSide === 'long' && dir === 'LONG')
 }
 
+// ============================================================
+// SM ROTATION STATE (4H Lock + Flash Rotation)
+// Prevents token churn by locking selected pairs for 4 hours.
+// Emergency override: >$10M new imbalance triggers immediate rotation.
+// ============================================================
+
+let lastSmRotationTime = 0
+let cachedSmPairs: string[] = []
+const SM_ROTATION_LOCK_MS = 4 * 60 * 60 * 1000   // 4 hours
+const FLASH_ROTATION_THRESHOLD = 10_000_000        // $10M
+
 /**
  * Returns top N tokens by SM conviction score.
  * Only includes tokens with FOLLOW_SM_SHORT or FOLLOW_SM_LONG mode.
  * Call loadAndAnalyzeAllTokens() first to populate cache.
+ *
+ * 4H ROTATION LOCK: Once pairs are selected, they stay locked for 4 hours
+ * to prevent churn from minor ranking shifts every ~90s cycle.
+ *
+ * FLASH ROTATION: If a NEW token (not already tracked) appears with >$10M
+ * net imbalance, the lock is bypassed and rotation happens immediately.
  */
 export function getTopSmPairs(count: number): string[] {
-  if (!cachedAnalysis || cachedAnalysis.size === 0) return []
+  if (!cachedAnalysis || cachedAnalysis.size === 0) return cachedSmPairs.length > 0 ? cachedSmPairs : []
 
   const eligible = [...cachedAnalysis.entries()]
     .filter(([_, a]) => a.mode === MmMode.FOLLOW_SM_SHORT || a.mode === MmMode.FOLLOW_SM_LONG)
 
-  if (eligible.length === 0) return []
+  if (eligible.length === 0) return cachedSmPairs.length > 0 ? cachedSmPairs : []
 
-  return eligible
-    .sort((a, b) => {
-      // Primary: Engine score (absolute value, higher = stronger signal)
-      const scoreDiff = Math.abs(b[1].engineScore) - Math.abs(a[1].engineScore)
-      if (scoreDiff !== 0) return scoreDiff
-      // Tiebreaker: LS ratio (capped Infinity to 1000, higher = more lopsided)
-      const ratioA = Math.min(a[1].ratio, 1000)
-      const ratioB = Math.min(b[1].ratio, 1000)
-      return ratioB - ratioA
-    })
-    .slice(0, count)
-    .map(([token]) => token)
+  // Capital Dominance v3: Sort by absolute net USD imbalance (biggest money wins)
+  eligible.sort((a, b) => {
+    // PRIMARY: Capital Dominance = |longs - shorts| (biggest money wins)
+    const netA = Math.abs(a[1].rawLongsUsd - a[1].rawShortsUsd)
+    const netB = Math.abs(b[1].rawLongsUsd - b[1].rawShortsUsd)
+    if (netB !== netA) return netB - netA
+    // TIEBREAKER: Engine score
+    return Math.abs(b[1].engineScore) - Math.abs(a[1].engineScore)
+  })
+
+  const newTopTokens = eligible.slice(0, count).map(([token]) => token)
+  const now = Date.now()
+
+  // --- FLASH ROTATION CHECK ---
+  // If a new token with >$10M imbalance appeared that wasn't in cached list, rotate immediately
+  const isFlashRotation = newTopTokens.some(token => {
+    if (cachedSmPairs.includes(token)) return false  // already tracked
+    const analysis = cachedAnalysis.get(token)
+    if (!analysis) return false
+    const absNet = Math.abs(analysis.rawLongsUsd - analysis.rawShortsUsd)
+    return absNet > FLASH_ROTATION_THRESHOLD
+  })
+
+  // --- 4H LOCK ---
+  if (cachedSmPairs.length > 0 && !isFlashRotation && (now - lastSmRotationTime < SM_ROTATION_LOCK_MS)) {
+    // Locked — return cached pairs
+    return cachedSmPairs
+  }
+
+  // --- ROTATE ---
+  if (isFlashRotation) {
+    console.log(`🚨 [SM ROTATION] FLASH ROTATION — new >$10M imbalance detected`)
+  } else if (cachedSmPairs.length > 0) {
+    console.log(`🔄 [SM ROTATION] 4H rotation cycle — updating portfolio`)
+  }
+
+  // Log Capital Dominance leaders
+  console.log(`[SM Auto-Select] Capital Dominance Leaders:`)
+  eligible.slice(0, count + 2).forEach(([t, a]) => {
+    const net = a.rawLongsUsd - a.rawShortsUsd
+    const dir = net > 0 ? '🟩 LONG' : '🟥 SHORT'
+    console.log(`   ${t}: ${dir} $${(Math.abs(net)/1e6).toFixed(1)}M net | Engine: ${a.engineScore}`)
+  })
+
+  // Update cache
+  lastSmRotationTime = now
+  cachedSmPairs = newTopTokens
+
+  console.log(`[SM ROTATION] Locked pairs for 4H: ${cachedSmPairs.join(', ')}`)
+  return cachedSmPairs
 }
 
 /**
@@ -1304,13 +1488,29 @@ export async function injectProxyData(
   const enrichedData = { ...smData }
 
   for (const [perpSymbol, proxy] of Object.entries(PERP_TO_ONCHAIN_PROXY)) {
-    // Only inject if no data exists for this perp
-    if (!enrichedData[perpSymbol] || !enrichedData[perpSymbol].current_longs_usd) {
-      const proxyData = await fetchProxySmData(perpSymbol, nansenClient)
-      if (proxyData) {
-        enrichedData[perpSymbol] = proxyData
-        console.log(`✅ [PROXY] Injected ${perpSymbol} data from ${proxy.chain}`)
+    const proxyData = await fetchProxySmData(perpSymbol, nansenClient)
+    if (!proxyData) continue
+
+    const existing = enrichedData[perpSymbol]
+    const perpVol = existing
+      ? (existing.current_longs_usd ?? 0) + (existing.current_shorts_usd ?? 0)
+      : 0
+    const onchainVol = (proxyData.current_longs_usd ?? 0) + (proxyData.current_shorts_usd ?? 0)
+
+    if (perpVol > 0 && perpVol > onchainVol) {
+      // PERP dominates — keep perp data, add on-chain as supplement
+      enrichedData[perpSymbol] = {
+        ...existing!,
+        onchain_sm_net: (proxyData.current_longs_usd ?? 0) - (proxyData.current_shorts_usd ?? 0),
+        onchain_whale_net: proxyData.flow ?? 0,
+        onchain_chain: proxy.chain,
+        onchain_confidence: proxyData.trading_mode_confidence ?? 0,
       }
+      console.log(`✅ [PROXY] ${perpSymbol}: PERP dominates ($${(perpVol/1e6).toFixed(1)}M > $${(onchainVol/1e6).toFixed(1)}M) — kept perp data, added onchain`)
+    } else {
+      // On-chain dominates (or no perp data) — use on-chain as primary
+      enrichedData[perpSymbol] = proxyData
+      console.log(`✅ [PROXY] ${perpSymbol}: ONCHAIN primary ($${(onchainVol/1e6).toFixed(1)}M vs $${(perpVol/1e6).toFixed(1)}M perp)`)
     }
   }
 

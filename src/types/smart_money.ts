@@ -54,6 +54,12 @@ export interface SmartMoneyEntry {
     whale_balance_change_7d_pct?: number // % change in whale holdings
     timestamp?: string
   }
+
+  // Capital Dominance v3: On-chain supplement (when perps dominate, on-chain added here)
+  onchain_sm_net?: number         // SM net flow USD (positive=buying)
+  onchain_whale_net?: number      // Whale net flow USD
+  onchain_chain?: string          // Source chain (solana, base, bnb, etc.)
+  onchain_confidence?: number     // Nansen confidence 0-100
 }
 
 export interface SmartMoneyFile {

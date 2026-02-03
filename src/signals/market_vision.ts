@@ -81,7 +81,7 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     }
   },
   'MON': {
-    chain: 'bsc',
+    chain: 'bnb',
     address: '0xD4099A517f2Fbe8a730d2ECaad1D0824B75e084a',
     spreadCaps: { min: 1.0, max: 3.0 }
   },
@@ -170,6 +170,36 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     chain: 'hyperliquid',
     address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
     spreadCaps: { min: 1.0, max: 3.0 }
+  },
+  'LIT': {
+    chain: 'ethereum',
+    address: '0xb59490ab09a0f526cc7305822ac65f2ab12f9723',
+    spreadCaps: { min: 0.9, max: 1.5 }
+  },
+  'SOL': {
+    chain: 'solana',
+    address: 'So11111111111111111111111111111111111111112',
+    spreadCaps: { min: 0.9, max: 1.3 }
+  },
+  'WIF': {
+    chain: 'solana',
+    address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+    spreadCaps: { min: 1.0, max: 2.5 }
+  },
+  'kPEPE': {
+    chain: 'ethereum',
+    address: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
+    spreadCaps: { min: 0.9, max: 1.5 }
+  },
+  'DOGE': {
+    chain: 'bnb',
+    address: '0xba2ae424d960c26247dd6c32edc70b295c744c43',
+    spreadCaps: { min: 0.9, max: 1.3 }
+  },
+  'XRP': {
+    chain: 'bnb',
+    address: '0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe',
+    spreadCaps: { min: 0.9, max: 1.3 }
   }
 };
 
