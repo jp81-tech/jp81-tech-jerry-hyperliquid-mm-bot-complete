@@ -1548,7 +1548,7 @@ export class DynamicConfigManager {
       const alertLevel = smReversal.strength === 'EXTREME' ? '🚨🚨🚨' :
                          smReversal.strength === 'STRONG' ? '🚨🚨' : '⚠️'
 
-      // Only log STRONG/EXTREME reversals as warnings; WEAK is noise when GENERALS_OVERRIDE active
+      // Only log STRONG/EXTREME reversals as warnings; WEAK is noise when FOLLOW_SM active
       if (smReversal.strength === 'STRONG' || smReversal.strength === 'EXTREME') {
         this.notifier.warn(
           `${alertLevel} [AUTO-REVERSAL] ${token} | ${smReversal.type} (${smReversal.strength}) ` +
@@ -1836,7 +1836,7 @@ export class DynamicConfigManager {
       nansenBoost.alertValue >= 50_000 &&
       (nansenBoost.alertType === 'SM_DISTRIBUTION' || nansenBoost.alertType === 'WHALE_ACTIVITY')
 
-    // ☢️ SHORT_ONLY_TOKENS: GENERALS_OVERRIDE ma ostatnie słowo - CONTRARIAN nie może overridować
+    // ☢️ SHORT_ONLY_TOKENS: FOLLOW_SM ma ostatnie słowo - CONTRARIAN nie może overridować
     if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isShortOnlyToken(token)) {
       // Calculate contrarian multipliers with Nansen boost
       // 🔔 Apply Nansen boost to make contrarian more aggressive when we have SM alert confirmation

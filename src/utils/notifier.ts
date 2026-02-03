@@ -31,7 +31,6 @@ export class ConsoleNotifier implements Notifier {
       'BULL TRAP',
       'BULL_TRAP',
       'DEAD CAT',
-      'GENERALS_OVERRIDE',
       'PURE_MM',
       'BidLocked:',
       'AskLocked:',

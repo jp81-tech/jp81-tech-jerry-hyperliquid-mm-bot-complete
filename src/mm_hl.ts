@@ -6239,7 +6239,7 @@ class HyperliquidMMBot {
     if (overridesConfig && overridesConfig.enabled && !isShortOnlyToken(symbol)) {
       // ============================================================
       // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
-      // ☢️ Disabled for SHORT_ONLY_TOKENS - GENERALS_OVERRIDE has final say
+      // ☢️ Disabled for SHORT_ONLY_TOKENS - FOLLOW_SM has final say
       // ============================================================
       if (position && Math.abs(position.size) > 0) {
         const positionSide = position.size > 0 ? 'long' : 'short'
@@ -6412,7 +6412,7 @@ class HyperliquidMMBot {
 
     // 🔮⚔️ SHADOW-CONTRARIAN CONFLICT DETECTION
     // If we have a contrarian position AND strong shadow signal in opposite direction
-    // ☢️ Disabled for SHORT_ONLY_TOKENS - GENERALS_OVERRIDE has final say
+    // ☢️ Disabled for SHORT_ONLY_TOKENS - FOLLOW_SM has final say
     if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isShortOnlyToken(symbol)) {
       const positionSideForConflict: 'long' | 'short' | 'none' =
         position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none'
