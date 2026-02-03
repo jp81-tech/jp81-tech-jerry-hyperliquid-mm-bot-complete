@@ -1126,6 +1126,39 @@ export function getAutoEmergencyOverrideSync(token: string): {
 }
 
 /**
+ * Check if token is in FOLLOW_SM mode (SHORT or LONG) based on SM analysis.
+ * Replaces hardcoded SHORT_ONLY_TOKENS list - bot decides direction from data.
+ */
+export function isFollowSmToken(token: string): boolean {
+  const analysis = cachedAnalysis.get(token)
+  if (!analysis) return false
+  return analysis.mode === MmMode.FOLLOW_SM_SHORT || analysis.mode === MmMode.FOLLOW_SM_LONG
+}
+
+/**
+ * Get SM direction for a token: 'SHORT', 'LONG', or null.
+ */
+export function getSmDirection(token: string): 'SHORT' | 'LONG' | null {
+  const analysis = cachedAnalysis.get(token)
+  if (!analysis) return null
+  if (analysis.mode === MmMode.FOLLOW_SM_SHORT) return 'SHORT'
+  if (analysis.mode === MmMode.FOLLOW_SM_LONG) return 'LONG'
+  return null
+}
+
+/**
+ * Check if holding position aligns with SM direction (HOLD_FOR_TP logic).
+ * SHORT position + SM SHORT = hold for TP
+ * LONG position + SM LONG = hold for TP
+ */
+export function shouldHoldForTp(token: string, positionSide: 'short' | 'long' | 'none'): boolean {
+  if (positionSide === 'none') return false
+  const dir = getSmDirection(token)
+  if (!dir) return false
+  return (positionSide === 'short' && dir === 'SHORT') || (positionSide === 'long' && dir === 'LONG')
+}
+
+/**
  * Returns top N tokens by SM conviction score.
  * Only includes tokens with FOLLOW_SM_SHORT or FOLLOW_SM_LONG mode.
  * Call loadAndAnalyzeAllTokens() first to populate cache.

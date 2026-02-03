@@ -19,8 +19,8 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode } from './mm/SmAutoDetector.js'
-import { isShortOnlyToken, isHoldForTpToken, SHORT_ONLY_TOKENS, getBounceFilterConfig } from './config/short_only_config.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection } from './mm/SmAutoDetector.js'
+import { getBounceFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -4874,7 +4874,7 @@ class HyperliquidMMBot {
           const pairConfig = NANSEN_TOKENS[pair.toUpperCase()]?.tuning
           const isFollowSmMode = pairConfig?.followSmMode === 'FOLLOW_SM_SHORT' ||
                                   pairConfig?.followSmMode === 'FOLLOW_SM_LONG' ||
-                                  isShortOnlyToken(pair)
+                                  isFollowSmToken(pair)
 
           if (isFollowSmMode) {
             this.notifier.warn(
@@ -5949,9 +5949,7 @@ class HyperliquidMMBot {
 
     // 🛑 AUTO-PAUSE CHECK (Safety Circuit Breaker)
     // 🧠 SignalEngine PURE_MM tokens can bypass global pause
-    const signalEngineResultPause = isShortOnlyToken(pair)
-      ? getAutoEmergencyOverrideSync(pair)
-      : null;
+    const signalEngineResultPause = getAutoEmergencyOverrideSync(pair) ?? null;
     const isSignalEnginePureMmPause = signalEngineResultPause?.signalEngineOverride &&
       signalEngineResultPause?.mode === MmMode.PURE_MM;
 
@@ -6160,8 +6158,8 @@ class HyperliquidMMBot {
       }
       if (sizeMultipliers.bid === 0 && position && position.size < 0) {
         const posVal = Math.abs(position.size) * midPrice
-        // 🔧 FIX 2026-01-23: Skip position reduction for HOLD_FOR_TP tokens
-        if (isHoldForTpToken(symbol)) {
+        // 💎 HOLD_FOR_TP: Skip position reduction when SM direction aligns with position
+        if (shouldHoldForTp(symbol, 'short')) {
           console.log(`💎 [HOLD_FOR_TP] ${symbol}: Keeping SHORT position for TP (no bid restore)`);
         } else if (posVal > 50) { // Only if position > $50
           sizeMultipliers.bid = 1.0  // Restore bid for position reduction
@@ -6194,12 +6192,11 @@ class HyperliquidMMBot {
           : (entryPriceForAlert - midPrice) * positionSizeForAlert)
       : 0
 
-    // Determine current mode based on HOLD_FOR_TP_TOKENS and SM following
-    // 🔧 FIX 2026-02-01: Centralized config
+    // Determine current mode based on SM direction and position alignment
     const currentMode: 'MM' | 'FOLLOW_SM' | 'HOLD_FOR_TP' =
-      isHoldForTpToken(symbol) && positionSideForAlert === 'short'
+      shouldHoldForTp(symbol, positionSideForAlert)
         ? 'HOLD_FOR_TP'
-        : 'FOLLOW_SM'
+        : isFollowSmToken(symbol) ? 'FOLLOW_SM' : 'MM'
 
     // Calculate actual skew
     const maxPosUsd = Number(process.env.MAX_POSITION_USD || 10000)
@@ -6246,10 +6243,10 @@ class HyperliquidMMBot {
 
     // ═══════════════════════════════════════════════════════════════════════════
 
-    if (overridesConfig && overridesConfig.enabled && !isShortOnlyToken(symbol)) {
+    if (overridesConfig && overridesConfig.enabled && !isFollowSmToken(symbol)) {
       // ============================================================
       // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
-      // ☢️ Disabled for SHORT_ONLY_TOKENS - FOLLOW_SM has final say
+      // ☢️ Disabled for FOLLOW_SM tokens - SM has final say
       // ============================================================
       if (position && Math.abs(position.size) > 0) {
         const positionSide = position.size > 0 ? 'long' : 'short'
@@ -6355,10 +6352,8 @@ class HyperliquidMMBot {
         // When profitable, we should take profit by buying back
         const SM_ALIGNED_TP_THRESHOLD = 0.005  // 0.5% profit to trigger TP
 
-        // 🔧 FIX 2026-01-24: Skip SM-ALIGNED TP for HOLD_FOR_TP tokens
-        // User wants to hold positions longer, SM is still opening new shorts
-        // 🔧 FIX 2026-02-01: Centralized config
-        const skipSmAlignedTp = isHoldForTpToken(symbol)
+        // 💎 Skip SM-ALIGNED TP when SM direction aligns with position (hold for bigger TP)
+        const skipSmAlignedTp = shouldHoldForTp(symbol, positionSide as 'short' | 'long')
 
         if (sizeMultipliers.bid === 0 && positionSide === 'short' && !skipSmAlignedTp) {
           const entryPx = position.entryPrice || midPrice
@@ -6422,8 +6417,8 @@ class HyperliquidMMBot {
 
     // 🔮⚔️ SHADOW-CONTRARIAN CONFLICT DETECTION
     // If we have a contrarian position AND strong shadow signal in opposite direction
-    // ☢️ Disabled for SHORT_ONLY_TOKENS - FOLLOW_SM has final say
-    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isShortOnlyToken(symbol)) {
+    // ☢️ Disabled for FOLLOW_SM tokens - SM has final say
+    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isFollowSmToken(symbol)) {
       const positionSideForConflict: 'long' | 'short' | 'none' =
         position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none'
 
@@ -6485,12 +6480,13 @@ class HyperliquidMMBot {
     const actualSkew = inventorySkew; // Capture real inventory skew BEFORE vision injection
 
     // 🔧 FIX 2026-01-23: HOLD_FOR_TP - Override inventorySkew to force grid to place ASKs
-    // When holding SHORT for TP, we need to allocate capital to SELL side (not BUY for position reduction)
-    // 🔧 FIX 2026-02-01: Centralized config
-    if (isHoldForTpToken(pair) && actualSkew < -0.1) {
-      // Force positive skew so grid allocates capital to ASKS (sells) instead of BIDS (buys)
-      inventorySkew = 0.3  // Pretend we're 30% long → grid will place more asks to "reduce" it
+    // 💎 HOLD_FOR_TP: Override skew to allocate capital to SM-aligned side
+    if (shouldHoldForTp(pair, 'short') && actualSkew < -0.1) {
+      inventorySkew = 0.3  // Pretend long → grid places more ASKs (add to short)
       console.log(`💎 [HOLD_FOR_TP SKEW] ${pair}: Override inventorySkew from ${(actualSkew*100).toFixed(0)}% to +30% for ASK allocation`)
+    } else if (shouldHoldForTp(pair, 'long') && actualSkew > 0.1) {
+      inventorySkew = -0.3  // Pretend short → grid places more BIDs (add to long)
+      console.log(`💎 [HOLD_FOR_TP SKEW] ${pair}: Override inventorySkew from ${(actualSkew*100).toFixed(0)}% to -30% for BID allocation`)
     }
 
     // 🧠 SignalEngine PURE_MM check for inventory deviation bypass
@@ -7008,42 +7004,51 @@ class HyperliquidMMBot {
       }
     }
 
-    // 🛑 FORCE SHORT ONLY FOR UNHOLY TRINITY (FARTCOIN, VIRTUAL)
-    // ALWAYS block bids AND force enable shorts - override REGIME restrictions
-    // VIRTUAL was whipsawing (buying tops, selling bottoms) due to weak Oracle signal ~0
-    // 🔧 FIX 2026-01-22: Allow longs when we have a SHORT position to reduce (position management)
-    // 🧠 BUT: Skip this block if SignalEngine wants PURE_MM (both sides enabled)
+    // 🛑 FOLLOW SM DIRECTION: Block counter-SM side, hold aligned position for TP
+    // Bot autonomously decides SHORT or LONG based on SM data
     const signalEngineResultFso = getAutoEmergencyOverrideSync(pair);
     const isSignalEnginePureMmFso = signalEngineResultFso?.signalEngineOverride && signalEngineResultFso?.mode === MmMode.PURE_MM;
+    const smDir = getSmDirection(pair);
 
-    // 🔧 FIX 2026-02-01: "Ostateczne Rozkazy" - ALL SHORT_ONLY tokens get FSO treatment
-    // Centralized config replaces hardcoded HYPE/FARTCOIN checks
-    if (isShortOnlyToken(pair) && !isSignalEnginePureMmFso) {
-      const hasShortPosition = actualSkew < -0.05;
-      const holdForTp = isHoldForTpToken(pair);
-      console.log(`[DEBUG FSO] ${pair}: actualSkew=${(actualSkew*100).toFixed(1)}% hasShort=${hasShortPosition} holdTp=${holdForTp} pureMm=${isSignalEnginePureMmFso}`);
+    if (smDir && !isSignalEnginePureMmFso) {
+      const hasAlignedPosition = smDir === 'SHORT' ? actualSkew < -0.05 : actualSkew > 0.05;
+      console.log(`[DEBUG SM] ${pair}: smDir=${smDir} actualSkew=${(actualSkew*100).toFixed(1)}% aligned=${hasAlignedPosition} pureMm=${isSignalEnginePureMmFso}`);
 
-      if (hasShortPosition && !holdForTp) {
-        permissions.allowLongs = true;
-        permissions.allowShorts = true;
-        if (permissions.reason) permissions.reason += ' | ';
-        permissions.reason += `${pair}_POSITION_REDUCE`;
-        this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: SHORT ${(actualSkew * 100).toFixed(0)}% detected → BIDs ENABLED for position reduction`);
-      } else if (hasShortPosition && holdForTp) {
-        permissions.allowLongs = false;
-        permissions.allowShorts = true;
-        if (permissions.reason) permissions.reason += ' | ';
-        permissions.reason += `${pair}_HOLD_SHORT_FOR_TP`;
-        this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding SHORT ${(actualSkew * 100).toFixed(0)}% for TP. BIDs BLOCKED, ASKs for TP.`);
-      } else {
-        permissions.allowLongs = false;
-        permissions.allowShorts = true;
-        if (permissions.reason) permissions.reason += ' | ';
-        permissions.reason += `${pair}_FORCE_SHORT_ONLY`;
-        this.notifier.info(`[FORCE_SHORT_ONLY] ${pair}: ASK-only grid, BIDs blocked. Shorts ENABLED.`);
+      if (smDir === 'SHORT') {
+        if (hasAlignedPosition) {
+          // 💎 HOLD SHORT for TP - block longs
+          permissions.allowLongs = false;
+          permissions.allowShorts = true;
+          if (permissions.reason) permissions.reason += ' | ';
+          permissions.reason += `${pair}_HOLD_SHORT_FOR_TP`;
+          this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding SHORT ${(actualSkew * 100).toFixed(0)}% for TP. BIDs BLOCKED.`);
+        } else {
+          // Force SHORT only - no position yet
+          permissions.allowLongs = false;
+          permissions.allowShorts = true;
+          if (permissions.reason) permissions.reason += ' | ';
+          permissions.reason += `${pair}_FOLLOW_SM_SHORT`;
+          this.notifier.info(`[FOLLOW_SM_SHORT] ${pair}: ASK-only grid, BIDs blocked.`);
+        }
+      } else { // LONG
+        if (hasAlignedPosition) {
+          // 💎 HOLD LONG for TP - block shorts
+          permissions.allowLongs = true;
+          permissions.allowShorts = false;
+          if (permissions.reason) permissions.reason += ' | ';
+          permissions.reason += `${pair}_HOLD_LONG_FOR_TP`;
+          this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding LONG ${(actualSkew * 100).toFixed(0)}% for TP. ASKs BLOCKED.`);
+        } else {
+          // Force LONG only - no position yet
+          permissions.allowLongs = true;
+          permissions.allowShorts = false;
+          if (permissions.reason) permissions.reason += ' | ';
+          permissions.reason += `${pair}_FOLLOW_SM_LONG`;
+          this.notifier.info(`[FOLLOW_SM_LONG] ${pair}: BID-only grid, ASKs blocked.`);
+        }
       }
-    } else if (isShortOnlyToken(pair) && isSignalEnginePureMmFso) {
-      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → FORCE_SHORT_ONLY bypassed, both sides enabled`);
+    } else if (smDir && isSignalEnginePureMmFso) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → SM direction bypassed, both sides enabled`);
     }
 
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
@@ -7062,23 +7067,15 @@ class HyperliquidMMBot {
         this.notifier.warn(`🟢 [EMERGENCY] ${pair}: FOLLOW_SM_LONG overriding REGIME → allowLongs=TRUE${hasLongPosition ? ', allowShorts for reduce' : ''}`);
       } else if (overridesConfig.followSmMode === 'FOLLOW_SM_SHORT') {
         // Force allow shorts, block longs - we're following SM bearish signal
-        // But allow longs to close SHORT positions (UNLESS HOLD_FOR_TP)
+        // 💎 Always hold aligned position for TP
         const hasShortPosition = actualSkew < -0.05;
-        // 🔧 FIX 2026-02-01: Centralized config
-        if (isHoldForTpToken(pair) && hasShortPosition) {
-          permissions.allowLongs = false; // Block longs - hold short for TP
-          permissions.allowShorts = true;
-          permissions.reason = 'FOLLOW_SM_SHORT (HOLD_FOR_TP)';
-          this.notifier.info(`💎 [FOLLOW_SM_SHORT] ${pair}: HOLD_FOR_TP mode - SHORT ${(actualSkew * 100).toFixed(0)}%, longs BLOCKED for TP`);
-        } else {
-          permissions.allowLongs = hasShortPosition; // Allow longs only to reduce shorts
-          permissions.allowShorts = true;
-          permissions.reason = hasShortPosition
-            ? 'FOLLOW_SM_SHORT (position reduce enabled)'
-            : 'FOLLOW_SM_SHORT (EMERGENCY OVERRIDE)';
-          if (hasShortPosition) {
-            this.notifier.info(`[FOLLOW_SM_SHORT] ${pair}: SHORT ${(actualSkew * 100).toFixed(0)}% → longs enabled for position reduction`);
-          }
+        permissions.allowLongs = false; // Block longs - hold/build short
+        permissions.allowShorts = true;
+        permissions.reason = hasShortPosition
+          ? 'FOLLOW_SM_SHORT (HOLD_FOR_TP)'
+          : 'FOLLOW_SM_SHORT (EMERGENCY OVERRIDE)';
+        if (hasShortPosition) {
+          this.notifier.info(`💎 [FOLLOW_SM_SHORT] ${pair}: HOLD_FOR_TP - SHORT ${(actualSkew * 100).toFixed(0)}%, longs BLOCKED`);
         }
       }
     }
@@ -7087,36 +7084,34 @@ class HyperliquidMMBot {
       console.log(`🛡️  [REGIME] ${pair}: ${permissions.reason} (Longs: ${permissions.allowLongs}, Shorts: ${permissions.allowShorts})`);
     }
 
-    // 🧠 SIGNAL ENGINE MASTER OVERRIDE - Bypass REGIME for PURE_MM mode
-    // When SignalEngine says WAIT (no clear signal), allow BOTH sides for proper market making
-    // This prevents REGIME from killing one side when SignalEngine wants neutral positioning
-    // 🔧 FIX 2026-02-01: Centralized config
-    if (isShortOnlyToken(pair)) {
-      // Get DYNAMIC SignalEngine result from SmAutoDetector (uses cached analysis)
+    // 🧠 SIGNAL ENGINE MASTER OVERRIDE - applies to all SM-tracked tokens
+    {
       const signalEngineResult = getAutoEmergencyOverrideSync(pair);
       const isPureMmMode = signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.PURE_MM;
 
-      // Check if mode is PURE_MM (SignalEngine said WAIT)
-      // PURE_MM = no clear signal = allow both sides for market making
-      // 🛡️ FIX 2026-02-02: NEVER enable longs for HOLD_FOR_TP tokens with existing short
       if (isPureMmMode) {
-        const hasShortPos = actualSkew < -0.05;
-        const isHoldTp = isHoldForTpToken(pair);
+        // PURE_MM = no clear signal = allow both sides for market making
+        // 🛡️ BUT protect existing aligned positions
+        const positionSideCheck: 'short' | 'long' | 'none' =
+          actualSkew < -0.05 ? 'short' : actualSkew > 0.05 ? 'long' : 'none';
+        const holdTp = shouldHoldForTp(pair, positionSideCheck);
 
-        if (isHoldTp && hasShortPos) {
-          // 🛡️ HOLD_FOR_TP PROTECTION: Don't allow longs - we're holding a short for TP
-          permissions.allowLongs = false;
-          permissions.allowShorts = true;
-          console.log(`🛡️ [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode BUT HOLD_FOR_TP active with SHORT pos → BLOCKING LONGS (protecting short for TP)`);
-          permissions.reason = 'SIGNAL_ENGINE_PURE_MM (HOLD_FOR_TP PROTECTION - longs blocked)';
+        if (holdTp) {
+          // Protect aligned position - don't enable counter side
+          if (positionSideCheck === 'short') {
+            permissions.allowLongs = false;
+            permissions.allowShorts = true;
+          } else {
+            permissions.allowLongs = true;
+            permissions.allowShorts = false;
+          }
+          console.log(`🛡️ [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode BUT HOLD_FOR_TP active → protecting ${positionSideCheck} position`);
+          permissions.reason = `SIGNAL_ENGINE_PURE_MM (HOLD_FOR_TP PROTECTION)`;
         } else {
-          // 🎯 MASTER OVERRIDE: Force BOTH sides enabled for PURE_MM
           const prevLongs = permissions.allowLongs;
           const prevShorts = permissions.allowShorts;
-
           permissions.allowLongs = true;
           permissions.allowShorts = true;
-
           if (!prevLongs || !prevShorts) {
             console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: PURE_MM mode → FORCE BOTH SIDES (was Longs:${prevLongs} Shorts:${prevShorts})`);
             permissions.reason = 'SIGNAL_ENGINE_PURE_MM (MASTER OVERRIDE)';
@@ -7124,14 +7119,16 @@ class HyperliquidMMBot {
         }
       }
 
-      // 🔧 FIX 2026-01-25: FOLLOW_SM_SHORT override for REGIME bypass
-      // When SignalEngine says FOLLOW_SM_SHORT, force allowShorts=true regardless of REGIME
-      const isFollowSmShortMode = signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.FOLLOW_SM_SHORT;
-      if (isFollowSmShortMode && !permissions.allowShorts) {
-        const prevShorts = permissions.allowShorts;
+      // FOLLOW_SM override for REGIME bypass
+      if (signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.FOLLOW_SM_SHORT && !permissions.allowShorts) {
         permissions.allowShorts = true;
-        console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: FOLLOW_SM_SHORT → FORCE SHORTS ENABLED (was Shorts:${prevShorts})`);
+        console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: FOLLOW_SM_SHORT → FORCE SHORTS ENABLED`);
         permissions.reason = 'SIGNAL_ENGINE_FOLLOW_SM_SHORT (MASTER OVERRIDE)';
+      }
+      if (signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.FOLLOW_SM_LONG && !permissions.allowLongs) {
+        permissions.allowLongs = true;
+        console.log(`🧠 [SIGNAL_ENGINE_OVERRIDE] ${pair}: FOLLOW_SM_LONG → FORCE LONGS ENABLED`);
+        permissions.reason = 'SIGNAL_ENGINE_FOLLOW_SM_LONG (MASTER OVERRIDE)';
       }
     }
 
@@ -7171,9 +7168,9 @@ class HyperliquidMMBot {
       console.log(`[FARTCOIN GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
     }
 
-    // 🎯 SHORT-ON-BOUNCE: Nie goń dna, shortuj na bounce'u
+    // 🎯 SHORT-ON-BOUNCE: Nie goń dna, shortuj na bounce'u (applies when SM says SHORT)
     let bounceFilterChaseBlock = false
-    if (isShortOnlyToken(pair) && sizeMultipliers.ask > 0) {
+    if (getSmDirection(pair) === 'SHORT' && sizeMultipliers.ask > 0) {
       const bounceConfig = getBounceFilterConfig(pair)
       if (bounceConfig.enabled) {
         const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
@@ -7235,22 +7232,31 @@ class HyperliquidMMBot {
     // NOTE: Use actualSkew (real position) not inventorySkew (modified by vision/signals)
     const hasShortPosition = actualSkew < -0.1
 
-    // DEBUG: Log position check for key pairs
-    // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions
-    // 🔧 FIX 2026-02-01: Centralized config
-    const isHoldForTpGrid = isHoldForTpToken(pair)
+    // 💎 HOLD_FOR_TP: Detect SM-aligned positions dynamically
+    const positionSideGrid: 'short' | 'long' | 'none' =
+      actualSkew < -0.05 ? 'short' : actualSkew > 0.05 ? 'long' : 'none';
+    const isHoldForTpGrid = shouldHoldForTp(pair, positionSideGrid)
 
-    if (isShortOnlyToken(pair) && sizeMultipliers.bid === 0) {
+    if (isFollowSmToken(pair) && sizeMultipliers.bid === 0) {
       console.log(`[DEBUG-POS] ${pair}: actualSkew=${(actualSkew * 100).toFixed(1)}% hasShort=${hasShortPosition} bidMult=${sizeMultipliers.bid} holdForTp=${isHoldForTpGrid}`)
     }
 
-    // 💎 HOLD_FOR_TP: Remove ALL bids - we want to hold position for TP
-    if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders) && isHoldForTpGrid) {
+    // 💎 HOLD_FOR_TP: Remove ALL bids when holding SHORT for TP
+    if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders) && isHoldForTpGrid && positionSideGrid === 'short') {
       const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
       if (originalBids > 0) {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
         this.notifier.info(
           `💎 [HOLD_FOR_TP] ${pair} removed ${originalBids} BIDS - holding SHORT for TP (actualSkew ${(actualSkew * 100).toFixed(0)}%)`
+        )
+      }
+    // 💎 HOLD_FOR_TP: Remove ALL asks when holding LONG for TP
+    } else if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders) && isHoldForTpGrid && positionSideGrid === 'long') {
+      const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
+      if (originalAsks > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+        this.notifier.info(
+          `💎 [HOLD_FOR_TP] ${pair} removed ${originalAsks} ASKS - holding LONG for TP (actualSkew ${(actualSkew * 100).toFixed(0)}%)`
         )
       }
     } else if (sizeMultipliers.bid === 0 && Array.isArray(gridOrders) && !hasShortPosition) {
@@ -7261,13 +7267,10 @@ class HyperliquidMMBot {
           `🛑 [EMERGENCY] ${pair} removed ${originalBids} BIDS - SM shorts winning, asks only`
         )
       }
-    } else if (sizeMultipliers.bid === 0 && hasShortPosition && !isHoldForTpGrid) {
-      this.notifier.info(`✅ [POSITION_REDUCE] ${pair} keeping BIDs despite bid×0 - need to reduce SHORT (actualSkew ${(actualSkew * 100).toFixed(0)}%)`)
     }
 
     // 🛑 Cancel existing bid orders on exchange when bid×0 (SEPARATE from grid filtering)
-    // ⚠️ BUT: If we have a SHORT position, we NEED bids to reduce/close it!
-    // 💎 HOLD_FOR_TP: Always cancel bids - we want to hold position
+    // 💎 HOLD_FOR_TP: Always cancel counter-SM orders
     if (sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading && (isHoldForTpGrid || !hasShortPosition)) {
       try {
         const existingOrders = await this.trading.getOpenOrders(pair)

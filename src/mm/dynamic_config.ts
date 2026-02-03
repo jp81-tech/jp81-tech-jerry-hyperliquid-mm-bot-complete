@@ -17,10 +17,9 @@ import { ConsoleNotifier } from '../utils/notifier.js'
 import { telegramBot } from '../utils/telegram_bot.js'
 import { HyperliquidMarketData } from './market_data.js'
 import { AlphaSignalAggregator, CombinedAlphaSignal } from '../signals/AlphaSignals.js'
-import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY } from './SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY, isFollowSmToken, shouldHoldForTp, getSmDirection } from './SmAutoDetector.js'
 import { readNansenBiasJson, NansenBiasEntry, NansenTradingMode } from './nansen_bias_cache.js'
 import { getNansenProAPI } from '../integrations/nansen_pro.js'
-import { isShortOnlyToken, isHoldForTpToken } from '../config/short_only_config.js'
 import { nansenIntegration, shouldBlockBids, shouldBlockAsks, getMMSignalStatus, shouldStartMM, shouldStopMM } from '../signals/nansen_alert_integration.js'
 import fs from 'fs'
 
@@ -112,15 +111,15 @@ interface MMSignalCheck {
 }
 
 function checkMMSignalForToken(token: string): MMSignalCheck {
-  // 🔧 FIX 2026-02-01: Centralized config
-  if (!isShortOnlyToken(token)) {
+  // Only check MM signal for SM-tracked tokens
+  if (!isFollowSmToken(token)) {
     return {
       signal: 'NONE',
       shouldTrade: true,
       spreadMultiplier: 1.0,
       depthMultiplier: 1.0,
       sizeMultiplier: 1.0,
-      reason: 'Not an MM token',
+      reason: 'Not an SM-tracked token',
       mode: 'NORMAL'
     }
   }
@@ -1723,12 +1722,10 @@ export class DynamicConfigManager {
       const followMaxPos = multState.maxPosition * tradingModeMaxPosMult
 
       // Apply with FOLLOW_SM priority (same as EMERGENCY)
-      // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT reduce positions - hold for TP
-      // 🔧 FIX 2026-02-01: Centralized config
-      const isHoldForTp = isHoldForTpToken(token)
+      // 💎 Always HOLD_FOR_TP when in FOLLOW_SM mode - bot decides direction from SM data
+      const isHoldForTp = true
 
-      // For HOLD_FOR_TP: Block bids completely, aggressive asks for TP
-      // For normal tokens: Small bids allowed for position reduction
+      // HOLD_FOR_TP: Block counter-SM side, aggressive SM-aligned side
       let reducedBid: number
       let reducedAsk: number
       let bidLocked: boolean
@@ -1805,7 +1802,7 @@ export class DynamicConfigManager {
     // SQUEEZE TIMEOUT PROTECTION - Force exit if squeeze didn't materialize
     // When squeezeFailed=true (>12h in CONTRARIAN without squeeze), exit position
     // ============================================================
-    if (tradingModeInfo?.squeezeFailed && !isShortOnlyToken(token)) {
+    if (tradingModeInfo?.squeezeFailed && !isFollowSmToken(token)) {
       const squeezeDuration = tradingModeInfo.squeezeDurationHours ?? 0
       this.notifier.warn(
         `⏰ [SQUEEZE TIMEOUT] ${token} | CONTRARIAN mode for ${squeezeDuration.toFixed(1)}h without squeeze - FORCING EXIT!`
@@ -1836,8 +1833,8 @@ export class DynamicConfigManager {
       nansenBoost.alertValue >= 50_000 &&
       (nansenBoost.alertType === 'SM_DISTRIBUTION' || nansenBoost.alertType === 'WHALE_ACTIVITY')
 
-    // ☢️ SHORT_ONLY_TOKENS: FOLLOW_SM ma ostatnie słowo - CONTRARIAN nie może overridować
-    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isShortOnlyToken(token)) {
+    // ☢️ FOLLOW_SM ma ostatnie słowo - CONTRARIAN nie może overridować
+    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isFollowSmToken(token)) {
       // Calculate contrarian multipliers with Nansen boost
       // 🔔 Apply Nansen boost to make contrarian more aggressive when we have SM alert confirmation
       const boostFactor = nansenBoost.boostMultiplier
@@ -2067,23 +2064,24 @@ export class DynamicConfigManager {
     }
 
     if (emergencyOverride) {
-      // 🔧 FIX 2026-01-23: HOLD_FOR_TP tokens should NOT allow position reduction
-      // 🔧 FIX 2026-02-01: Centralized config
-      const isHoldForTpEmergency = isHoldForTpToken(token)
+      // 💎 All FOLLOW_SM tokens get HOLD_FOR_TP treatment
       const isFollowShort = autoDetectedMode === 'FOLLOW_SM_SHORT'
+      const isFollowLong = autoDetectedMode === 'FOLLOW_SM_LONG'
 
       // Determine multipliers - EMERGENCY uses override values directly!
-      // For SHORT mode: bid=0, ask=override (aggressive selling)
-      // For LONG mode: bid=override (aggressive buying), ask=0
-      // 💎 HOLD_FOR_TP: Override bidEnabled to FALSE (block position reduction)
+      // 💎 HOLD_FOR_TP: Block counter-SM side in emergency override
       let effectiveBidEnabled = emergencyOverride.bidEnabled
-      if (isHoldForTpEmergency && isFollowShort) {
-        effectiveBidEnabled = false  // Block bids for HOLD_FOR_TP SHORT
+      let effectiveAskEnabled = emergencyOverride.askEnabled
+      if (isFollowShort) {
+        effectiveBidEnabled = false  // Block bids - hold SHORT for TP
         console.log(`💎 [HOLD_FOR_TP] ${token}: Blocking bids in emergency override - hold SHORT for TP`)
+      } else if (isFollowLong) {
+        effectiveAskEnabled = false  // Block asks - hold LONG for TP
+        console.log(`💎 [HOLD_FOR_TP] ${token}: Blocking asks in emergency override - hold LONG for TP`)
       }
 
       const emergencyBid = !effectiveBidEnabled ? 0 : emergencyOverride.bidMultiplier
-      const emergencyAsk = !emergencyOverride.askEnabled ? 0 : (isHoldForTpEmergency ? 1.5 : emergencyOverride.askMultiplier)
+      const emergencyAsk = !effectiveAskEnabled ? 0 : (isFollowSmToken(token) ? 1.5 : emergencyOverride.askMultiplier)
 
       // Set inventory target based on direction
       let emergencyTargetInventory = 0
@@ -2102,10 +2100,10 @@ export class DynamicConfigManager {
         maxPosition: emergencyOverride.maxInventoryUsd,
         targetInventory: emergencyTargetInventory,
         priority: StrategyPriority.EMERGENCY,
-        bidLocked: !effectiveBidEnabled,  // Lock bid if disabled (or HOLD_FOR_TP)
-        askLocked: !emergencyOverride.askEnabled,
-        source: autoDetectedMode ? `AUTO_${autoDetectedMode}${isHoldForTpEmergency ? '_HOLD_TP' : ''}` : 'FOLLOW_SM',
-        reason: emergencyOverride.reason + (isHoldForTpEmergency ? ' [HOLD_FOR_TP]' : '')
+        bidLocked: !effectiveBidEnabled,
+        askLocked: !effectiveAskEnabled,
+        source: autoDetectedMode ? `AUTO_${autoDetectedMode}${isFollowSmToken(token) ? '_HOLD_TP' : ''}` : 'FOLLOW_SM',
+        reason: emergencyOverride.reason + (isFollowSmToken(token) ? ' [HOLD_FOR_TP]' : '')
       })
 
       emergencyOverrideApplied = true
@@ -2116,7 +2114,7 @@ export class DynamicConfigManager {
         `MaxPos: $${multState.maxPosition} Target: ${(multState.targetInventory * 100).toFixed(0)}% ` +
         `| 🔒 BidLocked: ${multState.bidLocked} AskLocked: ${multState.askLocked}` +
         (autoDetectedMode ? ` | 🤖 AUTO: ${autoDetectedMode}` : '') +
-        (isHoldForTpEmergency ? ' 💎HOLD_FOR_TP' : '')
+        (isFollowSmToken(token) ? ' 💎HOLD_FOR_TP' : '')
       )
     }
 
