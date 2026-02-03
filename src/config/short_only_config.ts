@@ -9,7 +9,7 @@
  * Used by: GENERALS_FORCE_SHORT, HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
  *          FORCE_SHORT_ONLY, MM_TOKENS, KNOWN_ACTIVE_TOKENS
  */
-export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'ENA', 'SUI']
+export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'SUI']
 
 /**
  * Tokens protected by STICKY_PAIRS (existing positions we protect).
