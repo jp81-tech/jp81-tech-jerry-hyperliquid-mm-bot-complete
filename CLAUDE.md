@@ -247,47 +247,11 @@ if (isKnownActive && s.dataQuality === 'dead') {
 
 **Log sukcesu:** `[NansenPro] FARTCOIN/solana: ⚠️ Nansen shows no data but token is KNOWN ACTIVE - bypassing kill switch`
 
-### 15. ☢️ GENERALS_OVERRIDE - Wymuszony FOLLOW_SM_SHORT (25.01)
-**Problem:** HYPE miał score -15 w SignalEngine, co dawało PURE_MM zamiast FOLLOW_SM_SHORT
-**Przyczyna:** SignalEngine wymaga score ≤ -25 dla SHORT lub whale confidence ≥ 80% dla override. HYPE miał tylko 71%.
-
-**Kontekst:** Generał ($8.5M SHORT) i Wice-Generał ($11.5M SHORT) aktywnie dokładają do shortów na HYPE - musimy podążać za nimi bezwarunkowo.
-
-**Fix w `SmAutoDetector.ts` (`getAutoEmergencyOverrideSync`):**
-```typescript
-// ☢️ GENERALS_OVERRIDE: Wymuszamy FOLLOW_SM_SHORT BEZWARUNKOWO
-const GENERALS_FORCE_SHORT = ['HYPE', 'LIT', 'FARTCOIN']
-
-if (GENERALS_FORCE_SHORT.includes(token)) {
-  console.log(`☢️ [GENERALS_OVERRIDE] ${token}: WYMUSZONY FOLLOW_SM_SHORT - Generałowie shortują!`)
-  return {
-    bidEnabled: false,           // ZAKAZ KUPOWANIA
-    askEnabled: true,            // Zezwól na shorty
-    bidMultiplier: 0.0,
-    askMultiplier: 1.5,
-    mode: MmMode.FOLLOW_SM_SHORT,
-    convictionScore: 95,
-    signalEngineOverride: true,
-    signalEngineAllowLongs: false,
-    signalEngineAllowShorts: true
-  }
-}
-```
-
-**Tokeny z wymuszonym SHORT:**
-| Token | Generał | Wice-Generał | Status |
-|-------|---------|--------------|--------|
-| HYPE | $8.5M SHORT | $11.5M SHORT | ☢️ FORCE SHORT |
-| LIT | $7.5M SHORT | - | ☢️ FORCE SHORT |
-| FARTCOIN | $773K SHORT | $957K SHORT | ☢️ FORCE SHORT |
-
-**Log sukcesu:** `☢️ [GENERALS_OVERRIDE] HYPE: WYMUSZONY FOLLOW_SM_SHORT - Generałowie shortują!`
-
-**Efekt:**
-- Ignoruje SignalEngine score (był -15, za słaby)
-- Ignoruje whale confidence threshold (był 71%, potrzeba 80%)
-- Wymusza `bidEnabled: false` (zero kupowania)
-- Wymusza `mode: FOLLOW_SM_SHORT`
+### 15. ☢️ GENERALS_OVERRIDE - USUNIĘTY (25.01 → usunięty 03.02)
+**Oryginalny cel:** Wymuszanie FOLLOW_SM_SHORT dla HYPE/LIT/FARTCOIN bezwarunkowo.
+**Status:** Kod usunięty z codebase. Wieloryby flipnęły na LONG na HYPE (whale_tracker: FOLLOW_SM_LONG 86%).
+LIT i FARTCOIN nie potrzebują override — dane same dają FOLLOW_SM_SHORT (ratio 4.89x / 91.6x).
+Bot teraz w pełni polega na danych z whale_tracker + SignalEngine (Capital Dominance v3).
 
 ---
 
@@ -634,7 +598,7 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 - [x] VIP Spy - monitoring Generała i Wice-Generała (DONE 25.01)
 - [x] Fix HOLD_FOR_TP dla HYPE po rotacji tokenów (DONE 25.01)
 - [x] Fix fałszywych alarmów Nansen Kill Switch dla FARTCOIN (DONE 25.01)
-- [x] GENERALS_OVERRIDE - wymuszony FOLLOW_SM_SHORT dla HYPE/LIT/FARTCOIN (DONE 25.01)
+- [x] GENERALS_OVERRIDE - USUNIĘTY 03.02 (wieloryby flipnęły LONG na HYPE, LIT/FARTCOIN nie potrzebują override)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -643,4 +607,4 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 - gh CLI zainstalowane i zalogowane jako `jp81-tech`
 - **KNOWN_ACTIVE_TOKENS**: FARTCOIN, LIT - omijają kill switch gdy Nansen nie ma danych
 - **Hyperliquid perps**: chain='hyperliquid' automatycznie omija flow-based kill switch
-- **☢️ GENERALS_OVERRIDE**: HYPE, LIT, FARTCOIN wymuszony FOLLOW_SM_SHORT (ignoruje SignalEngine score)
+- **☢️ GENERALS_OVERRIDE**: USUNIĘTY (wieloryby flipnęły LONG na HYPE; LIT/FARTCOIN działają z danych)

@@ -64,13 +64,27 @@ export interface NansenTokenHolder {
 }
 
 export interface NansenFlowIntelligence {
-  token_symbol: string
-  exchange_flow_usd: number
-  whale_flow_usd: number
-  smart_money_flow_usd: number
-  total_flow_usd: number
-  flow_direction: 'IN' | 'OUT' | 'NEUTRAL'
-  confidence: number
+  // New v1 API field names (post 2025-08-29 restructuring)
+  whale_net_flow_usd: number
+  whale_avg_flow_usd?: number
+  whale_wallet_count?: number
+  smart_trader_net_flow_usd: number
+  smart_trader_avg_flow_usd?: number
+  smart_trader_wallet_count?: number
+  exchange_net_flow_usd: number
+  exchange_avg_flow_usd?: number
+  exchange_wallet_count?: number
+  top_pnl_net_flow_usd?: number
+  public_figure_net_flow_usd?: number
+  fresh_wallets_net_flow_usd?: number
+  // Legacy field names (kept for backward compatibility)
+  token_symbol?: string
+  exchange_flow_usd?: number
+  whale_flow_usd?: number
+  smart_money_flow_usd?: number
+  total_flow_usd?: number
+  flow_direction?: 'IN' | 'OUT' | 'NEUTRAL'
+  confidence?: number
 }
 
 export interface CopyTradingSignal {
@@ -342,7 +356,8 @@ export class NansenProAPI {
 
           // 404 / 422: try next fallback quietly (break inner loop)
           if (code === 404 || code === 422) {
-            console.debug(`[Nansen Pro] ${ep} skipped (status=${code})`)
+            const respBody = error?.response?.data ? JSON.stringify(error.response.data).slice(0, 300) : 'no body'
+            console.debug(`[Nansen Pro] ${ep} skipped (status=${code}) body=${respBody}`)
             break
           }
 
@@ -776,9 +791,10 @@ export class NansenProAPI {
 
       if (flowsArr && flowsArr.length > 0) {
         const f = flowsArr[0]
-        exchangeFlowUsd = f.exchange_flow_usd || 0
-        whaleFlowUsd = f.whale_flow_usd || 0
-        smartMoneyFlowUsd = f.smart_money_flow_usd || 0
+        // Support both new v1 and legacy field names
+        exchangeFlowUsd = f.exchange_net_flow_usd || f.exchange_flow_usd || 0
+        whaleFlowUsd = f.whale_net_flow_usd || f.whale_flow_usd || 0
+        smartMoneyFlowUsd = f.smart_trader_net_flow_usd || f.smart_money_flow_usd || 0
         flowDirection = f.flow_direction || 'NEUTRAL'
 
         // Exchange inflows (tokens moving TO exchanges) -> selling pressure
@@ -803,9 +819,10 @@ export class NansenProAPI {
         }
 
         // If flow direction is clearly OUT and total flow is big, add a bit more
-        if (flowDirection === 'OUT' && Math.abs(f.total_flow_usd || 0) > 500_000) {
+        const totalFlowUsd = f.top_pnl_net_flow_usd || f.total_flow_usd || 0
+        if (flowDirection === 'OUT' && Math.abs(totalFlowUsd) > 500_000) {
           score += 1
-          reasonParts.push(`Overall flow direction OUT with size ${Math.abs((f.total_flow_usd || 0)).toFixed(0)} USD`)
+          reasonParts.push(`Overall flow direction OUT with size ${Math.abs(totalFlowUsd).toFixed(0)} USD`)
         }
       } else {
         reasonParts.push('No flow intelligence data')
@@ -917,28 +934,183 @@ export class NansenProAPI {
     if (cached) return cached
 
     try {
-      const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
-      const now = new Date().toISOString()
+      // 🔧 FIX 2026-02-03: Updated to v1 API format (post 2025-08-29 restructuring)
+      // Old: { tokens: [...], chain, date: { from, to } }
+      // New: { chain, token_address, timeframe }
+      const results: NansenFlowIntelligence[] = []
 
-      const data = await this.postWithResilience(
-        '/tgm/flow-intelligence',
-        {
-          tokens: tokens,
-          chain: chain,
-          date: { from: yesterday, to: now }
-        },
-        chain
-      )
+      for (const tokenAddress of tokens) {
+        const data = await this.postWithResilience(
+          '/tgm/flow-intelligence',
+          {
+            chain,
+            token_address: tokenAddress,
+            timeframe: '1d'
+          },
+          chain
+        )
 
-      const result = data?.flows || []
-      this.setCache(cacheKey, result)
-      return result
+        // New response: { data: [...] } instead of { flows: [...] }
+        const rows = data?.data || data?.flows || []
+        if (Array.isArray(rows) && rows.length > 0) {
+          results.push(rows[0])
+        } else if (data && typeof data === 'object' && !Array.isArray(data) && !data.data && !data.flows) {
+          // Some responses might return the object directly (no wrapper)
+          results.push(data as NansenFlowIntelligence)
+        }
+      }
+
+      this.setCache(cacheKey, results)
+      return results
     } catch (error: any) {
       this.logError(error, 'Flow intelligence failed')
-      // 🔧 FIX 2026-02-02: Cache failures for 2 min to prevent hammering dead endpoint
       this.setCache(cacheKey, [])
       return []
     }
+  }
+
+  /**
+   * Fallback for getFlowIntelligence: try /tgm/token-flows per segment (whale, smart_money),
+   * then fall back to getHolders() balance_change_usd_24h sum.
+   */
+  async getTokenFlowsBySegment(
+    tokenAddress: string,
+    chain: string
+  ): Promise<{ whaleNet: number; smartMoneyNet: number; exchangeNet: number } | null> {
+    if (!this.isEnabled()) return null
+
+    const cacheKey = `token_flows_segment_${chain}_${tokenAddress}`
+    const cached = this.getCached<{ whaleNet: number; smartMoneyNet: number; exchangeNet: number }>(cacheKey, 10 * 60 * 1000)
+    if (cached) return cached
+
+    const result = { whaleNet: 0, smartMoneyNet: 0, exchangeNet: 0 }
+    const now = new Date()
+    const dayAgo = new Date(now.getTime() - 24 * 3600 * 1000)
+
+    // ── Approach 1: Try /tgm/token-flows with nested parameters (matching MCP token_flows schema)
+    const segments: Array<{ segment: string; key: keyof typeof result }> = [
+      { segment: 'whale', key: 'whaleNet' },
+      { segment: 'smart_money', key: 'smartMoneyNet' },
+      { segment: 'exchange', key: 'exchangeNet' }
+    ]
+
+    let tokenFlowsWorks = false
+    for (const { segment, key } of segments) {
+      try {
+        const data = await this.postWithResilience(
+          '/tgm/token-flows',
+          {
+            parameters: {
+              mode: 'onchain_tokens',
+              tokenAddress,
+              chain,
+              holder_segment: segment,
+              dateRange: { from: dayAgo.toISOString(), to: now.toISOString() }
+            }
+          },
+          chain
+        )
+        if (data) {
+          tokenFlowsWorks = true
+          // Log raw response once to discover format
+          if (segment === 'whale') {
+            console.log(`[Nansen Pro] token-flows raw for ${tokenAddress.slice(0, 10)}... ${segment}: ${JSON.stringify(data).slice(0, 400)}`)
+          }
+          // Parse: sum inflows - outflows from hourly data
+          const rows = data.data || data.flows || data.results || []
+          if (Array.isArray(rows)) {
+            let net = 0
+            for (const row of rows) {
+              const inflow = Number(row.inflows || row.inflow_usd || row.longs || 0)
+              const outflow = Number(row.outflows || row.outflow_usd || row.shorts || 0)
+              net += inflow - Math.abs(outflow)
+            }
+            result[key] = net
+          }
+        }
+      } catch (e: any) {
+        // Silently continue to next segment
+      }
+    }
+
+    if (tokenFlowsWorks && (result.whaleNet || result.smartMoneyNet || result.exchangeNet)) {
+      this.setCache(cacheKey, result)
+      console.log(`✅ [Nansen Pro] token-flows: whale=$${(result.whaleNet/1000).toFixed(1)}k SM=$${(result.smartMoneyNet/1000).toFixed(1)}k exchange=$${(result.exchangeNet/1000).toFixed(1)}k`)
+      return result
+    }
+
+    // ── Approach 2: Use getHolders (smart_money) without value filter and sum balance_change_usd_24h
+    try {
+      // Call /tgm/holders with lower min value to capture more holders
+      const data = await this.postWithResilience(
+        '/tgm/holders',
+        {
+          chain,
+          token_address: tokenAddress,
+          label_type: 'smart_money',
+          filters: { value_usd: { min: 1000 } },  // Lower min to capture small SM holders
+          order_by: [{ field: 'balance_change_24h', direction: 'DESC' }],
+          pagination: { page: 1, per_page: 50 }
+        },
+        chain
+      )
+      const holders = data?.holders || []
+      if (holders.length > 0) {
+        let smNet = 0
+        for (const h of holders) {
+          smNet += Number(h.balance_change_usd_24h || 0)
+        }
+        console.log(`[Nansen Pro] holders-fallback for ${tokenAddress.slice(0, 10)}...: ${holders.length} SM holders, net=$${(smNet/1000).toFixed(1)}k`)
+        if (smNet !== 0) {
+          result.smartMoneyNet = smNet
+          this.setCache(cacheKey, result)
+          return result
+        }
+      } else {
+        console.log(`[Nansen Pro] holders-fallback for ${tokenAddress.slice(0, 10)}...: 0 SM holders returned`)
+      }
+    } catch (e: any) {
+      console.log(`[Nansen Pro] holders-fallback failed for ${tokenAddress.slice(0, 10)}...: ${e.message}`)
+    }
+
+    // ── Approach 3: Use getWhoBoughtSold to compute net buy/sell
+    try {
+      const wbs = await this.postWithResilience(
+        '/tgm/who-bought-sold',
+        {
+          chain,
+          token_address: tokenAddress,
+          date: { from: dayAgo.toISOString(), to: now.toISOString() },
+          filters: {
+            include_smart_money_labels: ["Fund", "30D Smart Trader", "Smart Trader"],
+            value_usd: { min: 1000 }  // Lower min to capture more
+          },
+          order_by: [{ field: 'value_usd', direction: 'DESC' }]
+        },
+        chain
+      )
+      const trades = wbs?.data || []
+      if (trades.length > 0) {
+        let buyTotal = 0, sellTotal = 0
+        for (const t of trades) {
+          const val = Number(t.value_usd || t.amount_usd || 0)
+          const side = String(t.type || t.side || t.action || '').toLowerCase()
+          if (side.includes('buy') || side.includes('in')) buyTotal += val
+          else sellTotal += val
+        }
+        const tradeNet = buyTotal - sellTotal
+        console.log(`[Nansen Pro] who-bought-sold-fallback for ${tokenAddress.slice(0, 10)}...: ${trades.length} trades, buy=$${(buyTotal/1000).toFixed(1)}k sell=$${(sellTotal/1000).toFixed(1)}k net=$${(tradeNet/1000).toFixed(1)}k`)
+        if (tradeNet !== 0) {
+          result.smartMoneyNet = tradeNet
+          this.setCache(cacheKey, result)
+          return result
+        }
+      }
+    } catch (e: any) {
+      console.log(`[Nansen Pro] who-bought-sold-fallback failed for ${tokenAddress.slice(0, 10)}...: ${e.message}`)
+    }
+
+    return null
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -985,7 +1157,7 @@ export class NansenProAPI {
         payload = {
           chain,
           token_address: tokenAddress,
-          date_range: { from: hourAgo.toISOString(), to: now.toISOString() },
+          date: { from: hourAgo.toISOString(), to: now.toISOString() },
           filters: { value_usd: { min: minUsd } },
           order_by: [{ field: 'block_time', direction: 'DESC' }],
           pagination: { page: 1, per_page: 20 }
@@ -1030,7 +1202,7 @@ export class NansenProAPI {
           token_address: tokenAddress,
           label_type: 'smart_money',
           filters: { value_usd: { min: 50000 } },
-          order_by: [{ field: 'balance_change_usd_24h', direction: 'DESC' }],
+          order_by: [{ field: 'balance_change_24h', direction: 'DESC' }],
           pagination: { page: 1, per_page: 25 }
         },
         chain
@@ -1066,7 +1238,7 @@ export class NansenProAPI {
         {
           chain,
           token_address: tokenAddress,
-          date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+          date: { from: dayAgo.toISOString(), to: now.toISOString() },
           filters: {
             include_smart_money_labels: ["Fund", "30D Smart Trader"],
             value_usd: { min: 50000 }
@@ -1152,7 +1324,7 @@ export class NansenProAPI {
         {
           chain,
           symbol,
-          date_range: { from: dayAgo.toISOString(), to: now.toISOString() },
+          date: { from: dayAgo.toISOString(), to: now.toISOString() },
           filters: { value_usd: { min: 50000 } },
           order_by: [{ field: 'block_time', direction: 'DESC' }]
         },
@@ -1185,7 +1357,7 @@ export class NansenProAPI {
         {
           entity_id: entityId,
           chain: chain,
-          date_range: { from: '1D_AGO', to: 'NOW' },
+          date: { from: '1D_AGO', to: 'NOW' },
           order_by: [{ field: 'volume_out_usd', direction: 'DESC' }],
           pagination: { page: 1, per_page: 50 }
         },
@@ -1211,7 +1383,7 @@ export class NansenProAPI {
         {
           address: address,
           chain: chain,
-          date_range: { from: '1H_AGO', to: 'NOW' },
+          date: { from: '1H_AGO', to: 'NOW' },
           pagination: { page: 1, per_page: 20 }
         },
         chain
@@ -1236,7 +1408,7 @@ export class NansenProAPI {
         {
           chain: chain,
           token_address: tokenAddress,
-          date_range: { from: '1H_AGO', to: 'NOW' },
+          date: { from: '1H_AGO', to: 'NOW' },
           filters: { value_usd: { min: minUsd } },
           order_by: [{ field: 'block_timestamp', direction: 'DESC' }],
           pagination: { page: 1, per_page: 50 }
@@ -1347,20 +1519,36 @@ export class NansenProAPI {
       // Use flow-intelligence as proxy for "flows summary"
       const flowsArr = await this.getFlowIntelligence([tokenAddress], chain)
       const f = flowsArr && flowsArr[0]
+      // Support both new v1 and legacy field names
+      const whaleNet = f ? (f.whale_net_flow_usd || f.whale_flow_usd || 0) : 0
+      const smNet = f ? (f.smart_trader_net_flow_usd || f.smart_money_flow_usd || 0) : 0
+      const exNet = f ? (f.exchange_net_flow_usd || f.exchange_flow_usd || 0) : 0
+      const topPnl = f ? (f.top_pnl_net_flow_usd || f.total_flow_usd || 0) : 0
+      const hasFlowData = f && (whaleNet || smNet || exNet)
+      if (f && !hasFlowData) {
+        console.log(`[Nansen Pro] flow-intelligence returned zeros for ${tokenAddress.slice(0, 10)}... on ${chain}`)
+      }
 
-      if (f) {
-        // Interpretation:
-        // exchange_flow_usd ~ exchange_net_flow_usd
-        // whale_flow_usd   ~ whale_net_flow_usd
-        // smart_money_flow_usd ~ smart_money_net_flow_usd
-        signals.whaleNet = f.whale_flow_usd || 0
-        signals.exchangeNet = f.exchange_flow_usd || 0
-        signals.smartMoneyNet = f.smart_money_flow_usd || 0
-        // Use total_flow_usd as proxy for top_pnl_net if needed, or just keep as separate metric
-        signals.topPnlNet = f.total_flow_usd || 0
+      if (hasFlowData) {
+        signals.whaleNet = whaleNet
+        signals.exchangeNet = exNet
+        signals.smartMoneyNet = smNet
+        signals.topPnlNet = topPnl
       } else {
-        signals.confidence *= 0.7
-        signals.dataSource = 'partial'
+        // Fallback: flow-intelligence returned empty/zeros — try token-flows per segment
+        console.log(`[Nansen Pro] flow-intelligence empty for ${tokenAddress} on ${chain}, trying token-flows fallback`)
+        const segmentFlows = await this.getTokenFlowsBySegment(tokenAddress, chain)
+        if (segmentFlows) {
+          signals.whaleNet = segmentFlows.whaleNet
+          signals.smartMoneyNet = segmentFlows.smartMoneyNet
+          signals.exchangeNet = segmentFlows.exchangeNet
+          signals.topPnlNet = segmentFlows.smartMoneyNet
+          signals.dataSource = 'flows_fallback'
+          console.log(`✅ [Nansen Pro] token-flows fallback: whale=$${(segmentFlows.whaleNet/1000).toFixed(1)}k SM=$${(segmentFlows.smartMoneyNet/1000).toFixed(1)}k exchange=$${(segmentFlows.exchangeNet/1000).toFixed(1)}k`)
+        } else {
+          signals.confidence *= 0.7
+          signals.dataSource = 'partial'
+        }
       }
     } catch (e: any) {
       this.logError(e, `TokenFlowSignals: flows failed for ${tokenAddress}`)
@@ -1369,15 +1557,27 @@ export class NansenProAPI {
       signals.warnings.push('flows failed')
     }
 
-    // ── 2) HOLDERS (smart money) – weak on ZEC/SOL ─────
+    // ── 2) HOLDERS (smart money) – sum balance_change_usd_24h ─────
     try {
       const holders = await this.getHolders(tokenAddress, chain)
       const activeSm = holders.filter(h => (h.balance || 0) > 0)
 
-      if (activeSm.length >= 5) {
-        // Future: calculate net change from holders
-      } else {
-        // Fallback: use topPnlNet/smartMoneyNet from flows if holders are empty/insufficient
+      if (activeSm.length > 0) {
+        // Calculate net 24h change from SM holders
+        let holdersNet = 0
+        for (const h of activeSm) {
+          holdersNet += Number(h.balance_change_usd_24h || 0)
+        }
+        // Use holders balance change as smartMoneyNet if flows step returned 0
+        if (signals.smartMoneyNet === 0 && holdersNet !== 0) {
+          signals.smartMoneyNet = holdersNet
+          signals.dataSource = 'holders_fallback'
+          console.log(`[Nansen Pro] holders balance_change for ${tokenAddress.slice(0, 10)}...: SM net=$${(holdersNet/1000).toFixed(1)}k from ${activeSm.length} active holders`)
+        }
+      }
+
+      if (activeSm.length < 5) {
+        // If few holders AND still no SM data, try topPnlNet
         if (signals.smartMoneyNet === 0 && signals.topPnlNet !== 0) {
           signals.smartMoneyNet = signals.topPnlNet
           signals.confidence *= 0.8
@@ -1424,7 +1624,12 @@ export class NansenProAPI {
       signals.dataQuality = 'minimal'
     }
 
-    this.setCache(flowCacheKey, signals)
+    // Cache with shortened TTL for dead data (set timestamp 8min in the past so 10min cache expires in 2min)
+    if (signals.dataQuality === 'dead') {
+      this.cache.set(flowCacheKey, { data: signals, timestamp: Date.now() - 8 * 60 * 1000 })
+    } else {
+      this.setCache(flowCacheKey, signals)
+    }
     return signals
   }
 
@@ -1656,6 +1861,11 @@ export class NansenProAPI {
       'SUI',       // Active on Sui chain + HL perps
       'HYPE',      // Hyperliquid native perp (also bypassed via chain='hyperliquid')
       'PUMP',      // Active on HL perps (STICKY position)
+      'SOL',       // Active on Solana, $9.8B daily volume
+      'WIF',       // Active on Solana (dogwifhat), $400K daily volume
+      'kPEPE',     // PEPE on Ethereum, $1M daily volume
+      'DOGE',      // Dogecoin on BNB, $1.8M daily volume
+      'XRP',       // XRP Token on BNB, $1.1M daily volume
     ]
     const tokenSymbol = label.split('/')[0] // Extract symbol from "FARTCOIN/solana"
     const isKnownActive = KNOWN_ACTIVE_TOKENS.includes(tokenSymbol)
