@@ -1855,13 +1855,15 @@ export class NansenProAPI {
     // These tokens are verified active on DEX/perps but Nansen API may not track them well
     // 🔧 FIX 2026-02-01: Expanded for "Ostateczne Rozkazy" SHORT targets
     const KNOWN_ACTIVE_TOKENS = [
+      'BTC',       // Bitcoin - #1 crypto, $30B+ daily volume
+      'ETH',       // Ethereum - #2 crypto, $15B+ daily volume
+      'SOL',       // Active on Solana, $9.8B daily volume
       'FARTCOIN',  // Very active on Solana + HL perps, $9M+ daily volume
       'LIT',       // Active on Ethereum + HL perps
       'ENA',       // Active on Ethereum + HL perps (Ethena protocol)
       'SUI',       // Active on Sui chain + HL perps
       'HYPE',      // Hyperliquid native perp (also bypassed via chain='hyperliquid')
       'PUMP',      // Active on HL perps (STICKY position)
-      'SOL',       // Active on Solana, $9.8B daily volume
       'WIF',       // Active on Solana (dogwifhat), $400K daily volume
       'kPEPE',     // PEPE on Ethereum, $1M daily volume
       'DOGE',      // Dogecoin on BNB, $1.8M daily volume
