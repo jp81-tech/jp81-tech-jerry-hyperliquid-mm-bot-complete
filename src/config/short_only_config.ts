@@ -86,3 +86,34 @@ export const DIP_FILTER_OVERRIDES: Record<string, Partial<DipFilterConfig>> = {
 export function getDipFilterConfig(token: string): DipFilterConfig {
   return { ...DIP_FILTER_DEFAULTS, ...(DIP_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
 }
+
+// ============================================================
+// FUNDING RATE FILTER
+// "Nie wchodź gdy funding płaci przeciwko tobie"
+// Blocks entries when funding is extreme in the WRONG direction
+// SHORT blocked when funding very negative (shorts crowded)
+// LONG blocked when funding very positive (longs crowded)
+// ============================================================
+
+export interface FundingFilterConfig {
+  /** Block entry when |funding| exceeds this against our direction */
+  crowdedThreshold: number
+  /** Reduce size when |funding| exceeds this against our direction */
+  cautionThreshold: number
+  /** Size multiplier in caution zone */
+  cautionMult: number
+  enabled: boolean
+}
+
+export const FUNDING_FILTER_DEFAULTS: FundingFilterConfig = {
+  crowdedThreshold: 0.0005,   // 0.05%/8h — very crowded, block entry
+  cautionThreshold: 0.0001,   // 0.01%/8h — somewhat crowded, reduce size
+  cautionMult: 0.5,
+  enabled: true,
+}
+
+export const FUNDING_FILTER_OVERRIDES: Record<string, Partial<FundingFilterConfig>> = {}
+
+export function getFundingFilterConfig(token: string): FundingFilterConfig {
+  return { ...FUNDING_FILTER_DEFAULTS, ...(FUNDING_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
+}
