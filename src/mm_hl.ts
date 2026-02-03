@@ -20,7 +20,7 @@ import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.j
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection } from './mm/SmAutoDetector.js'
-import { getBounceFilterConfig, getDipFilterConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -7214,6 +7214,42 @@ class HyperliquidMMBot {
       }
     }
 
+    // 💰 FUNDING FILTER: Nie wchodź gdy funding płaci przeciwko tobie
+    let fundingFilterBlock = false
+    if (smDir) {
+      const fundingConfig = getFundingFilterConfig(pair)
+      if (fundingConfig.enabled) {
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const funding = snapshot?.fundingRate ?? 0
+
+        if (smDir === 'SHORT' && sizeMultipliers.ask > 0) {
+          // SHORT: funding < 0 means shorts pay (crowded), funding > 0 means we earn
+          if (funding < -fundingConfig.crowdedThreshold) {
+            fundingFilterBlock = true
+            console.log(`💰 [FUNDING_FILTER] ${pair}: CROWDED SHORT (funding: ${(funding * 100).toFixed(4)}%) → block asks`)
+          } else if (funding < -fundingConfig.cautionThreshold) {
+            const prev = sizeMultipliers.ask
+            sizeMultipliers.ask *= fundingConfig.cautionMult
+            console.log(`💰 [FUNDING_FILTER] ${pair}: CAUTION SHORT (funding: ${(funding * 100).toFixed(4)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+          } else {
+            console.log(`💰 [FUNDING_FILTER] ${pair}: OK SHORT (funding: ${(funding * 100).toFixed(4)}%) → full asks`)
+          }
+        } else if (smDir === 'LONG' && sizeMultipliers.bid > 0) {
+          // LONG: funding > 0 means longs pay (crowded), funding < 0 means we earn
+          if (funding > fundingConfig.crowdedThreshold) {
+            fundingFilterBlock = true
+            console.log(`💰 [FUNDING_FILTER] ${pair}: CROWDED LONG (funding: ${(funding * 100).toFixed(4)}%) → block bids`)
+          } else if (funding > fundingConfig.cautionThreshold) {
+            const prev = sizeMultipliers.bid
+            sizeMultipliers.bid *= fundingConfig.cautionMult
+            console.log(`💰 [FUNDING_FILTER] ${pair}: CAUTION LONG (funding: ${(funding * 100).toFixed(4)}%) → bid×${prev.toFixed(2)}→${sizeMultipliers.bid.toFixed(2)}`)
+          } else {
+            console.log(`💰 [FUNDING_FILTER] ${pair}: OK LONG (funding: ${(funding * 100).toFixed(4)}%) → full bids`)
+          }
+        }
+      }
+    }
+
     let gridOrders = this.gridManager!.generateGridOrders(
       pair,
       midPrice,
@@ -7260,6 +7296,29 @@ class HyperliquidMMBot {
         this.notifier.warn(
           `🎯 [DIP_FILTER] ${pair}: CHASE (1h: +${change1h.toFixed(2)}%) → usunięto ${originalBids} bids. Czekam na dip.`
         )
+      }
+    }
+
+    // 💰 FUNDING FILTER: Usuń ordery gdy funding jest crowded
+    if (fundingFilterBlock && Array.isArray(gridOrders)) {
+      const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+      const funding = snapshot?.fundingRate ?? 0
+      if (smDir === 'SHORT') {
+        const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
+        if (originalAsks > 0) {
+          gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
+          this.notifier.warn(
+            `💰 [FUNDING_FILTER] ${pair}: CROWDED SHORT (funding: ${(funding * 100).toFixed(4)}%) → usunięto ${originalAsks} asks. Shorts płacą za dużo.`
+          )
+        }
+      } else if (smDir === 'LONG') {
+        const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
+        if (originalBids > 0) {
+          gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
+          this.notifier.warn(
+            `💰 [FUNDING_FILTER] ${pair}: CROWDED LONG (funding: ${(funding * 100).toFixed(4)}%) → usunięto ${originalBids} bids. Longi płacą za dużo.`
+          )
+        }
       }
     }
 
