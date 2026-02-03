@@ -3395,6 +3395,9 @@ class HyperliquidMMBot {
   // Rotation time tracking (for 8h rule)
   private rotationSince: Record<string, number> = {}
 
+  // Track which pairs have had dynamic leverage applied (reset on restart)
+  private leverageApplied: Set<string> = new Set()
+
   // Throttling dla debug logów multi-layer per para
   private lastGridDebugAt: Record<string, number> = {}
 
@@ -4156,6 +4159,22 @@ class HyperliquidMMBot {
           activePairs = activePairs.slice(0, MAX_ACTIVE_PAIRS)
         }
 
+        // Set dynamic leverage for any pair that hasn't had it applied yet
+        if (!this.isDryRun && this.trading instanceof LiveTrading) {
+          const fallbackLeverage = Number(process.env.LEVERAGE || 1)
+          for (const pair of activePairs) {
+            if (!this.leverageApplied.has(pair)) {
+              const riskParams = getTokenRiskParams(pair)
+              const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+              try {
+                await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
+                this.leverageApplied.add(pair)
+                console.log(`🎯 [DYNAMIC LEV] ${pair}: ${targetLeverage}x (conviction+vol) | Vision SL: ${(riskParams?.visionSlPct ?? 0) * 100}%`)
+              } catch (e) { }
+            }
+          }
+        }
+
         // Now trade ONLY on active pairs (zombie positions have been cleaned)
         if (activePairs.length > 0) {
           // Subscribe to L2 books for real-time data (WebSocket)
@@ -4585,11 +4604,16 @@ class HyperliquidMMBot {
 
         if (!this.isDryRun && this.trading instanceof LiveTrading) {
           const fallbackLeverage = Number(process.env.LEVERAGE || 1)
+          // Clear leverage tracking for rotated-out pairs
+          for (const old of this.leverageApplied) {
+            if (!newPairs.includes(old)) this.leverageApplied.delete(old)
+          }
           for (const pair of newPairs) {
             const riskParams = getTokenRiskParams(pair)
             const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
             try {
               await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
+              this.leverageApplied.add(pair)
               if (riskParams) {
                 console.log(`🎯 [DYNAMIC LEV] ${pair}: ${targetLeverage}x (conviction+vol) | Vision SL: ${(riskParams.visionSlPct * 100).toFixed(1)}%`)
               }
