@@ -46,7 +46,7 @@ export interface BounceFilterConfig {
 }
 
 export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
-  chaseThreshold: -2.0,
+  chaseThreshold: 0.0,         // blokuj shorty gdy 1h < 0% (czerwona świeczka = nie shortuj!)
   bounceThreshold: 0.3,
   neutralAskMult: 0.5,
   fadingDropPct: 0.15,        // 0.15% pullback od szczytu = bounce się kończy → shortuj
@@ -55,7 +55,7 @@ export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
 }
 
 export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>> = {
-  'FARTCOIN': { chaseThreshold: -3.0, bounceThreshold: 0.5 },
+  'FARTCOIN': { bounceThreshold: 0.5 },
   'BTC': { fadingDropPct: 0.10 },      // BTC: tighter — 0.10% drop = fading
   'ETH': { fadingDropPct: 0.12 },      // ETH: tighter — 0.12% drop = fading
 }
@@ -79,14 +79,14 @@ export interface DipFilterConfig {
 }
 
 export const DIP_FILTER_DEFAULTS: DipFilterConfig = {
-  chaseThreshold: 2.0,        // blokuj kupowanie gdy 1h > +2%
+  chaseThreshold: 0.0,        // blokuj longi gdy 1h > 0% (zielona świeczka = nie longuj!)
   dipThreshold: -0.3,         // pełne bidy gdy 1h <= -0.3% (korekta)
   neutralBidMult: 0.5,
   enabled: true,
 }
 
 export const DIP_FILTER_OVERRIDES: Record<string, Partial<DipFilterConfig>> = {
-  'SOL': { chaseThreshold: 3.0, dipThreshold: -0.5 },
+  'SOL': { dipThreshold: -0.5 },
 }
 
 export function getDipFilterConfig(token: string): DipFilterConfig {
