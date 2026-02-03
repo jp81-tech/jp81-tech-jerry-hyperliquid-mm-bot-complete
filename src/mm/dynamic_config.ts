@@ -1037,9 +1037,9 @@ export class DynamicConfigManager {
       const nansenClient = getNansenProAPI()
       const enrichedData = await injectProxyData(file.data, nansenClient)
 
-      // Update SmAutoDetector cache BEFORE processing tokens
-      // This allows deriveTuning to use auto-detected SM directions
-      updateCacheFromSmData(enrichedData)
+      // NOTE: SmAutoDetector cache is populated by loadAndAnalyzeAllTokens() in main loop.
+      // Do NOT call updateCacheFromSmData here — it loads from different paths and strips
+      // whale_tracker confidence fields, causing SM rotation to break.
 
       // Load nansen_bias.json for Contrarian Logic (tradingMode from whale_tracker.py)
       this.loadNansenBiasData()
