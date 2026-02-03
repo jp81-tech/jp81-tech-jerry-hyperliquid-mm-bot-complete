@@ -18,6 +18,8 @@ export interface TokenRiskProfile {
   confidence: number       // Smart Money Confidence (0-100)
   current_price: number    // Current price
   atr_value?: number       // Optional: ATR from candles (if available)
+  recent_high?: number     // Resistance level (24h high or 4h structure)
+  recent_low?: number      // Support level (24h low or 4h structure)
 }
 
 export class TokenRiskCalculator {
@@ -105,6 +107,25 @@ export class TokenRiskCalculator {
       stopPrice = anchorPrice + buffer  // SL above anchor
     } else {
       stopPrice = anchorPrice - buffer  // SL below anchor
+    }
+
+    // 🛡️ STRUCTURE AWARENESS: Move SL behind support/resistance
+    // Prevents stop-loss hunting at obvious levels
+    const STRUCTURE_BUFFER = 0.005 // 0.5% margin beyond the wall
+
+    if (direction === 'SHORT' && profile.recent_high) {
+      const smartStop = profile.recent_high * (1 + STRUCTURE_BUFFER)
+      const distFromEntry = (smartStop - entryPrice) / entryPrice
+      // Only snap to structure if it's within 10% of entry and would improve SL
+      if (stopPrice < smartStop && distFromEntry < 0.10 && distFromEntry > 0) {
+        stopPrice = smartStop
+      }
+    } else if (direction === 'LONG' && profile.recent_low) {
+      const smartStop = profile.recent_low * (1 - STRUCTURE_BUFFER)
+      const distFromEntry = (entryPrice - smartStop) / entryPrice
+      if (stopPrice > smartStop && distFromEntry < 0.10 && distFromEntry > 0) {
+        stopPrice = smartStop
+      }
     }
 
     // Smart cap: hard limit from entry (7% majors, 12% alts)
