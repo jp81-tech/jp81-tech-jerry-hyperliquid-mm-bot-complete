@@ -9,7 +9,7 @@
  * Used by: GENERALS_FORCE_SHORT, HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
  *          FORCE_SHORT_ONLY, MM_TOKENS, KNOWN_ACTIVE_TOKENS
  */
-export const SHORT_ONLY_TOKENS: string[] = ['HYPE', 'LIT', 'FARTCOIN', 'ENA', 'SUI']
+export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'ENA', 'SUI']
 
 /**
  * Tokens protected by STICKY_PAIRS (existing positions we protect).
@@ -98,7 +98,6 @@ export const BOUNCE_FILTER_DEFAULTS: BounceFilterConfig = {
 
 export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>> = {
   'FARTCOIN': { chaseThreshold: -3.0, bounceThreshold: 0.5 },
-  'HYPE':     { chaseThreshold: -3.0, bounceThreshold: 0.5 },
 }
 
 export function getBounceFilterConfig(token: string): BounceFilterConfig {
