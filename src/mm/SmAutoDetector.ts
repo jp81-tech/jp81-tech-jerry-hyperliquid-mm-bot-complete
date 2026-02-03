@@ -247,6 +247,7 @@ export interface TokenSmAnalysis {
   // 🎯 DYNAMIC RISK (TokenRiskCalculator)
   recommendedLeverage: number       // Dynamic leverage (1-5x)
   visionSlPct: number               // ATR-based SL as fraction of entry (e.g., 0.125 = 12.5%)
+  volatility: number                // Estimated daily volatility (e.g., 0.045 = 4.5%)
 }
 
 // ============================================================
@@ -847,7 +848,8 @@ export function analyzeTokenSm(
     engineScore,
     // 🎯 DYNAMIC RISK
     recommendedLeverage,
-    visionSlPct
+    visionSlPct,
+    volatility: dailyVol
   }
 }
 
@@ -1275,12 +1277,14 @@ export function isFollowSmToken(token: string): boolean {
 export function getTokenRiskParams(token: string): {
   recommendedLeverage: number
   visionSlPct: number
+  volatility: number
 } | undefined {
   const analysis = cachedAnalysis.get(token)
   if (!analysis) return undefined
   return {
     recommendedLeverage: analysis.recommendedLeverage,
-    visionSlPct: analysis.visionSlPct
+    visionSlPct: analysis.visionSlPct,
+    volatility: analysis.volatility
   }
 }
 

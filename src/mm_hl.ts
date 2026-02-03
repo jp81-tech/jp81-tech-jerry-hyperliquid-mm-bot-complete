@@ -3531,11 +3531,11 @@ class HyperliquidMMBot {
       }
     })
 
-    // Initialize PositionProtector for trailing stop / auto-close
+    // Initialize PositionProtector as safety net (Anaconda handles primary SL/TP)
     this.positionProtector = new PositionProtector({
-      trailingStopPct: Number(process.env.TRAILING_STOP_PCT || 0.10),          // 10% trailing stop
+      trailingStopPct: Number(process.env.TRAILING_STOP_PCT || 0.08),          // 8% trailing (backup for Anaconda)
       profitTakeStartPct: Number(process.env.PROFIT_TAKE_START_PCT || 0.05),   // Start trailing after 5% profit
-      hardStopPct: Number(process.env.HARD_STOP_PCT || 0.15),                  // 15% hard stop loss
+      hardStopPct: Number(process.env.HARD_STOP_PCT || 0.12),                  // 12% hard stop (synced with alt cap)
       notifier: this.notifier,
       onClosePosition: async (token, reason, pnlPct) => {
         try {
@@ -6439,9 +6439,9 @@ class HyperliquidMMBot {
     }
 
     // ============================================================
-    // 🎯 VISION SL: ATR-based dynamic stop loss (all positions)
-    // Runs OUTSIDE the contrarian block — protects SM-aligned positions too.
-    // Priority: manual stopLossPrice (tuning) > Vision SL > PositionProtector (15% hard stop)
+    // 🐍 ANACONDA SL: Adaptive Trailing Stop Loss
+    // Tightens as profit grows: BREATHE → PROTECT → TRAIL → LOCK
+    // Priority: manual stopLossPrice (tuning) > Anaconda > PositionProtector (safety net)
     // ============================================================
     if (position && Math.abs(position.size) > 0 && position.entryPrice) {
       const visionRisk = getTokenRiskParams(pair)
@@ -6450,33 +6450,52 @@ class HyperliquidMMBot {
       if (visionRisk && !hasManualSl) {
         const entryPx = position.entryPrice
         const posSide: 'long' | 'short' = position.size > 0 ? 'long' : 'short'
-        const slDistance = entryPx * visionRisk.visionSlPct
-        const visionStopPrice = posSide === 'long'
-          ? entryPx - slDistance
-          : entryPx + slDistance
+
+        // Calculate real-time PnL %
+        const pnlPct = posSide === 'long'
+          ? (midPrice - entryPx) / entryPx
+          : (entryPx - midPrice) / entryPx
+
+        // 🐍 Anaconda: dynamic stop price based on PnL phase
+        const visionStopPrice = TokenRiskCalculator.calculateVisionStopLoss(
+          posSide === 'long' ? 'LONG' : 'SHORT',
+          {
+            symbol: pair,
+            volatility: visionRisk.volatility,
+            confidence: 50,
+            current_price: midPrice
+          },
+          entryPx,
+          pnlPct
+        )
+
+        const phase = TokenRiskCalculator.getAnacondaPhase(pnlPct)
 
         const shouldStop = posSide === 'long'
           ? midPrice <= visionStopPrice
           : midPrice >= visionStopPrice
 
         if (shouldStop) {
-          const pnlPct = posSide === 'long'
-            ? ((midPrice - entryPx) / entryPx) * 100
-            : ((entryPx - midPrice) / entryPx) * 100
+          const label = pnlPct > 0 ? '✅ ANACONDA PROFIT' : '🐍 ANACONDA STOP'
 
           this.notifier.error(
-            `🎯 [VISION SL] ${pair} HIT! Price $${midPrice.toFixed(4)} reached ATR stop $${visionStopPrice.toFixed(4)} ` +
-            `(${(visionRisk.visionSlPct * 100).toFixed(1)}% from entry $${entryPx.toFixed(4)}) ` +
-            `| ${posSide.toUpperCase()} | PnL: ${pnlPct > 0 ? '+' : ''}${pnlPct.toFixed(2)}% | CLOSING...`
+            `${label} [${pair}] Phase=${phase} | Price $${midPrice.toFixed(4)} hit SL $${visionStopPrice.toFixed(4)} ` +
+            `| ${posSide.toUpperCase()} | PnL: ${pnlPct > 0 ? '+' : ''}${(pnlPct * 100).toFixed(2)}% | CLOSING...`
           )
 
           try {
-            await (this.trading as LiveTrading).closePositionForPair(pair, 'vision_sl')
-            this.notifier.info(`✅ [VISION SL] ${pair} position closed at $${midPrice.toFixed(4)}`)
+            await (this.trading as LiveTrading).closePositionForPair(pair, 'anaconda_sl')
+            this.notifier.info(`✅ [ANACONDA] ${pair} closed at $${midPrice.toFixed(4)} (phase=${phase})`)
             return // Exit after closing
           } catch (err: any) {
-            this.notifier.error(`❌ [VISION SL FAILED] ${pair}: ${err?.message || err}`)
+            this.notifier.error(`❌ [ANACONDA FAILED] ${pair}: ${err?.message || err}`)
           }
+        } else if (pnlPct > 0.03) {
+          // Log trailing info when position is profitable
+          console.log(
+            `🐍 [ANACONDA] ${pair}: phase=${phase} pnl=${(pnlPct * 100).toFixed(1)}% ` +
+            `sl=$${visionStopPrice.toFixed(4)} mid=$${midPrice.toFixed(4)} entry=$${entryPx.toFixed(4)}`
+          )
         }
       }
     }
