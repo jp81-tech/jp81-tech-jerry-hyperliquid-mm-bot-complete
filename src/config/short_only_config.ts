@@ -1,20 +1,8 @@
 // ============================================================
-// CENTRALIZED SHORT-ONLY CONFIGURATION
-// "Ostateczne Rozkazy" - All pairs follow Wice-Generał SHORT
-// Single source of truth - change tokens HERE, not in 14 places
+// SM FOLLOWING CONFIGURATION
+// Bot autonomously decides SHORT or LONG based on SM data
+// No hardcoded token lists - SmAutoDetector handles direction
 // ============================================================
-
-/**
- * All tokens that are in SHORT-ONLY mode following SM.
- * Used by: HOLD_FOR_TP, SIGNAL_ENGINE_TOKENS,
- *          FORCE_SHORT_ONLY, MM_TOKENS, KNOWN_ACTIVE_TOKENS
- */
-export const SHORT_ONLY_TOKENS: string[] = ['LIT', 'FARTCOIN', 'PUMP']
-
-/**
- * All tokens that get HOLD_FOR_TP treatment.
- */
-export const ALL_HOLD_FOR_TP_TOKENS: string[] = SHORT_ONLY_TOKENS
 
 // ============================================================
 // RATIO MONITORING / ALERTS
@@ -41,24 +29,11 @@ export const RATIO_ALERTS: RatioAlert[] = [
 /** Cooldown between repeated alerts for the same token (ms) */
 export const RATIO_ALERT_COOLDOWN_MS = 5 * 60 * 1000  // 5 minutes
 
-/**
- * Helper: check if a token is in SHORT_ONLY mode
- */
-export function isShortOnlyToken(token: string): boolean {
-  return SHORT_ONLY_TOKENS.includes(token.toUpperCase())
-}
-
-/**
- * Helper: check if a token gets HOLD_FOR_TP treatment
- */
-export function isHoldForTpToken(token: string): boolean {
-  return ALL_HOLD_FOR_TP_TOKENS.includes(token.toUpperCase())
-}
-
 // ============================================================
 // SHORT-ON-BOUNCE FILTER
 // "Nie goń dna, shortuj na bounce'u"
 // SM traderzy czekają na odbicie i dopiero wtedy dodają shorty
+// Applied when SM mode is FOLLOW_SM_SHORT
 // ============================================================
 
 export interface BounceFilterConfig {
