@@ -4127,7 +4127,8 @@ class HyperliquidMMBot {
           this.notifier.info(`[INFO] Using MANUAL_ACTIVE_PAIRS=${manualPairs.join(',')}`)
           activePairs = manualPairs
         } else if (rotationMode === 'sm') {
-          // Auto-select top 3 by SM conviction (from SmAutoDetector cache)
+          // Auto-select top 3 by Engine score (force reload to avoid stale cache from dynamic_config)
+          await loadAndAnalyzeAllTokens(true)
           const smPairs = getTopSmPairs(3)
           if (smPairs.length > 0) {
             activePairs = smPairs
@@ -4484,8 +4485,8 @@ class HyperliquidMMBot {
     // Active pairs are handled below via MANUAL_ACTIVE_PAIRS in the main loop.
     const rotationEnabled = process.env.ROTATION_ENABLED === 'true'
     const rotationMode = process.env.ROTATION_MODE ?? 'auto'
-    if (!rotationEnabled || rotationMode === 'manual') {
-      return
+    if (!rotationEnabled || rotationMode === 'manual' || rotationMode === 'sm') {
+      return  // SM mode uses getTopSmPairs() in main loop, skip volatility rotation
     }
 
     const now = Date.now()

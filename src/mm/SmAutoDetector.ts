@@ -206,6 +206,7 @@ export interface TokenSmAnalysis {
   signalEngineAllowLongs: boolean   // SignalEngine says LONGS are OK
   signalEngineAllowShorts: boolean  // SignalEngine says SHORTS are OK
   signalEngineOverride: boolean     // SignalEngine wants to override REGIME
+  engineScore: number               // Raw Engine score (-50 to +50)
 }
 
 // ============================================================
@@ -575,6 +576,7 @@ export function analyzeTokenSm(
   // Fall back to calculated score only if not available
   // ============================================================
   let convictionScore = 0
+  let engineScore = 0  // Raw Engine score (-50 to +50)
 
   // 🧠 SIGNAL ENGINE MASTER FLAGS (defaults: allow both sides for PURE_MM)
   let signalEngineAllowLongs = true;
@@ -615,6 +617,7 @@ export function analyzeTokenSm(
         whaleDirection: dominantSide
       }
     );
+    engineScore = engineSignal.score;
 
     // 🎮 MASTER OVERRIDE - SignalEngine controls trading mode AND permissions
     let engineOverrideMode = whaleTrackerMode;
@@ -650,28 +653,44 @@ export function analyzeTokenSm(
     console.log(`🧠 [${token}] Engine: ${engineSignal.score.toFixed(0)} (${engineSignal.action}) | ${engineSignal.reason.join(", ")} | Mode: ${engineOverrideMode} | Longs:${signalEngineAllowLongs} Shorts:${signalEngineAllowShorts}`);
 
   } else if (totalExposure >= THRESHOLDS.minSmExposureUsd) {
-    // FALLBACK: Calculate own conviction score (no momentum protection)
-    console.log(`⚠️ [${token}] No whale_tracker confidence, using calculated score`)
+    // FALLBACK: No whale_tracker confidence — still run SignalEngine for validation
+    console.log(`⚠️ [${token}] No whale_tracker confidence, running Engine with ratio-only data`)
 
-    // Base score from ratio (how lopsided is the positioning)
-    const ratioScore = Math.min(Math.abs(Math.log(ratio + 0.01)) / 3, 1)
+    const engineSignal = SignalEngine.analyze(
+      token,
+      {
+        flow_1h: smData.flow_1h ?? smData.netflow_1h ?? 0,
+        flow_24h: smData.netflow_24h ?? smData.flow_24h ?? 0,
+        flow_7d: smData.netflow_7d ?? smData.flow_7d ?? 0,
+        cex_flow: smData.cex_netflow_7d ?? 0
+      },
+      {
+        ratio: ratio,
+        whaleConviction: 0,  // No whale_tracker confidence available
+        whaleDirection: dominantSide
+      }
+    );
 
-    // Bonus from profitable PnL (shorts winning or longs winning)
-    const profitableUpnl = dominantSide === 'SHORT' ? shortsUpnl : longsUpnl
-    const pnlBonus = profitableUpnl > THRESHOLDS.minProfitablePnl ? 0.2 : 0
+    signalEngineAllowLongs = engineSignal.allowLongs;
+    signalEngineAllowShorts = engineSignal.allowShorts;
+    signalEngineOverride = engineSignal.overrideRegime;
+    engineScore = engineSignal.score;
 
-    // Bonus from trend alignment
-    const trendBonus =
-      (dominantSide === 'SHORT' && trend === 'increasing_shorts') ? 0.15 :
-      (dominantSide === 'LONG' && trend === 'increasing_longs') ? 0.15 : 0
+    if (engineSignal.action === 'WAIT') {
+      dominantSide = 'NEUTRAL';
+      convictionScore = Math.abs(engineSignal.score) / 100;
+      console.log(`🧠 [${token}] Engine OVERRIDE (fallback): ${engineSignal.score.toFixed(0)} -> PURE_MM`);
+    } else if (engineSignal.action === 'SHORT') {
+      dominantSide = 'SHORT';
+      convictionScore = Math.abs(engineSignal.score) / 100;
+      console.log(`🧠 [${token}] Engine CONFIRMS (fallback): ${engineSignal.score.toFixed(0)} -> FOLLOW_SM_SHORT`);
+    } else if (engineSignal.action === 'LONG') {
+      dominantSide = 'LONG';
+      convictionScore = Math.abs(engineSignal.score) / 100;
+      console.log(`🧠 [${token}] Engine CONFIRMS (fallback): ${engineSignal.score.toFixed(0)} -> FOLLOW_SM_LONG`);
+    }
 
-    // Bonus from strong trend
-    const strengthBonus = trendStrength === 'strong' ? 0.1 : 0
-
-    convictionScore = Math.min(
-      (ratioScore * 0.55) + pnlBonus + trendBonus + strengthBonus,
-      1.0
-    )
+    console.log(`🧠 [${token}] Engine: ${engineSignal.score.toFixed(0)} (${engineSignal.action}) | ${engineSignal.reason.join(", ")} | Longs:${signalEngineAllowLongs} Shorts:${signalEngineAllowShorts}`);
   }
 
   // Determine mode and multipliers
@@ -718,7 +737,8 @@ export function analyzeTokenSm(
     // 🧠 SIGNAL ENGINE MASTER CONTROL
     signalEngineAllowLongs,
     signalEngineAllowShorts,
-    signalEngineOverride
+    signalEngineOverride,
+    engineScore
   }
 }
 
@@ -975,11 +995,11 @@ function checkRatioAlerts(analysis: Map<string, TokenSmAnalysis>): void {
  * Loads SM data and analyzes all tokens.
  * Results are cached for 30 seconds.
  */
-export async function loadAndAnalyzeAllTokens(): Promise<Map<string, TokenSmAnalysis>> {
+export async function loadAndAnalyzeAllTokens(forceReload = false): Promise<Map<string, TokenSmAnalysis>> {
   const now = Date.now()
 
-  // Return cached if fresh
-  if (now - lastLoadTime < CACHE_TTL_MS && cachedAnalysis.size > 0) {
+  // Return cached if fresh (unless forced)
+  if (!forceReload && now - lastLoadTime < CACHE_TTL_MS && cachedAnalysis.size > 0) {
     return cachedAnalysis
   }
 
@@ -1166,9 +1186,21 @@ export function shouldHoldForTp(token: string, positionSide: 'short' | 'long' | 
 export function getTopSmPairs(count: number): string[] {
   if (!cachedAnalysis || cachedAnalysis.size === 0) return []
 
-  return [...cachedAnalysis.entries()]
+  const eligible = [...cachedAnalysis.entries()]
     .filter(([_, a]) => a.mode === MmMode.FOLLOW_SM_SHORT || a.mode === MmMode.FOLLOW_SM_LONG)
-    .sort((a, b) => b[1].convictionScore - a[1].convictionScore)
+
+  if (eligible.length === 0) return []
+
+  return eligible
+    .sort((a, b) => {
+      // Primary: Engine score (absolute value, higher = stronger signal)
+      const scoreDiff = Math.abs(b[1].engineScore) - Math.abs(a[1].engineScore)
+      if (scoreDiff !== 0) return scoreDiff
+      // Tiebreaker: LS ratio (capped Infinity to 1000, higher = more lopsided)
+      const ratioA = Math.min(a[1].ratio, 1000)
+      const ratioB = Math.min(b[1].ratio, 1000)
+      return ratioB - ratioA
+    })
     .slice(0, count)
     .map(([token]) => token)
 }
