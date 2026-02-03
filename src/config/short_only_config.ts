@@ -57,3 +57,32 @@ export const BOUNCE_FILTER_OVERRIDES: Record<string, Partial<BounceFilterConfig>
 export function getBounceFilterConfig(token: string): BounceFilterConfig {
   return { ...BOUNCE_FILTER_DEFAULTS, ...(BOUNCE_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
 }
+
+// ============================================================
+// LONG-ON-DIP FILTER (mirror of BOUNCE_FILTER)
+// "Nie goń szczytu, kupuj na dipie"
+// SM traderzy czekają na korektę i dopiero wtedy kupują
+// Applied when SM mode is FOLLOW_SM_LONG
+// ============================================================
+
+export interface DipFilterConfig {
+  chaseThreshold: number      // blokuj bidy gdy change1h > tego (cena rośnie mocno)
+  dipThreshold: number        // pełne bidy gdy change1h <= tego (korekta potwierdzona)
+  neutralBidMult: number      // mnożnik bid w strefie neutralnej
+  enabled: boolean
+}
+
+export const DIP_FILTER_DEFAULTS: DipFilterConfig = {
+  chaseThreshold: 2.0,        // blokuj kupowanie gdy 1h > +2%
+  dipThreshold: -0.3,         // pełne bidy gdy 1h <= -0.3% (korekta)
+  neutralBidMult: 0.5,
+  enabled: true,
+}
+
+export const DIP_FILTER_OVERRIDES: Record<string, Partial<DipFilterConfig>> = {
+  'SOL': { chaseThreshold: 3.0, dipThreshold: -0.5 },
+}
+
+export function getDipFilterConfig(token: string): DipFilterConfig {
+  return { ...DIP_FILTER_DEFAULTS, ...(DIP_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
+}

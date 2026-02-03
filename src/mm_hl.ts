@@ -20,7 +20,7 @@ import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.j
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection } from './mm/SmAutoDetector.js'
-import { getBounceFilterConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -7191,6 +7191,29 @@ class HyperliquidMMBot {
       }
     }
 
+    // 🎯 LONG-ON-DIP: Nie goń szczytu, kupuj na dipie (applies when SM says LONG)
+    let dipFilterChaseBlock = false
+    if (getSmDirection(pair) === 'LONG' && sizeMultipliers.bid > 0) {
+      const dipConfig = getDipFilterConfig(pair)
+      if (dipConfig.enabled) {
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const change1h = snapshot?.momentum?.change1h ?? 0
+
+        if (change1h > dipConfig.chaseThreshold) {
+          // CHASE: cena rośnie mocno, nie gonimy szczytu
+          dipFilterChaseBlock = true
+        } else if (change1h > dipConfig.dipThreshold) {
+          // NEUTRAL: zmniejsz bidy
+          const prev = sizeMultipliers.bid
+          sizeMultipliers.bid *= dipConfig.neutralBidMult
+          console.log(`🎯 [DIP_FILTER] ${pair}: NEUTRAL (1h: ${change1h >= 0 ? '+' : ''}${change1h.toFixed(2)}%) → bid×${prev.toFixed(2)}→${sizeMultipliers.bid.toFixed(2)}`)
+        } else {
+          // DIP: korekta potwierdzona!
+          console.log(`🎯 [DIP_FILTER] ${pair}: DIP (1h: ${change1h.toFixed(2)}%) → FULL bids`)
+        }
+      }
+    }
+
     let gridOrders = this.gridManager!.generateGridOrders(
       pair,
       midPrice,
@@ -7223,6 +7246,19 @@ class HyperliquidMMBot {
         const change1h = snapshot?.momentum?.change1h ?? 0
         this.notifier.warn(
           `🎯 [BOUNCE_FILTER] ${pair}: CHASE (1h: ${change1h.toFixed(2)}%) → usunięto ${originalAsks} asks. Czekam na bounce.`
+        )
+      }
+    }
+
+    // 🎯 LONG-ON-DIP: Usuń bidy gdy gonimy szczyt
+    if (dipFilterChaseBlock && Array.isArray(gridOrders)) {
+      const originalBids = gridOrders.filter((o: GridOrder) => o.side === 'bid').length
+      if (originalBids > 0) {
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid')
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const change1h = snapshot?.momentum?.change1h ?? 0
+        this.notifier.warn(
+          `🎯 [DIP_FILTER] ${pair}: CHASE (1h: +${change1h.toFixed(2)}%) → usunięto ${originalBids} bids. Czekam na dip.`
         )
       }
     }
