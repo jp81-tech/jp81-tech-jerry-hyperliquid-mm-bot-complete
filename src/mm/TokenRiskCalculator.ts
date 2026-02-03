@@ -58,47 +58,83 @@ export class TokenRiskCalculator {
   }
 
   /**
-   * Vision SL (ATR-based)
-   * Calculates stop loss price dynamically adapted to token's noise level.
-   * Uses estimated ATR from daily volatility if real ATR not available.
+   * 🐍 THE ANACONDA - Adaptive Trailing Stop Loss
    *
-   * ATR_MULTIPLIER = 1.5 (tightened from 2.5 — swing trading with SM confirmation)
-   * Hard Stop: 7% majors (BTC/ETH/SOL/BNB), 12% alts/memes
+   * Tightens the SL as profit increases:
+   *   Phase BREATHE (pnl < 5%):  SL = entry ± 1.5 ATR (standard room)
+   *   Phase PROTECT (pnl 5-10%): SL trails from current price ± 1.0 ATR
+   *   Phase TRAIL   (pnl 10-15%):SL trails from current price ± 0.75 ATR
+   *   Phase LOCK    (pnl > 15%): SL trails from current price ± 0.5 ATR
+   *
+   * Breakeven guard: once pnl > 3%, SL cannot be worse than entry.
+   * Hard caps: 7% majors, 12% alts (measured from entry, always enforced).
    *
    * @param direction - LONG or SHORT
-   * @param profile - Token risk profile
+   * @param profile - Token risk profile (must include current_price for trailing)
    * @param entryPrice - Entry price of the position
+   * @param pnlPct - Current unrealized PnL as decimal (e.g., 0.10 = 10%). Default 0.
    * @returns Stop loss price
    */
   public static calculateVisionStopLoss(
     direction: 'LONG' | 'SHORT',
     profile: TokenRiskProfile,
-    entryPrice: number
+    entryPrice: number,
+    pnlPct: number = 0
   ): number {
-    const ATR_MULTIPLIER = 1.5
+    // 🐍 Phase-based ATR multiplier
+    let atrMult: number
+    if (pnlPct > 0.15) {
+      atrMult = 0.5    // LOCK: very tight, protect big profits
+    } else if (pnlPct > 0.10) {
+      atrMult = 0.75   // TRAIL: tight trailing
+    } else if (pnlPct > 0.05) {
+      atrMult = 1.0    // PROTECT: moderate, breakeven secured
+    } else {
+      atrMult = 1.5    // BREATHE: standard breathing room
+    }
 
     // Estimate ATR from daily volatility if real ATR not available
-    // ATR ~ Price x Volatility
     const estimatedATR = profile.atr_value || (entryPrice * profile.volatility)
-    const buffer = estimatedATR * ATR_MULTIPLIER
+    const buffer = estimatedATR * atrMult
+
+    // Anchor: trail from current price when in profit, else from entry
+    const anchorPrice = (pnlPct > 0.05) ? profile.current_price : entryPrice
 
     let stopPrice: number
-
     if (direction === 'SHORT') {
-      stopPrice = entryPrice + buffer  // SL above entry
+      stopPrice = anchorPrice + buffer  // SL above anchor
     } else {
-      stopPrice = entryPrice - buffer  // SL below entry
+      stopPrice = anchorPrice - buffer  // SL below anchor
     }
 
-    // Smart cap: 7% for majors, 12% for alts
+    // Smart cap: hard limit from entry (7% majors, 12% alts)
     const hardStopPct = this.getHardStopPct(profile.symbol)
-    const hardStopDist = entryPrice * hardStopPct
 
     if (direction === 'SHORT') {
-      return Math.min(stopPrice, entryPrice + hardStopDist)
+      let finalSl = Math.min(stopPrice, entryPrice + entryPrice * hardStopPct)
+      // Breakeven guard: if profit > 3%, SL cannot be above entry
+      if (pnlPct > 0.03) {
+        finalSl = Math.min(finalSl, entryPrice * 0.999) // slightly below entry (fees)
+      }
+      return finalSl
     } else {
-      return Math.max(stopPrice, entryPrice - hardStopDist)
+      let finalSl = Math.max(stopPrice, entryPrice - entryPrice * hardStopPct)
+      // Breakeven guard: if profit > 3%, SL cannot be below entry
+      if (pnlPct > 0.03) {
+        finalSl = Math.max(finalSl, entryPrice * 1.001) // slightly above entry (fees)
+      }
+      return finalSl
     }
+  }
+
+  /**
+   * Get the Anaconda phase name for logging.
+   */
+  public static getAnacondaPhase(pnlPct: number): string {
+    if (pnlPct > 0.15) return 'LOCK'
+    if (pnlPct > 0.10) return 'TRAIL'
+    if (pnlPct > 0.05) return 'PROTECT'
+    return 'BREATHE'
   }
 
   /**
