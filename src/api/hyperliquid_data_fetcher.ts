@@ -62,6 +62,17 @@ export class HyperliquidDataFetcher {
     'HYPE', 'LIT', 'FARTCOIN', 'ENA', 'SUI', 'PUMP'
   ])
 
+  // Coins that get candle data fetched (expensive: 1 API call each).
+  // All other coins still get OI/price/funding from the single meta call.
+  private static readonly CANDLE_COINS: Set<string> = new Set([
+    // Majors (actively traded)
+    'BTC', 'ETH', 'SOL',
+    // SM-tracked alts
+    'HYPE', 'LIT', 'FARTCOIN', 'VIRTUAL', 'SUI', 'DOGE',
+    // Rotation candidates
+    'ENA', 'PUMP', 'ZEC', 'TRUMP', 'ASTER', 'WLD', 'ZK',
+  ])
+
   constructor(api?: HyperliquidAPI) {
     this.api = api || new HyperliquidAPI()
   }
@@ -143,6 +154,8 @@ export class HyperliquidDataFetcher {
     })
 
     // 3. For each asset, update OI history and calculate momentum
+    //    Only fetch candles (expensive) for CANDLE_COINS; others get default momentum
+    let candleFetchCount = 0
     for (const ctx of sorted) {
       const coin = ctx.coin.toUpperCase()
       const currentPrice = parseFloat(ctx.midPx || '0')
@@ -158,8 +171,18 @@ export class HyperliquidDataFetcher {
       // Calculate OI changes
       const oiData = this.calculateOIChanges(coin, currentOI)
 
-      // Get price momentum from candles
-      const momentum = await this.calculatePriceMomentum(coin, currentPrice)
+      // Get price momentum — only fetch candles for coins we actually trade
+      let momentum: PriceMomentum
+      if (HyperliquidDataFetcher.CANDLE_COINS.has(coin)) {
+        // Small delay between candle fetches to avoid 429s
+        if (candleFetchCount > 0 && candleFetchCount % 5 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 200))
+        }
+        momentum = await this.calculatePriceMomentum(coin, currentPrice)
+        candleFetchCount++
+      } else {
+        momentum = this.getDefaultMomentum(currentPrice)
+      }
 
       // Detect divergence
       const { divergence, strength } = this.detectDivergence(momentum, oiData)
