@@ -1126,6 +1126,21 @@ export function getAutoEmergencyOverrideSync(token: string): {
 }
 
 /**
+ * Returns top N tokens by SM conviction score.
+ * Only includes tokens with FOLLOW_SM_SHORT or FOLLOW_SM_LONG mode.
+ * Call loadAndAnalyzeAllTokens() first to populate cache.
+ */
+export function getTopSmPairs(count: number): string[] {
+  if (!cachedAnalysis || cachedAnalysis.size === 0) return []
+
+  return [...cachedAnalysis.entries()]
+    .filter(([_, a]) => a.mode === MmMode.FOLLOW_SM_SHORT || a.mode === MmMode.FOLLOW_SM_LONG)
+    .sort((a, b) => b[1].convictionScore - a[1].convictionScore)
+    .slice(0, count)
+    .map(([token]) => token)
+}
+
+/**
  * Refreshes the cache synchronously using provided SM data.
  * Call this from applyTuningForToken to update cache before deriveTuning runs.
  */
