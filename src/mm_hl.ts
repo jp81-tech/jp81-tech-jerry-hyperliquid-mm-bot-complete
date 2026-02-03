@@ -79,6 +79,7 @@ import { AlertCategory, AlertSeverity } from './types/alerts.js'
 import {
   calculateInventorySkew,
   ChaseConfig,
+  getHyperliquidTickSize,
   getInstrumentSpecs,
   INSTITUTIONAL_PRESET,
   roundToTick,
@@ -3214,8 +3215,10 @@ class LiveTrading implements TradingInterface {
           : midPrice * 0.95  // Sell to close long
 
         // Get tick size for proper quantization
+        // Use dynamic tick size from current price (Hyperliquid uses 5 sig figs)
         const specs = getInstrumentSpecs(pair)
-        const tickSize = specs.tickSize
+        const dynamicTick = getHyperliquidTickSize(midPrice)
+        const tickSize = dynamicTick
         const lotSize = specs.lotSize
         const pxDec = getPriceDecimals(tickSize)
         const szDec = getSizeDecimals(lotSize)
@@ -3518,7 +3521,7 @@ class HyperliquidMMBot {
         process.env.RISK_MAX_TOTAL_EXPOSURE_USD || totalCapitalUsd * (1 - Number(process.env.RISK_RESERVE_RATIO || 0.2))
       ),
       reserveRatio: Number(process.env.RISK_RESERVE_RATIO || 0.2),
-      maxDrawdownPct: Number(process.env.RISK_MAX_DRAWDOWN_PCT || 0.2),
+      maxDrawdownPct: Number(process.env.RISK_MAX_DRAWDOWN_PCT || 0.50),
       notifier: this.notifier,
       onPause: (reason) => {
         this.alertManager?.setExternalPause('position-risk', reason)
@@ -5795,11 +5798,11 @@ class HyperliquidMMBot {
           config.spreadCaps // Pass custom { min, max } if defined
         )
 
+        // Kill switch DISABLED (2026-02-03): Too many false positives on major tokens
+        // BTC/ETH/SOL reported as "dead" because Nansen flow data is unreliable.
+        // Keep spread multiplier from guard, ignore pause signal.
         if (guard.pause) {
-          pause = true
-          reason = guard.reason
-          this.notifier.warn(`⏸️ [NANSEN KILL SWITCH] ${symbol}: ${reason}`)
-          return { spreadMult: 1.0, pause, reason }
+          console.log(`[NANSEN] Kill switch suppressed for ${symbol}: ${guard.reason} (DISABLED)`)
         }
 
         spreadMult = guard.spreadMult
@@ -6791,13 +6794,9 @@ class HyperliquidMMBot {
       )
     }
 
-    // Kill switch – jeśli Nansen mówi STOP, nie kwotujemy tej pary
-    if (nansenPause) {
-      this.notifier.warn(
-        `⏸️ [NANSEN KILL SWITCH] ${pair} paused: ${nansenReason ?? 'No reason'}`
-      )
-      return // wyjście z executeMultiLayerMM dla tej pary
-    }
+    // Kill switch DISABLED (2026-02-03): Too many false positives
+    // nansenPause is now always false from getNansenGuardsForPair
+    // Keeping code structure for easy re-enable if needed
 
     // Doklejamy Nansen multiplier do globalnej bazy spreadu
     if (nansenSpreadMult !== 1.0) {

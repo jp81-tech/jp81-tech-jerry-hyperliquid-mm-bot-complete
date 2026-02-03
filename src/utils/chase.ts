@@ -157,22 +157,41 @@ export const CONSERVATIVE_PRESET: ChaseConfig = {
  * Source: https://api.hyperliquid.xyz/info
  */
 export const HYPERLIQUID_SPECS: Record<string, InstrumentSpecs> = {
-  // Major pairs - different tick sizes
-  'BTC': { tickSize: 1, lotSize: 0.001, minNotional: 10, maxLeverage: 50 },
-  'ETH': { tickSize: 0.1, lotSize: 0.01, minNotional: 10, maxLeverage: 50 },
-  'SOL': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 20 },
+  // Major pairs (verified 2026-02-03 against Hyperliquid API + order book)
+  'BTC': { tickSize: 1, lotSize: 0.00001, minNotional: 10, maxLeverage: 40 },
+  'ETH': { tickSize: 0.1, lotSize: 0.0001, minNotional: 10, maxLeverage: 25 },
+  'SOL': { tickSize: 0.01, lotSize: 0.01, minNotional: 10, maxLeverage: 20 },
 
-  // Alt pairs - smaller tick sizes
-  'HYPE': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 20 },
-  'VIRTUAL': { tickSize: 0.0001, lotSize: 1, minNotional: 10, maxLeverage: 20 },
-  'ZK': { tickSize: 0.000001, lotSize: 1, minNotional: 10, maxLeverage: 10 },
-  'ZEC': { tickSize: 0.01, lotSize: 0.01, minNotional: 10, maxLeverage: 20 },
+  // Alt pairs (verified 2026-02-03)
+  'HYPE': { tickSize: 0.001, lotSize: 0.01, minNotional: 10, maxLeverage: 10 },
+  'LIT': { tickSize: 0.0001, lotSize: 1, minNotional: 10, maxLeverage: 5 },
+  'FARTCOIN': { tickSize: 0.00001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 },
+  'VIRTUAL': { tickSize: 0.0001, lotSize: 0.1, minNotional: 10, maxLeverage: 5 },
+  'ZK': { tickSize: 0.000001, lotSize: 1, minNotional: 10, maxLeverage: 5 },
+  'ZEC': { tickSize: 0.01, lotSize: 0.01, minNotional: 10, maxLeverage: 10 },
   'TRUMP': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 },
-  'ASTER': { tickSize: 0.0001, lotSize: 1, minNotional: 10, maxLeverage: 10 },
-  'WLD': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 20 },
+  'ASTER': { tickSize: 0.0001, lotSize: 1, minNotional: 10, maxLeverage: 5 },
+  'WLD': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 },
 
   // Default for unknown symbols
   'DEFAULT': { tickSize: 0.0001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 }
+}
+
+/**
+ * Hyperliquid uses 5 significant figures for all prices.
+ * Tick size = 10^(floor(log10(price)) - 4)
+ *
+ * Examples:
+ *   BTC $76000 → tick 1.0
+ *   ETH $2200  → tick 0.1
+ *   SOL $100   → tick 0.01
+ *   HYPE $33   → tick 0.001
+ *   LIT $1.5   → tick 0.0001
+ *   FARTCOIN $0.22 → tick 0.00001
+ */
+export function getHyperliquidTickSize(price: number): number {
+  if (price <= 0) return 0.00001
+  return Math.pow(10, Math.floor(Math.log10(price)) - 4)
 }
 
 /**
