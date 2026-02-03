@@ -1197,6 +1197,15 @@ export async function getAutoEmergencyOverride(token: string): Promise<{
  * Call loadAndAnalyzeAllTokens() first to populate cache!
  * Used by deriveTuning() which is not async.
  */
+// Env-driven PURE_MM override: "FORCE_MM_PAIRS=BTC,SOL,ETH"
+const FORCE_MM_PAIRS: Set<string> = new Set(
+  (process.env.FORCE_MM_PAIRS || '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+)
+
+export function isForcedMmPair(token: string): boolean {
+  return FORCE_MM_PAIRS.has(token.toUpperCase())
+}
+
 export function getAutoEmergencyOverrideSync(token: string): {
   bidEnabled: boolean
   askEnabled: boolean
@@ -1211,6 +1220,24 @@ export function getAutoEmergencyOverrideSync(token: string): {
   signalEngineAllowLongs: boolean
   signalEngineAllowShorts: boolean
 } | undefined {
+  // 🔧 FORCE PURE_MM for env-specified pairs (e.g. at support after big drops)
+  if (isForcedMmPair(token)) {
+    const analysis = cachedAnalysis.get(token)
+    return {
+      bidEnabled: true,
+      askEnabled: true,
+      bidMultiplier: 1.0,
+      askMultiplier: 1.0,
+      maxInventoryUsd: analysis?.multipliers?.maxInventoryUsd ?? 5000,
+      reason: `[FORCE_MM] ${token}: PURE_MM forced via env (both sides enabled)`,
+      mode: MmMode.PURE_MM,
+      convictionScore: 0,
+      signalEngineOverride: true,
+      signalEngineAllowLongs: true,
+      signalEngineAllowShorts: true
+    }
+  }
+
   const analysis = cachedAnalysis.get(token)
 
   if (!analysis) {
@@ -1292,6 +1319,7 @@ export function getTokenRiskParams(token: string): {
  * Get SM direction for a token: 'SHORT', 'LONG', or null.
  */
 export function getSmDirection(token: string): 'SHORT' | 'LONG' | null {
+  if (isForcedMmPair(token)) return null  // PURE_MM → no SM direction
   const analysis = cachedAnalysis.get(token)
   if (!analysis) return null
   if (analysis.mode === MmMode.FOLLOW_SM_SHORT) return 'SHORT'
