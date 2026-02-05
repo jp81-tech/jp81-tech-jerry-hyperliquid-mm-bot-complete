@@ -219,7 +219,7 @@ export class RiskManager {
 export function createConservativeRiskConfig(): RiskConfig {
   return {
     maxDailyDrawdownPct: 0.03,  // 3% daily loss = stop
-    maxInventoryPct: 0.30,      // 30% in crypto = reduce only (ZMNIEJSZONE z 60%)
+    maxInventoryPct: 0.80,      // 80% in crypto = reduce only (podniesione z 30% — za agresywne, blokowało kPEPE)
     emergencyLiquidateThreshold: 0.05 // 5% loss from peak = liquidate
   };
 }
