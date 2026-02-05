@@ -68,7 +68,7 @@ export class HyperliquidDataFetcher {
     // Majors (actively traded)
     'BTC', 'ETH', 'SOL',
     // SM-tracked alts
-    'HYPE', 'LIT', 'FARTCOIN', 'VIRTUAL', 'SUI', 'DOGE',
+    'HYPE', 'LIT', 'FARTCOIN', 'VIRTUAL', 'SUI', 'DOGE', 'kPEPE',
     // Rotation candidates
     'ENA', 'PUMP', 'ZEC', 'TRUMP', 'ASTER', 'WLD', 'ZK',
   ])

@@ -3303,5 +3303,126 @@ ssh hl-mm 'pm2 logs mm-bot --lines 100 | grep "kPEPE"'
 
 ---
 
+---
+
+## Rozdzial: kPEPE Toxicity Engine (05.02.2026)
+
+### Co to jest i dlaczego to zbudowalismy
+
+Wyobraz sobie, ze twoj kPEPE grid to sklep na ruchliwej ulicy. Wiekszosc klientow kupuje normalnie — to sa "czyste fille". Ale czasem wchodzi "toksyczny" klient, ktory jakims cudem zawsze wie, ze cena zaraz sie ruszy przeciwko tobie. Kupuje od ciebie tuz przed dumpem, albo sprzedaje ci tuz przed pumpem. Za kazdym razem tracisz.
+
+**Toxicity Engine** to bramkarz w twoim sklepie. Obserwuje wzorce zachowan i automatycznie:
+- Poszerza spready (podnosi ceny) gdy cos jest podejrzane
+- Usuwa najbardziej narazone warstwy (L1, L2 blisko mid)
+- Tymczasowo zamyka sklep gdy wykryje skoordynowany atak
+- Odpala hedge trade gdy inventory utknie za dlugo
+
+### Architektura (3 pliki zmienione + 1 nowy)
+
+```
+┌──────────────────────────────────────────────────────┐
+│  WebSocket Fills                                     │
+│  └── kPEPE fill → kpepeToxicity.recordFill()        │
+└──────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│  Main Loop (co 60s)                                  │
+│  └── kpepeToxicity.tick(VPIN, adverse, funding,     │
+│       OI, momentum, skew, duration)                  │
+└──────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────┐
+│  KpepeToxicityOutput                                 │
+│  ├── spreadMult: 1.0-2.0+ (mnoznik spreadu)        │
+│  ├── sizeMultBid/Ask: 0.4-1.0 (mnozniki rozmiaru)  │
+│  ├── removeLayers: [1], [1,2] (usun warstwy)       │
+│  ├── shouldPause: true/false (stop quoting)         │
+│  ├── shouldHedge: true/false (IOC market order)     │
+│  └── reason: "consec=5->removeL1 | vol=4.2%"       │
+└──────────────────────────────────────────────────────┘
+```
+
+### 8 sygnalow detekcji
+
+| # | Sygnal | Warunek | Reakcja |
+|---|--------|---------|---------|
+| 1 | Consecutive toxic fills | 3/5/7/10 z rzedu | Widen / remove L1 / remove L1+2 / PAUSE |
+| 2 | Rapid fill burst | 3+ fills w 10s | Widen +30%, remove L1 |
+| 3 | Sweep detection | 20+ bps range w 30s | Widen +50% |
+| 4 | Coordinated attack | VPIN+adverse+rapid | PAUSE 2 min |
+| 5 | Volatility sizing | momentum >3%/5% | Size x0.60 / x0.40 |
+| 6 | OI-based spread | OI zmiana >10% | Widen +15% (rosnace) / +10% (spadajace) |
+| 7 | Funding asymmetry | funding >0.01% | Reduce paying side x0.80 |
+| 8 | Hedge trigger | skew>50% przez 30min | IOC 20% pozycji, cooldown 15min |
+
+### Enhanced 10-zone Time-of-Day Profile
+
+Stary system mial 4 strefy czasowe (bardzo ogolne). Nowy ma 10 stref dopasowanych do sesji rynkowych:
+
+| UTC | Sesja | Spread | Size | Dlaczego |
+|-----|-------|--------|------|----------|
+| 02-04 | Asia low | **0.85** | **1.10** | Niska toksycznosc, wezszy spread |
+| 14-16 | **US open** | **1.20** | **0.85** | **Najtoksyczniejsze okno** |
+| 18-20 | US wind-down | 1.10 | 0.95 | Uspokajanie |
+
+### Per-Layer Refresh Rates
+
+Nie kazda warstwa musi byc odswiezana co tick:
+- **L1** (Scalping, 5bps) — co tick (60s). Najblizej mid, musi sledzic cene.
+- **L2-L3** (Core/Buffer) — co 2 ticki (120s). Mniej wrazliwe na cene.
+- **L4** (Sweep, 55bps) — co 5 tickow (300s). Daleko od mid, rzadko dotykane.
+
+To oszczedza API rate limit i zmniejsza exchange fees.
+
+### VPIN Fix
+
+Problem: Domyslny VPIN uzywal $50,000 na bucket (zaprojektowany dla BTC/ETH). kPEPE ma duzo mniejszy volume, wiec buckety nigdy sie nie zapelnialy i VPIN stal na 0.5 (baseline). Naprawione: $500 na bucket, 30 bucketow.
+
+### Funding Filter
+
+kPEPE ma teraz wlasna konfiguracje funding filter bo memecoiny maja szalone funding rates:
+- Crowded threshold: 0.03% (vs default 0.05%)
+- Caution multiplier: 0.70 (vs default 0.50)
+
+### Lekcje
+
+1. **Brak adresow counterparty na Hyperliquid** — fille daja tylko: oid, coin, side, px, sz, time, fee, closedPnl. Brak adresow traderow. Dlatego uzywamy detekcji wzorcow zamiast sledzenia adresow.
+
+2. **VPIN potrzebuje odpowiednich bucket sizes** — $50K bucket dla memecoina z $100K daily volume = 2 buckety dziennie. Trzeba 30-50 wypelnionych bucketow dla sensownych odczytow.
+
+3. **Sprawdzaj CANDLE_COINS** — kPEPE nie bylo w CANDLE_COINS, wiec data fetcher zwracal change1h=0. Volatility sizing nigdy sie nie wlaczal.
+
+4. **Scope klas** — Grid pipeline jest w HyperliquidMMBot, ale vpinAnalyzers i adverseTracker sa na LiveTrading. Trzeba uzywac liveTrading.vpinAnalyzers, nie this.vpinAnalyzers.
+
+5. **Warstwowa obrona > pojedynczy check** — Zaden pojedynczy sygnal nie jest niezawodny. Ale gdy 3+ sygnaly odpalaja jednoczesnie = wysoka pewnosc toksycznego flow = agresywna reakcja.
+
+### Weryfikacja w logach
+
+```bash
+# Szukaj tych logow po deployu:
+
+# Toxicity level co 20 tickow
+# 🐸 [kPEPE TOXICITY] level=NORMAL spread×1.00 consecutive=0 clean
+
+# Elevated toxicity
+# 🐸 [kPEPE TOXICITY] level=ELEVATED spread×1.30 consecutive=4 consec=4->widen | fund+0.0150%->bid×0.80
+
+# Layer removal
+# 🐸 [kPEPE TOXICITY] Removed L1 → 16→12 orders (consec=5->removeL1)
+
+# Pause
+# 🐸 [kPEPE TOXICITY] PAUSED: COORDINATED(VPIN=HIGH+adverse+rapid)
+
+# Hedge
+# 🐸 [kPEPE HEDGE] Firing IOC sell $42 (HEDGE(skew=55.0%,35min))
+
+# Grid info
+# 🐸 [kPEPE GRID] 4-layer custom: bids=6 asks=8 tz=1.20/0.85 bidMult=1.44 askMult=1.44
+```
+
+---
+
 *Ostatnia aktualizacja: 2026-02-05*
 *Autor: Claude (z pomoca Jerry'ego)*

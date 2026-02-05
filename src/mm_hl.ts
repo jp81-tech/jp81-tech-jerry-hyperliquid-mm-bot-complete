@@ -87,6 +87,7 @@ import {
   VolatilityTracker
 } from './utils/chase.js'
 import { GridManager, GridOrder, GridLayer } from './utils/grid_manager.js'
+import { KpepeToxicityEngine, getKpepeTimeZoneProfile } from './mm/kpepe_toxicity.js'
 import { killSwitchActive } from './utils/kill_switch.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder } from './utils/legacy_unwinder.js'
 import { mmAlertBot } from './utils/mm_alert_bot.js'
@@ -283,17 +284,11 @@ const KPEPE_GRID_LAYERS: GridLayer[] = [
   // 16% reserve (not allocated = available for rebalancing)
 ]
 
-/**
- * kPEPE time-of-day spread multiplier (UTC)
- * Tighter in low-activity hours, wider during peak trading
- */
-function getKpepeTimeMultiplier(): number {
-  const hour = new Date().getUTCHours()
-  if (hour >= 2 && hour < 8) return 0.85     // Low activity → tighter
-  if (hour >= 8 && hour < 14) return 1.0      // Standard
-  if (hour >= 14 && hour < 22) return 1.15    // Peak hours → wider
-  return 1.0                                   // 22-02 cool-down
-}
+// kPEPE Toxicity Engine instance (pattern-based toxic flow detection)
+const kpepeToxicity = new KpepeToxicityEngine()
+
+// kPEPE per-layer refresh rate tracking
+const kpepeLayerRefresh = { lastL1: 0, lastL23: 0, lastL4: 0 }
 
 /**
  * kPEPE Time-Based Inventory Decay state
@@ -1786,6 +1781,19 @@ class LiveTrading implements TradingInterface {
                 midPriceAtFill: Number(f.px), // Simplified
                 timestamp: Date.now()
               });
+
+              // 🐸 kPEPE: Feed fills to toxicity engine
+              if (f.coin === 'kPEPE') {
+                const fillPrice = Number(f.px)
+                const fillSz = Number(f.sz)
+                kpepeToxicity.recordFill({
+                  timestamp: Date.now(),
+                  side: f.side === 'B' ? 'buy' : 'sell',
+                  price: fillPrice,
+                  sizeUsd: fillPrice * fillSz,
+                  midPriceAtFill: fillPrice, // Best approximation without separate mid
+                })
+              }
             });
           });
         }
@@ -1828,7 +1836,11 @@ class LiveTrading implements TradingInterface {
         // 🧪 VPIN: Subscribe to all trades for this pair
         this.websocket.subscribeTrades(pair, (trade: any) => {
           if (!this.vpinAnalyzers.has(pair)) {
-            this.vpinAnalyzers.set(pair, new VPINAnalyzer());
+            // kPEPE: smaller buckets for lower volume (default 50K too large, buckets never fill)
+            const vpinConfig = pair === 'kPEPE'
+              ? { bucketSizeUsd: 500, nBuckets: 30 }
+              : { bucketSizeUsd: 50000, nBuckets: 50 }
+            this.vpinAnalyzers.set(pair, new VPINAnalyzer(vpinConfig));
           }
           this.vpinAnalyzers.get(pair)!.addTrade(Number(trade.px), Number(trade.sz), trade.side === 'B' ? 'buy' : 'sell');
         });
@@ -7546,43 +7558,115 @@ class HyperliquidMMBot {
       }
     }
 
-    // 🐸 kPEPE: Custom 4-layer grid with time-of-day spread adjustment
+    // 🐸 kPEPE: Custom 4-layer grid + Toxicity Engine + enhanced time-of-day
     let gridOrders: GridOrder[]
     if (pair === 'kPEPE') {
-      const timeMult = getKpepeTimeMultiplier()
-      gridOrders = this.gridManager!.generateGridOrdersCustom(
-        pair,
-        midPrice,
-        capitalPerPair,
-        KPEPE_GRID_LAYERS,
-        0.001,
-        inventorySkew,
-        permissions,
-        actualSkew,
-        { bid: gridBidMult * timeMult, ask: gridAskMult * timeMult },
-        sizeMultipliers
+      // ── Gather signals for toxicity engine ──
+      const vpinInfo = liveTrading.vpinAnalyzers?.get(pair)?.getToxicityLevel()
+      const adverseMult = liveTrading.adverseTracker?.calculateAdverseSelectionScore(pair, midPrice) ?? 1.0
+      const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+      const fundingRate = snapshot?.fundingRate ?? 0
+      const oiChange1h = snapshot?.oi?.change1h ?? 0
+      const momentum1h = snapshot?.momentum?.change1h ?? 0
+      const skewDurationMin = kpepeSkewState.skewStartTime > 0
+        ? (Date.now() - kpepeSkewState.skewStartTime) / 60000 : 0
+
+      // ── Run toxicity engine ──
+      kpepeToxicity.tick(
+        vpinInfo?.level ?? 'NORMAL',
+        adverseMult,
+        fundingRate, oiChange1h, momentum1h,
+        actualSkew, skewDurationMin
       )
-      // 🐸 LAYER REMOVAL: At critical skew (>40%), strip L1-L2 from the heavy side
-      // This is the aggressive rebalancing step — size skew alone isn't enough
-      if (Math.abs(actualSkew) > 0.40) {
-        const before = gridOrders.length
-        if (actualSkew > 0) {
-          // LONG heavy → remove L1-L2 bids (stop buying)
-          gridOrders = gridOrders.filter(o => !(o.side === 'bid' && o.layer <= 2))
-        } else {
-          // SHORT heavy → remove L1-L2 asks (stop selling)
-          gridOrders = gridOrders.filter(o => !(o.side === 'ask' && o.layer <= 2))
+      const toxOut = kpepeToxicity.getOutput()
+
+      if (toxOut.shouldPause) {
+        // CRITICAL: No orders during pause
+        console.log(`🐸 [kPEPE TOXICITY] PAUSED: ${toxOut.reason}`)
+        gridOrders = []
+      } else {
+        // ── Apply toxicity + enhanced 10-zone time profile ──
+        const timeZone = getKpepeTimeZoneProfile()
+        const toxSpreadMult = toxOut.spreadMult * timeZone.spreadMult
+        const toxSizeMult = timeZone.sizeMult
+
+        sizeMultipliers.bid *= toxOut.sizeMultBid * toxSizeMult
+        sizeMultipliers.ask *= toxOut.sizeMultAsk * toxSizeMult
+
+        gridOrders = this.gridManager!.generateGridOrdersCustom(
+          pair,
+          midPrice,
+          capitalPerPair,
+          KPEPE_GRID_LAYERS,
+          0.001,
+          inventorySkew,
+          permissions,
+          actualSkew,
+          { bid: gridBidMult * toxSpreadMult, ask: gridAskMult * toxSpreadMult },
+          sizeMultipliers
+        )
+
+        // ── Toxicity-driven layer removal (overrides skew-based removal) ──
+        if (toxOut.removeLayers.length > 0) {
+          const before = gridOrders.length
+          gridOrders = gridOrders.filter(o => !toxOut.removeLayers.includes(o.layer))
+          if (before > gridOrders.length) {
+            console.log(`🐸 [kPEPE TOXICITY] Removed L${toxOut.removeLayers.join(',')} → ${before}→${gridOrders.length} orders (${toxOut.reason})`)
+          }
         }
-        const removed = before - gridOrders.length
-        if (removed > 0) {
-          console.log(`🐸 [kPEPE LAYER_REMOVAL] skew=${(actualSkew*100).toFixed(1)}% → removed ${removed} L1-L2 ${actualSkew > 0 ? 'bids' : 'asks'}`)
+
+        // ── Skew-based layer removal (>40%) still applies on top ──
+        if (Math.abs(actualSkew) > 0.40) {
+          const before = gridOrders.length
+          if (actualSkew > 0) {
+            gridOrders = gridOrders.filter(o => !(o.side === 'bid' && o.layer <= 2))
+          } else {
+            gridOrders = gridOrders.filter(o => !(o.side === 'ask' && o.layer <= 2))
+          }
+          const removed = before - gridOrders.length
+          if (removed > 0) {
+            console.log(`🐸 [kPEPE LAYER_REMOVAL] skew=${(actualSkew*100).toFixed(1)}% → removed ${removed} L1-L2 ${actualSkew > 0 ? 'bids' : 'asks'}`)
+          }
+        }
+
+        // ── Per-layer refresh rates: L1 every tick, L2-L3 every 2, L4 every 5 ──
+        const now = Date.now()
+        const tickMs = 60000
+        const refreshL23 = (now - kpepeLayerRefresh.lastL23) >= tickMs * 2
+        const refreshL4 = (now - kpepeLayerRefresh.lastL4) >= tickMs * 5
+        // L1 always refreshes. Non-refreshed layers are excluded from this tick's order set
+        // (their existing exchange orders stay in place, not cancelled)
+        gridOrders = gridOrders.filter(o => {
+          if (o.layer === 1) return true
+          if (o.layer === 2 || o.layer === 3) return refreshL23
+          if (o.layer === 4) return refreshL4
+          return true
+        })
+        if (refreshL23) kpepeLayerRefresh.lastL23 = now
+        if (refreshL4) kpepeLayerRefresh.lastL4 = now
+      }
+
+      // ── HEDGE TRIGGER: Fire IOC market order to reduce skew ──
+      if (toxOut.shouldHedge && !toxOut.shouldPause && position) {
+        const posValue = Math.abs(position.size * midPrice)
+        const hedgeUsd = posValue * 0.20  // 20% of position
+        if (hedgeUsd > 5) {  // Minimum $5 to avoid dust orders
+          console.log(`🐸 [kPEPE HEDGE] Firing IOC ${toxOut.hedgeSide} $${hedgeUsd.toFixed(0)} (${toxOut.reason})`)
+          const hedgePrice = toxOut.hedgeSide === 'buy'
+            ? midPrice * 1.005  // 0.5% above mid for buy
+            : midPrice * 0.995  // 0.5% below mid for sell
+          this.trading.placeOrder(pair, toxOut.hedgeSide, hedgePrice, hedgeUsd, 'market', false)
+            .catch(e => console.error(`🐸 [kPEPE HEDGE] Failed:`, e))
         }
       }
 
+      // ── Periodic logging ──
       if (this.tickCount % 20 === 0) {
         const bids = gridOrders.filter(o => o.side === 'bid').length
         const asks = gridOrders.filter(o => o.side === 'ask').length
-        console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} timeMult=${timeMult.toFixed(2)} bidMult=${(gridBidMult * timeMult).toFixed(2)} askMult=${(gridAskMult * timeMult).toFixed(2)}`)
+        const timeZone = getKpepeTimeZoneProfile()
+        console.log(`🐸 [kPEPE TOXICITY] level=${kpepeToxicity.getToxicityLevel()} spread×${toxOut.spreadMult.toFixed(2)} consecutive=${kpepeToxicity.getConsecutiveToxic()} ${toxOut.reason}`)
+        console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} tz=${timeZone.spreadMult.toFixed(2)}/${timeZone.sizeMult.toFixed(2)} bidMult=${(gridBidMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)} askMult=${(gridAskMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)}`)
       }
     } else {
       gridOrders = this.gridManager!.generateGridOrders(
