@@ -3217,6 +3217,13 @@ class LiveTrading implements TradingInterface {
    */
   async closePositionForPair(pair: string, reason: string = 'rotation_cleanup'): Promise<void> {
     try {
+      // 🚫 MANUAL_POSITIONS — positions managed manually, bot should NOT touch them
+      const manualPositions = (process.env.MANUAL_POSITIONS ?? '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+      if (manualPositions.includes(pair.toUpperCase())) {
+        console.log(`🚫 [MANUAL_POSITION] ${pair}: Skipping close (${reason}) — position is manually managed`)
+        return
+      }
+
       const state = await this.infoClient.clearinghouseState({ user: this.walletAddress })
 
       if (!state.assetPositions || state.assetPositions.length === 0) {
@@ -5284,10 +5291,14 @@ class HyperliquidMMBot {
       this.notifier.info(`📦 Legacy positions: ${legacyPairs.join(', ')} - continuing market-making`)
     }
 
+    // 🚫 Filter out MANUAL_POSITIONS — pairs managed manually, bot should NOT trade them
+    const manualPositions = (process.env.MANUAL_POSITIONS ?? '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+    const tradablePairs = activePairs.filter(p => !manualPositions.includes(p.toUpperCase()))
+
     // ⚡ OPTIMIZED: Execute all pairs in parallel with shared market data
     // ONLY trade active pairs (respects STICKY_PAIRS + rotation selection)
     await Promise.all(
-      activePairs.map(async (pair) => {
+      tradablePairs.map(async (pair) => {
         try {
           await this.executePairMM(pair, assetCtxs)
         } catch (error) {
