@@ -3298,10 +3298,9 @@ class LiveTrading implements TradingInterface {
           : midPrice * 0.95  // Sell to close long
 
         // Get tick size for proper quantization
-        // Use dynamic tick size from current price (Hyperliquid uses 5 sig figs)
+        // Use static specs (dynamic getHyperliquidTickSize is wrong for low-price assets like kPEPE)
         const specs = getInstrumentSpecs(pair)
-        const dynamicTick = getHyperliquidTickSize(midPrice)
-        const tickSize = dynamicTick
+        const tickSize = specs.tickSize
         const lotSize = specs.lotSize
         const pxDec = getPriceDecimals(tickSize)
         const szDec = getSizeDecimals(lotSize)
@@ -8023,15 +8022,15 @@ class HyperliquidMMBot {
 
         const buySpan =
           buyPrices.length
-            ? `${Math.min(...buyPrices).toFixed(4)}→${Math.max(...buyPrices).toFixed(4)}`
+            ? `${Math.min(...buyPrices).toPrecision(5)}→${Math.max(...buyPrices).toPrecision(5)}`
             : 'n/a'
 
         const sellSpan =
           sellPrices.length
-            ? `${Math.min(...sellPrices).toFixed(4)}→${Math.max(...sellPrices).toFixed(4)}`
+            ? `${Math.min(...sellPrices).toPrecision(5)}→${Math.max(...sellPrices).toPrecision(5)}`
             : 'n/a'
 
-        const midStr = midApprox !== null ? midApprox.toFixed(4) : 'n/a'
+        const midStr = midApprox !== null ? midApprox.toPrecision(5) : 'n/a'
 
         this.notifier.info(
           `📊 [ML-GRID] pair=${pair} mid≈${midStr} ` +
