@@ -7629,21 +7629,9 @@ class HyperliquidMMBot {
           }
         }
 
-        // ── Per-layer refresh rates: L1 every tick, L2-L3 every 2, L4 every 5 ──
-        const now = Date.now()
-        const tickMs = 60000
-        const refreshL23 = (now - kpepeLayerRefresh.lastL23) >= tickMs * 2
-        const refreshL4 = (now - kpepeLayerRefresh.lastL4) >= tickMs * 5
-        // L1 always refreshes. Non-refreshed layers are excluded from this tick's order set
-        // (their existing exchange orders stay in place, not cancelled)
-        gridOrders = gridOrders.filter(o => {
-          if (o.layer === 1) return true
-          if (o.layer === 2 || o.layer === 3) return refreshL23
-          if (o.layer === 4) return refreshL4
-          return true
-        })
-        if (refreshL23) kpepeLayerRefresh.lastL23 = now
-        if (refreshL4) kpepeLayerRefresh.lastL4 = now
+        // NOTE: Per-layer refresh disabled — cancelPairOrders() cancels ALL orders
+        // before placement, so filtered layers would be cancelled but not re-placed.
+        // All layers refresh every tick instead.
       }
 
       // ── HEDGE TRIGGER: Fire IOC market order to reduce skew ──
