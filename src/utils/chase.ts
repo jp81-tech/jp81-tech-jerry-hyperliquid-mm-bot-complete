@@ -172,6 +172,7 @@ export const HYPERLIQUID_SPECS: Record<string, InstrumentSpecs> = {
   'TRUMP': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 },
   'ASTER': { tickSize: 0.0001, lotSize: 1, minNotional: 10, maxLeverage: 5 },
   'WLD': { tickSize: 0.001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 },
+  'kPEPE': { tickSize: 0.000001, lotSize: 1, minNotional: 10, maxLeverage: 10 },
 
   // Default for unknown symbols
   'DEFAULT': { tickSize: 0.0001, lotSize: 0.1, minNotional: 10, maxLeverage: 10 }
