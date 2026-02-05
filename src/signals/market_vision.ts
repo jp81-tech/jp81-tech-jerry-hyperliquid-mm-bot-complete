@@ -125,7 +125,21 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
   'FARTCOIN': {
     chain: 'solana',
     address: '9BB6NFEBSJbCrqODX4F9kR743r923Q83tq6kF659pump',
-    spreadCaps: { min: 0.9, max: 2.0 }
+    spreadCaps: { min: 0.9, max: 2.0 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 20,        // 0.20% — slightly wider for meme volatility
+      minSpreadBps: 10,         // 0.10% floor
+      maxSpreadBps: 60,         // 0.60% during extreme vol
+      smFlowSpreadMult: 1.3,    // Widen on SM flow detection
+      smPositionSpreadMult: 1.2,
+      baseOrderSizeUsd: 2000,   // $2K per level — aggressive SM-following
+      maxPositionUsd: 10000,    // $10K max position
+      smSignalSkew: 0.0,        // Dynamic from SmAutoDetector (FOLLOW_SM_SHORT/LONG)
+      inventorySkewMult: 1.5,   // Aggressive rebalancing for meme
+      maxLeverage: 5,
+      stopLossPct: 0.05         // 5% SL — meme needs breathing room
+    }
   },
   // 🔧 FIX 2026-02-01: "Ostateczne Rozkazy" - new SHORT targets
   'ENA': {
@@ -174,7 +188,21 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
   'LIT': {
     chain: 'ethereum',
     address: '0xb59490ab09a0f526cc7305822ac65f2ab12f9723',
-    spreadCaps: { min: 0.9, max: 1.5 }
+    spreadCaps: { min: 0.9, max: 1.5 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 30,        // 0.30% — wider spread, less loss on small moves
+      minSpreadBps: 15,         // 0.15% min during calm
+      maxSpreadBps: 60,         // 0.60% during vol
+      smFlowSpreadMult: 1.3,    // Widen on SM flow detection
+      smPositionSpreadMult: 1.2,
+      baseOrderSizeUsd: 2000,   // $2K per level — aggressive SM-following
+      maxPositionUsd: 10000,    // $10K max position
+      smSignalSkew: 0.0,        // Dynamic from SmAutoDetector (FOLLOW_SM_SHORT/LONG)
+      inventorySkewMult: 1.3,   // Standard inventory management
+      maxLeverage: 5,
+      stopLossPct: 0.04         // 4% SL — altcoin, medium volatility
+    }
   },
   'SOL': {
     chain: 'solana',
@@ -186,11 +214,6 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
     spreadCaps: { min: 1.0, max: 2.5 }
   },
-  'kPEPE': {
-    chain: 'ethereum',
-    address: '0x6982508145454ce325ddbe47a25d4ec3d2311933',
-    spreadCaps: { min: 0.9, max: 1.5 }
-  },
   'DOGE': {
     chain: 'bnb',
     address: '0xba2ae424d960c26247dd6c32edc70b295c744c43',
@@ -200,6 +223,44 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     chain: 'bnb',
     address: '0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe',
     spreadCaps: { min: 0.9, max: 1.3 }
+  },
+  'POPCAT': {
+    chain: 'hyperliquid',
+    address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
+    spreadCaps: { min: 0.9, max: 1.5 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 42,       // 0.42% target spread
+      minSpreadBps: 25,        // 0.25% minimum
+      maxSpreadBps: 90,        // 0.90% extreme vol
+      smFlowSpreadMult: 1.0,   // No SM adjustment (PURE_MM)
+      smPositionSpreadMult: 1.0,
+      baseOrderSizeUsd: 1000,  // $1,000 per level (5 levels)
+      maxPositionUsd: 11000,   // $11K max position (92% of $12k)
+      smSignalSkew: 0.0,       // Neutral — no directional bias
+      inventorySkewMult: 1.5,  // Aggressive rebalancing for meme
+      maxLeverage: 3,
+      stopLossPct: 0.015       // 1.5% SL — tight for meme volatility
+    }
+  },
+  'kPEPE': {
+    chain: 'hyperliquid',
+    address: '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE',
+    spreadCaps: { min: 0.9, max: 1.5 },
+    tuning: {
+      enabled: true,
+      baseSpreadBps: 14,       // 0.14% base — matched to L2 Core layer
+      minSpreadBps: 5,         // 0.05% floor — allows L1 scalping layer
+      maxSpreadBps: 60,        // 0.60% cap — allows L4 sweep layer
+      smFlowSpreadMult: 1.0,   // No SM adjustment (PURE_MM)
+      smPositionSpreadMult: 1.0,
+      baseOrderSizeUsd: 2000,  // $2K per level — deep book supports it
+      maxPositionUsd: 10000,   // $10K max position
+      smSignalSkew: 0.0,       // Neutral — no directional bias
+      inventorySkewMult: 2.0,  // Aggressive rebalancing (was 1.3) — matched to custom skew logic
+      maxLeverage: 5,
+      stopLossPct: 0.04        // 4% SL — memecoin volatility
+    }
   }
 };
 
@@ -254,7 +315,7 @@ export class MarketVisionService {
   private isRunning: boolean = false;
   private updateIntervalMs: number = 2 * 60 * 1000; // Update every 2 minutes (faster for reversal detection)
   // We will dynamically update this list based on what the bot is trading
-  private activePairs: string[] = ['ZEC', 'HYPE', 'VIRTUAL', 'UNI', 'ETH', 'SOL', 'BTC', 'MON'];
+  private activePairs: string[] = ['LIT', 'kPEPE', 'ETH', 'BTC', 'HYPE', 'SOL'];
 
   constructor(api: HyperliquidAPI) {
     this.api = api;
