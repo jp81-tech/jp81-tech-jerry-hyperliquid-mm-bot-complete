@@ -4994,6 +4994,11 @@ class HyperliquidMMBot {
         }
 
         if (shouldClose) {
+          // 🚫 BYPASS AUTO-CLOSE FOR kPEPE (PURE_MM — Nansen bias conflict is expected)
+          if (pair === 'kPEPE') {
+            continue
+          }
+
           // 🚫 BYPASS AUTO-CLOSE FOR FOLLOW_SM MODES (Unholy Trinity protection)
           // In high-conviction SM-following mode, we trust on-chain data over bias conflicts
           // The "conflict" is expected - we're deliberately going against short-term bias
