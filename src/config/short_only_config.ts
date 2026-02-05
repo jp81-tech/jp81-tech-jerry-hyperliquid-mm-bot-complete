@@ -118,7 +118,14 @@ export const FUNDING_FILTER_DEFAULTS: FundingFilterConfig = {
   enabled: true,
 }
 
-export const FUNDING_FILTER_OVERRIDES: Record<string, Partial<FundingFilterConfig>> = {}
+export const FUNDING_FILTER_OVERRIDES: Record<string, Partial<FundingFilterConfig>> = {
+  'KPEPE': {
+    crowdedThreshold: 0.0003,   // 0.03% (tighter — memecoins have wild funding)
+    cautionThreshold: 0.0001,   // 0.01%
+    cautionMult: 0.70,          // More aggressive reduction
+    enabled: true
+  }
+}
 
 export function getFundingFilterConfig(token: string): FundingFilterConfig {
   return { ...FUNDING_FILTER_DEFAULTS, ...(FUNDING_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
