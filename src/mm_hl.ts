@@ -19,7 +19,7 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams } from './mm/SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
 import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
@@ -86,7 +86,7 @@ import {
   ThrottleTracker,
   VolatilityTracker
 } from './utils/chase.js'
-import { GridManager, GridOrder } from './utils/grid_manager.js'
+import { GridManager, GridOrder, GridLayer } from './utils/grid_manager.js'
 import { killSwitchActive } from './utils/kill_switch.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder } from './utils/legacy_unwinder.js'
 import { mmAlertBot } from './utils/mm_alert_bot.js'
@@ -208,10 +208,10 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
   },
   // Dodane dla większych pozycji - ULTRA DENSE GRID
   LIT: {
-    minUsd: 15,      // zmniejszone z 20 dla gęstszej siatki
-    targetUsd: 25,   // zmniejszone z 100 dla więcej zleceń
-    maxUsd: 100,
-    maxUsdAbs: 2000
+    minUsd: 50,       // bigger orders for SM-following ($500/day target)
+    targetUsd: 200,   // $200 per child order — 10x previous
+    maxUsd: 500,
+    maxUsdAbs: 5000   // $5K max total — aggressive swing trades
   },
   SUI: {
     minUsd: 20,
@@ -228,8 +228,8 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
   kPEPE: {
     minUsd: 20,
     targetUsd: 100,
-    maxUsd: 200,
-    maxUsdAbs: 2000
+    maxUsd: 300,       // Allow larger sweep layer orders (L4)
+    maxUsdAbs: 5000    // $5K total cap for 4-layer custom grid
   },
   WIF: {
     minUsd: 20,
@@ -256,11 +256,82 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
     maxUsdAbs: 2000
   },
   FARTCOIN: {
-    minUsd: 15,      // zmniejszone z 20 dla gęstszej siatki
-    targetUsd: 25,   // zmniejszone z 100 dla więcej zleceń
-    maxUsd: 100,
-    maxUsdAbs: 2000
+    minUsd: 50,       // bigger orders for SM-following ($500/day target)
+    targetUsd: 200,   // $200 per child order — 10x previous
+    maxUsd: 500,
+    maxUsdAbs: 5000   // $5K max total — aggressive swing trades
+  },
+  POPCAT: {
+    minUsd: 15,
+    targetUsd: 50,
+    maxUsd: 150,
+    maxUsdAbs: 1500
+  },
+  // kPEPE already exists above as kPEPE: { minUsd:20, targetUsd:100, maxUsd:300, maxUsdAbs:5000 }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// kPEPE CUSTOM 4-LAYER GRID
+// L1 Scalping (5bps) → L2 Core (14bps) → L3 Buffer (28bps) → L4 Sweep (55bps)
+// 16% reserve unallocated for rebalancing headroom
+// ─────────────────────────────────────────────────────────────────────────────
+const KPEPE_GRID_LAYERS: GridLayer[] = [
+  { level: 1, offsetBps: 5,  capitalPct: 10, ordersPerSide: 2, isActive: true },  // Scalping
+  { level: 2, offsetBps: 14, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Core
+  { level: 3, offsetBps: 28, capitalPct: 30, ordersPerSide: 2, isActive: true },  // Buffer
+  { level: 4, offsetBps: 55, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep
+  // 16% reserve (not allocated = available for rebalancing)
+]
+
+/**
+ * kPEPE time-of-day spread multiplier (UTC)
+ * Tighter in low-activity hours, wider during peak trading
+ */
+function getKpepeTimeMultiplier(): number {
+  const hour = new Date().getUTCHours()
+  if (hour >= 2 && hour < 8) return 0.85     // Low activity → tighter
+  if (hour >= 8 && hour < 14) return 1.0      // Standard
+  if (hour >= 14 && hour < 22) return 1.15    // Peak hours → wider
+  return 1.0                                   // 22-02 cool-down
+}
+
+/**
+ * kPEPE Time-Based Inventory Decay state
+ * Tracks how long skew has persisted in one direction to progressively
+ * tighten rebalancing pressure. Resets when skew flips or drops below threshold.
+ */
+const kpepeSkewState = {
+  skewStartTime: 0,   // timestamp when skew first exceeded 10%
+  lastSkewSign: 0,     // +1 long, -1 short, 0 neutral
+}
+
+/**
+ * Returns time decay multiplier for kPEPE inventory skew.
+ * The longer you hold a skewed position, the harder the bot pushes to rebalance.
+ *
+ * 0-5 min:  1.0  (base)
+ * 5-15 min: 1.10 (+10%)
+ * 15-30 min: 1.25 (+25%)
+ * 30-60 min: 1.50 (+50%)
+ * >60 min: 2.0  (strongly push to rebalance)
+ */
+function getKpepeTimeDecayMult(actualSkew: number): number {
+  const currentSign = actualSkew > 0.10 ? 1 : actualSkew < -0.10 ? -1 : 0
+
+  // Reset timer when skew flips direction or drops to neutral
+  if (currentSign !== kpepeSkewState.lastSkewSign) {
+    kpepeSkewState.skewStartTime = Date.now()
+    kpepeSkewState.lastSkewSign = currentSign
   }
+
+  if (currentSign === 0) return 1.0
+
+  const durationMin = (Date.now() - kpepeSkewState.skewStartTime) / 60000
+  if (durationMin > 60) return 2.0
+  if (durationMin > 30) return 1.50
+  if (durationMin > 15) return 1.25
+  if (durationMin > 5)  return 1.10
+  return 1.0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4174,7 +4245,8 @@ class HyperliquidMMBot {
           for (const pair of activePairs) {
             if (!this.leverageApplied.has(pair)) {
               const riskParams = getTokenRiskParams(pair)
-              const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+              const perTokenLev = Number(process.env[`${pair}_LEVERAGE`] || 0)
+              const targetLeverage = perTokenLev > 0 ? perTokenLev : (riskParams?.recommendedLeverage ?? fallbackLeverage)
               try {
                 await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
                 this.leverageApplied.add(pair)
@@ -4619,7 +4691,8 @@ class HyperliquidMMBot {
           }
           for (const pair of newPairs) {
             const riskParams = getTokenRiskParams(pair)
-            const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+            const perTokenLev = Number(process.env[`${pair}_LEVERAGE`] || 0)
+            const targetLeverage = perTokenLev > 0 ? perTokenLev : (riskParams?.recommendedLeverage ?? fallbackLeverage)
             try {
               await (this.trading as LiveTrading).setLeverage(pair, targetLeverage)
               this.leverageApplied.add(pair)
@@ -6096,7 +6169,7 @@ class HyperliquidMMBot {
     const isEmergencyOverrideMode = emergencyConfig?.followSmMode === 'FOLLOW_SM_SHORT' ||
                                      emergencyConfig?.followSmMode === 'FOLLOW_SM_LONG'
 
-    if (this.positionProtector && position && Math.abs(position.size) > 0) {
+    if (this.positionProtector && position && Math.abs(position.size) > 0 && !isForcedMmPair(pair)) {
       const posSide = position.size > 0 ? 'long' : 'short'
       const protectorDecision = this.positionProtector.updatePosition(
         pair,
@@ -6285,10 +6358,11 @@ class HyperliquidMMBot {
 
     // ═══════════════════════════════════════════════════════════════════════════
 
-    if (overridesConfig && overridesConfig.enabled && !isFollowSmToken(symbol)) {
+    if (overridesConfig && overridesConfig.enabled && !isFollowSmToken(symbol) && !isForcedMmPair(pair)) {
       // ============================================================
       // 🎲 CONTRARIAN SQUEEZE PLAY: AUTO-CLOSE TRIGGERS
       // ☢️ Disabled for FOLLOW_SM tokens - SM has final say
+      // ☢️ Disabled for PURE_MM tokens - positions managed by grid + PROFIT_FLOOR
       // ============================================================
       if (position && Math.abs(position.size) > 0) {
         const positionSide = position.size > 0 ? 'long' : 'short'
@@ -6449,7 +6523,7 @@ class HyperliquidMMBot {
     // Tightens as profit grows: BREATHE → PROTECT → TRAIL → LOCK
     // Priority: manual stopLossPrice (tuning) > Anaconda > PositionProtector (safety net)
     // ============================================================
-    if (position && Math.abs(position.size) > 0 && position.entryPrice) {
+    if (position && Math.abs(position.size) > 0 && position.entryPrice && !isForcedMmPair(pair)) {
       const visionRisk = getTokenRiskParams(pair)
       const hasManualSl = overridesConfig?.stopLossPrice && overridesConfig.stopLossPrice > 0
 
@@ -6514,6 +6588,13 @@ class HyperliquidMMBot {
       }
     }
 
+    // Per-token capital multiplier floor: STICKY pairs (focus tokens) get minimum 0.80
+    // to prevent squeeze analysis from over-throttling SM-following positions
+    const stickyPairs = (process.env.STICKY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
+    if (stickyPairs.includes(pair) && capitalMultiplier < 0.80) {
+      console.log(`💪 [CAPITAL FLOOR] ${pair}: cap×${capitalMultiplier.toFixed(2)} → cap×0.80 (sticky focus pair)`)
+      capitalMultiplier = 0.80
+    }
     capitalPerPair *= capitalMultiplier
     capitalPerPair = Math.max(50, capitalPerPair)
 
@@ -6603,7 +6684,9 @@ class HyperliquidMMBot {
     const MAX_UTILIZATION = Number(process.env.MAX_UTILIZATION_PCT || 0.80)
     if (this.positionRiskManager) {
       const utilEquity = this.positionRiskManager.getStatus().equity
-      const leverage = 2  // current leverage setting
+      // Use per-token leverage if set, otherwise fallback to global LEVERAGE or 2
+      const perTokenLevCap = Number(process.env[`${pair}_LEVERAGE`] || 0)
+      const leverage = perTokenLevCap > 0 ? perTokenLevCap : Number(process.env.LEVERAGE || 2)
       const maxTotalNotional = utilEquity * MAX_UTILIZATION * leverage
       const maxNotionalPerPair = maxTotalNotional / MAX_ACTIVE_PAIRS
       if (capitalPerPair > maxNotionalPerPair) {
@@ -6651,6 +6734,31 @@ class HyperliquidMMBot {
     } else if (isSignalEnginePureMmInv) {
       console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → inventory deviation adjustment bypassed`)
     }
+
+    // 🐸 kPEPE ENHANCED INVENTORY SKEW — aggressive rebalancing via size multipliers
+    // Scales 0→max over 10-40% inventory imbalance (much stronger than generic ±10bps)
+    // + Time-Based Inventory Decay: the longer skew persists, the harder it pushes
+    if (pair === 'kPEPE') {
+      const absSkew = Math.abs(actualSkew)
+      const timeDecayMult = getKpepeTimeDecayMult(actualSkew)
+      if (absSkew > 0.10) {
+        // Time decay amplifies skew factor: 15% skew held 30min feels like ~19%
+        const rawSkewFactor = absSkew / 0.40   // 0→1 over 10-40%, can exceed 1.0
+        const skewFactor = Math.min(rawSkewFactor * timeDecayMult, 1.5) // cap at 1.5 (bid→10%, ask→190%)
+        if (actualSkew > 0) { // LONG heavy → reduce bids, increase asks
+          sizeMultipliers.bid = sizeMultipliers.bid * (1.0 - skewFactor * 0.6)    // 100%→10% at max
+          sizeMultipliers.ask = sizeMultipliers.ask * (1.0 + skewFactor * 0.6)    // 100%→190% at max
+        } else {               // SHORT heavy → increase bids, reduce asks
+          sizeMultipliers.bid = sizeMultipliers.bid * (1.0 + skewFactor * 0.6)
+          sizeMultipliers.ask = sizeMultipliers.ask * (1.0 - skewFactor * 0.6)
+        }
+        if (this.tickCount % 20 === 0) {
+          const durationMin = kpepeSkewState.skewStartTime > 0 ? ((Date.now() - kpepeSkewState.skewStartTime) / 60000).toFixed(1) : '0.0'
+          console.log(`🐸 [kPEPE SKEW] inventory=${(actualSkew*100).toFixed(1)}% held=${durationMin}min decay×${timeDecayMult.toFixed(2)} → bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)}`)
+        }
+      }
+    }
+
     // Allow 0 for emergency overrides (SM winning scenario), otherwise clamp to 0.25 minimum
     const bidWasZero = sizeMultipliers.bid === 0
     const askWasZero = sizeMultipliers.ask === 0
@@ -6684,7 +6792,7 @@ class HyperliquidMMBot {
 
     // 👁️ MarketVision Skew Injection
     const visionSkew = this.marketVision.getSizeSkew(pair);
-    if (visionSkew !== 0) {
+    if (visionSkew !== 0 && !isSignalEnginePureMmInv) {
       const preVisionSkew = inventorySkew;
       inventorySkew += visionSkew;
       // Clamp again to keep within reasonable bounds, though we allow slightly > 1 for strong signals if needed
@@ -6701,6 +6809,8 @@ class HyperliquidMMBot {
           `(Skew: ${(visionSkew * 100).toFixed(1)}% | 4h=${visionAnalysis?.trend4h} | 15m=${visionAnalysis?.trend15m} | RSI15m=${visionAnalysis?.rsi15m?.toFixed(1)}${nansenInfo})`
         );
       }
+    } else if (visionSkew !== 0 && isSignalEnginePureMmInv) {
+      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → Vision skew bypassed (was ${(visionSkew * 100).toFixed(1)}%, kept at ${(inventorySkew * 100).toFixed(1)}%)`)
     }
 
     // 🛡️ Nansen Conflict Stop-Loss: Close positions against strong bias early
@@ -7066,7 +7176,7 @@ class HyperliquidMMBot {
 
     // 🎯 UNHOLY TRINITY INTELLIGENT SPREAD CONTROL
     // Dynamic Volatility Trigger - expands spread during pumps to avoid getting rekt
-    const unholyTrinity = ['FARTCOIN', 'HYPE', 'LIT'];
+    const unholyTrinity = ['FARTCOIN', 'HYPE', 'LIT']; // kPEPE removed — gets own vol handling via custom 4-layer grid
     if (unholyTrinity.includes(pair)) {
       // 1. Check recent volatility from Oracle price history
       let isVolatile = false;
@@ -7304,12 +7414,13 @@ class HyperliquidMMBot {
     // 🔍 DEBUG: Track FINAL capitalPerPair right before grid generation
     console.log(`[DEBUG GRID] ${pair}: capitalPerPair=$${capitalPerPair.toFixed(0)} midPrice=$${midPrice.toFixed(4)}`)
 
-    // 🎯 FARTCOIN GRID EXPANSION (expand grid to allow orders to fit)
+    // 🎯 LOW-LIQ GRID EXPANSION (expand grid to allow orders to fit)
     // Problem: rebucket logic was zeroing out layers due to tight spread
     // Fix: widen the grid by increasing gridAskMult to 5.0x
+    // Note: kPEPE removed — gets own 4-layer custom grid with built-in spread structure
     if (pair === 'FARTCOIN') {
       gridAskMult = Math.max(gridAskMult, 5.0);
-      console.log(`[FARTCOIN GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
+      console.log(`[${pair} GRID] Expanded: gridAskMult=${gridAskMult.toFixed(2)} (forced 5.0x min)`);
     }
 
     // 🎯 SHORT-ON-BOUNCE v2: Czekaj na SZCZYT bounce, potem shortuj
@@ -7435,17 +7546,81 @@ class HyperliquidMMBot {
       }
     }
 
-    let gridOrders = this.gridManager!.generateGridOrders(
-      pair,
-      midPrice,
-      capitalPerPair,
-      0.001,
-      inventorySkew,
-      permissions,
-      actualSkew,
-      { bid: gridBidMult, ask: gridAskMult },
-      sizeMultipliers
-    )
+    // 🐸 kPEPE: Custom 4-layer grid with time-of-day spread adjustment
+    let gridOrders: GridOrder[]
+    if (pair === 'kPEPE') {
+      const timeMult = getKpepeTimeMultiplier()
+      gridOrders = this.gridManager!.generateGridOrdersCustom(
+        pair,
+        midPrice,
+        capitalPerPair,
+        KPEPE_GRID_LAYERS,
+        0.001,
+        inventorySkew,
+        permissions,
+        actualSkew,
+        { bid: gridBidMult * timeMult, ask: gridAskMult * timeMult },
+        sizeMultipliers
+      )
+      // 🐸 LAYER REMOVAL: At critical skew (>40%), strip L1-L2 from the heavy side
+      // This is the aggressive rebalancing step — size skew alone isn't enough
+      if (Math.abs(actualSkew) > 0.40) {
+        const before = gridOrders.length
+        if (actualSkew > 0) {
+          // LONG heavy → remove L1-L2 bids (stop buying)
+          gridOrders = gridOrders.filter(o => !(o.side === 'bid' && o.layer <= 2))
+        } else {
+          // SHORT heavy → remove L1-L2 asks (stop selling)
+          gridOrders = gridOrders.filter(o => !(o.side === 'ask' && o.layer <= 2))
+        }
+        const removed = before - gridOrders.length
+        if (removed > 0) {
+          console.log(`🐸 [kPEPE LAYER_REMOVAL] skew=${(actualSkew*100).toFixed(1)}% → removed ${removed} L1-L2 ${actualSkew > 0 ? 'bids' : 'asks'}`)
+        }
+      }
+
+      if (this.tickCount % 20 === 0) {
+        const bids = gridOrders.filter(o => o.side === 'bid').length
+        const asks = gridOrders.filter(o => o.side === 'ask').length
+        console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} timeMult=${timeMult.toFixed(2)} bidMult=${(gridBidMult * timeMult).toFixed(2)} askMult=${(gridAskMult * timeMult).toFixed(2)}`)
+      }
+    } else {
+      gridOrders = this.gridManager!.generateGridOrders(
+        pair,
+        midPrice,
+        capitalPerPair,
+        0.001,
+        inventorySkew,
+        permissions,
+        actualSkew,
+        { bid: gridBidMult, ask: gridAskMult },
+        sizeMultipliers
+      )
+    }
+
+    // 🛡️ PURE_MM PROFIT FLOOR: Don't close positions at a loss
+    // SHORT → don't buy above entry price; LONG → don't sell below entry price
+    // kPEPE excluded — need full grid on both sides for fill volume
+    if (pair !== 'kPEPE' && (isSignalEnginePureMmInv || isForcedMmPair(pair)) && position && Math.abs(position.size) > 0 && position.entryPrice && Array.isArray(gridOrders)) {
+      const entryPx = position.entryPrice
+      if (position.size < 0) {
+        // SHORT position: filter out bids priced above entry (would close at a loss)
+        const before = gridOrders.length
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid' || o.price <= entryPx)
+        const removed = before - gridOrders.length
+        if (removed > 0) {
+          console.log(`🛡️ [PROFIT_FLOOR] ${pair}: SHORT entry $${entryPx.toFixed(6)} → removed ${removed} bids above entry (mid: $${midPrice.toFixed(6)})`)
+        }
+      } else if (position.size > 0) {
+        // LONG position: filter out asks priced below entry (would close at a loss)
+        const before = gridOrders.length
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask' || o.price >= entryPx)
+        const removed = before - gridOrders.length
+        if (removed > 0) {
+          console.log(`🛡️ [PROFIT_FLOOR] ${pair}: LONG entry $${entryPx.toFixed(6)} → removed ${removed} asks below entry (mid: $${midPrice.toFixed(6)})`)
+        }
+      }
+    }
 
     // 🛑 Apply ZEC trend-stop: in strong uptrend with short inventory, do not place new asks
     if (pair === 'ZEC' && zecTrendStopShort && Array.isArray(gridOrders)) {
@@ -7614,14 +7789,15 @@ class HyperliquidMMBot {
       sizeDecimals
     )
 
-    // Re-bucket children so each child is ≥ GLOBAL_CLIP and ≥ MIN_NOTIONAL
-    // while keeping the total USD roughly the same.
-    // NOTE: We use GLOBAL_CLIP here (not clipUsd) because clipUsd is the post-rounding
-    // target used for verification. The rebucketing just needs to meet the min notional floor.
+    // Re-bucket children so each child meets min notional floor.
+    // Use per-token INSTITUTIONAL_SIZE_CONFIG target if available (for LIT/FARTCOIN $200 targets)
+    const pairSizeCfg = INSTITUTIONAL_SIZE_CONFIG[pair]
+    const rebucketTarget = pairSizeCfg ? Math.max(GLOBAL_CLIP, pairSizeCfg.targetUsd) : GLOBAL_CLIP
+    const rebucketMin = pairSizeCfg ? Math.max(MIN_NOTIONAL, pairSizeCfg.minUsd) : MIN_NOTIONAL
     const totalBefore = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
     gridOrders = normalizeChildNotionals(
       gridOrders,
-      { targetUsd: GLOBAL_CLIP, minUsd: MIN_NOTIONAL }
+      { targetUsd: rebucketTarget, minUsd: rebucketMin }
     )
     let totalAfter = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
 

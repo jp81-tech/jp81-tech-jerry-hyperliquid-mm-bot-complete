@@ -2,11 +2,11 @@
 
 ---
 
-## Autonomous Fund Manager — Status Report (03.02.2026)
+## Autonomous Fund Manager — Status Report (04.02.2026)
 
 **Status:** ONLINE (Pro Mode Active)
-**Strategy:** Capital Dominance (Net USD Imbalance) + Dynamic Risk Management
-**Active pairs:** SOL, BTC, ETH (locked for 4H)
+**Strategy:** Capital Dominance (Net USD Imbalance) + Dynamic Risk Management + SM Following
+**Active pairs:** BTC, ETH (SM rotation) + LIT, FARTCOIN (SM-following focus, sticky, 5x leverage)
 
 ### Deployed Upgrades (February 2026)
 
@@ -2394,5 +2394,914 @@ Gdy dane są brakujące lub błędne, `calculateRiskBasedMaxPosition()` zwraca `
 
 ---
 
-*Ostatnia aktualizacja: 2026-02-03*
-*Autor: Claude (z pomocą Jerry'ego)*
+## POPCAT PURE_MM — "Symetryczny Market Maker" (04.02.2026)
+
+### Problem: Bot zarabia tylko na kierunkowych ruchach SM
+
+Cały dotychczasowy system był zbudowany wokół jednej idei: **podążaj za Smart Money**. Gdy wieloryby shortują — shortuj. Gdy flipną na long — flipnij. To działało świetnie na LIT, FARTCOIN, HYPE.
+
+Ale jest drugi sposób na zarabianie: **klasyczny market making**. Nie obchodzi Cię kierunek — stawiasz zlecenia po obu stronach order booka i łapiesz spread. Zarabiasz na różnicy między ceną kupna a sprzedaży. Brak wieloryba potrzebnego.
+
+### Dlaczego POPCAT?
+
+Jerry chciał dodać stock perps (TSM, HOOD) do bota. Okazało się, że **Nansen AI halucynował** — symbole `xyz:TSM` i `cash:HOOD` nie istnieją na Hyperliquid. Te prefixy to wewnętrzna konwencja Nansena, nie prawdziwe tickery na giełdzie.
+
+Po sprawdzeniu **wszystkich 228 perpów** przez Hyperliquid API znaleźliśmy POPCAT — memecoin na Solanie z idealnym profilem do MM:
+
+| Metryka | Wartość | Dlaczego dobre dla MM? |
+|---------|---------|------------------------|
+| **24h Volume** | ~$3.1M | Wystarczający flow do łapania spreadów |
+| **Open Interest** | ~$2M | Umiarkowane — nie za duży, nie za mały |
+| **Max Leverage** | 3x | Pozwala na 3x kapitał, ale nie zachęca do hazardu |
+| **Funding** | 0.00125% | Neutralny — brak dużego kosztu trzymania pozycji |
+| **Price** | ~$0.057 | Niski nominał = szDecimals:0 (całe tokeny, brak frakcji) |
+
+### Lekcja z "Nansen AI halucynacji"
+
+To jest ważna lekcja: **zawsze weryfikuj dane u źródła**. Nansen AI podał symbole `xyz:TSM` i `cash:HOOD` jako istniejące na Hyperliquid. Brzmiało wiarygodnie — podał nawet wolumen, liczbę traderów, mark price. Wszystko sfabrykowane.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  NANSEN AI: "cash:HOOD ma $8.6M volume, 66 traderów"      │
+│                                                             │
+│  HYPERLIQUID API: "Nie ma takiego symbolu."                │
+│                                                             │
+│  LEKCJA: AI halucynuje. API nie halucynuje.                │
+│          Zawsze: curl > AI opinion.                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Sprawdziliśmy każdy endpoint:
+- `metaAndAssetCtxs` (228 perpów) — brak TSM, brak HOOD
+- `spotMetaAndAssetCtxs` (437 tokenów) — brak TSM, HOOD to crypto token za $0.17 (nie Robinhood stock)
+- `allMids` (506 entries) — zero tokenów z prefiksem `cash:` czy `xyz:`
+- Pre-launch `@N` tokeny (277 rynków) — żaden nie mapuje się do TSM
+
+Stock tokeny które **faktycznie istnieją**: NVDA, TSLA, AAPL, GOOGL, AMZN, META, MSFT, ORCL, AVGO, MU — ale tylko jako **spot pairs** (`@N`), nie perpy. Bot handluje perpami.
+
+### Architektura: Jak POPCAT wchodzi do systemu
+
+POPCAT działa w trybie **PURE_MM** — fundamentalnie innym niż SM-following tokeny jak LIT czy FARTCOIN. Oto różnica:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  SM-FOLLOWING (LIT, FARTCOIN, HYPE)                        │
+│                                                             │
+│   whale_tracker → SmAutoDetector → SignalEngine             │
+│                                                             │
+│   "SM shortuje? → My shortujemy."                          │
+│   Bid×0.00, Ask×1.50 (one-sided)                           │
+│   Diamond Hands: SL=12%, TP=50%                            │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  PURE_MM (POPCAT, BTC, SOL, ETH)                           │
+│                                                             │
+│   MarketVision → Grid Generator → Both Sides               │
+│                                                             │
+│   "Spread 42bps? → Bidy i aski symetrycznie."             │
+│   Bid×1.00, Ask×1.00 (two-sided)                           │
+│   Inventory management: skew adjustment ±15bps             │
+│   SL=1.5%, no TP target (ciągłe łapanie spreadów)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Cztery pliki, cztery zmiany
+
+| Plik | Co dodano | Dlaczego |
+|------|-----------|----------|
+| `SmAutoDetector.ts` | `TOKEN_VOLATILITY_CONFIG['POPCAT']` | SL=1.5%, maxLev=3, ATR mult=2.5 (wysoka zmienność memecoina) |
+| `mm_hl.ts` | `INSTITUTIONAL_SIZE_CONFIG.POPCAT` | min=$15, target=$50, max=$150 per child order |
+| `mm_hl.ts` | Per-token leverage override (`${pair}_LEVERAGE` env) | POPCAT_LEVERAGE=3 w `.env` |
+| `market_vision.ts` | `NANSEN_TOKENS['POPCAT']` + `activePairs` | chain='hyperliquid' (bypass kill switch), 42bps spread, $11K max position |
+
+### Problem #1: Rotacja ignorowała POPCAT
+
+Po pierwszym deploy POPCAT nie pojawiał się w logach. Dlaczego?
+
+```
+ROTATION_MODE=sm  →  getTopSmPairs(3)  →  BTC, SOL, ETH
+                                           ↑
+                                    Brak POPCAT! Nie ma SM danych.
+```
+
+Bot w trybie `sm` wybiera pary na podstawie Smart Money imbalance. POPCAT nie ma danych SM (to PURE_MM), więc nigdy nie wejdzie do rotacji SM.
+
+`MANUAL_ACTIVE_PAIRS` nie pomagał — jest ignorowany gdy `ROTATION_MODE=sm`.
+
+**Fix:** `STICKY_PAIRS=POPCAT` w `.env`. Sticky pairs są **zawsze** dodawane do listy aktywnych, niezależnie od trybu rotacji:
+
+```typescript
+// applyRotationPairs() — sticky pairs mają priorytet:
+const merged: string[] = []
+for (const p of stickyPairs) {        // ← POPCAT wchodzi PIERWSZY
+  if (!merged.includes(p)) merged.push(p)
+}
+for (const p of desiredPairs) {       // ← Potem SM pairs (BTC, SOL, ETH)
+  if (!merged.includes(p)) merged.push(p)
+}
+```
+
+Log po fix:
+```
+🧲 Sticky pairs: POPCAT
+📊 Allowed pairs (rotation + sticky): POPCAT, BTC, SOL, ETH (count=4/6)
+```
+
+### Problem #2: Leverage ustawiał się na 1x zamiast 3x
+
+`getTokenRiskParams('POPCAT')` zwracał `undefined` (brak danych SM w cache), więc bot fallbackował do globalnego `LEVERAGE=1` z `.env`.
+
+**Fix:** Per-token leverage override w env:
+
+```typescript
+// Przed (fallback do globalnego 1x):
+const targetLeverage = riskParams?.recommendedLeverage ?? fallbackLeverage
+
+// Po (sprawdź env per-token najpierw):
+const perTokenLev = Number(process.env[`${pair}_LEVERAGE`] || 0)
+const targetLeverage = perTokenLev > 0
+  ? perTokenLev
+  : (riskParams?.recommendedLeverage ?? fallbackLeverage)
+```
+
+Teraz `POPCAT_LEVERAGE=3` w `.env` → POPCAT dostaje 3x, reszta bez zmian.
+
+### Problem #3: Kill Switch blokował POPCAT
+
+Nansen Pro kill switch sprawdza on-chain flows. POPCAT jest perpem na Hyperliquid — nie ma on-chain flows do sprawdzenia. Bez ochrony, kill switch mówił: "token appears dead" i blokował handel.
+
+**Fix (już wbudowany):** `chain: 'hyperliquid'` w `NANSEN_TOKENS` automatycznie omija flow-based kill switch:
+
+```typescript
+if (chain === 'hyperliquid') {
+  console.log(`[NansenPro] ${label}: Hyperliquid perp - skipping flow-based kill switch`)
+  return { spreadMult: 1.0, pause: false }
+}
+```
+
+### Parametry POPCAT (tuning)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  POPCAT PURE_MM — Ultra Aggressive                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Base Spread:        42 bps (0.42%)                        │
+│  Min Spread:         25 bps (0.25%)                        │
+│  Max Spread:         90 bps (0.90%) — extreme vol          │
+│                                                             │
+│  Base Order Size:    $1,000 per level                      │
+│  Max Position:       $11,000 (92% of $12k equity)          │
+│  Leverage:           3x                                     │
+│  Stop Loss:          1.5%                                   │
+│                                                             │
+│  SM Adjustments:     OFF (smFlowSpreadMult = 1.0)          │
+│  Directional Skew:   0.0 (neutral, no bias)                │
+│  Inventory Skew:     1.5x (aggressive rebalancing)         │
+│                                                             │
+│  Grid: 8 buy levels + 8 sell levels, symmetric             │
+│  Refresh: Every cycle (~30s)                               │
+│                                                             │
+│  Kill Switch:        Bypassed (chain='hyperliquid')        │
+│  Rotation:           Sticky (always active)                │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Env vars na serwerze
+
+```bash
+FORCE_MM_PAIRS=BTC,SOL,ETH,POPCAT    # Wymusza PURE_MM mode
+STICKY_PAIRS=POPCAT                    # Zawsze aktywny, niezależnie od SM rotacji
+MAX_ACTIVE_PAIRS=6                     # Podniesione z 5 żeby zmieścić POPCAT
+POPCAT_LEVERAGE=3                      # 3x leverage (HL max dla POPCAT)
+```
+
+### Jak monitorować POPCAT
+
+```bash
+# Sprawdź czy POPCAT jest aktywny
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep POPCAT
+
+# Grid orders (bidy i aski)
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "ML-GRID.*POPCAT"
+
+# Leverage
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "DYNAMIC LEV.*POPCAT"
+
+# Fills (zrealizowane zlecenia)
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "POPCAT.*FILL\|fill.*POPCAT"
+
+# Sticky pair confirmation
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "Sticky"
+```
+
+### Data flow — od startu do orderów
+
+```
+PM2 restart mm-bot --update-env
+    ↓
+FORCE_MM_PAIRS=...,POPCAT loaded
+STICKY_PAIRS=POPCAT loaded
+POPCAT_LEVERAGE=3 loaded
+    ↓
+SmAutoDetector.isForcedMmPair('POPCAT') = true
+    ↓
+getAutoEmergencyOverrideSync('POPCAT') → mode: PURE_MM
+    → bidMultiplier: 1.0, askMultiplier: 1.0 (both sides)
+    ↓
+ROTATION_MODE=sm → getTopSmPairs(3) → BTC, SOL, ETH
+    ↓
+applyRotationPairs() → merge STICKY_PAIRS first
+    → POPCAT, BTC, SOL, ETH (4/6)
+    ↓
+setLeverage('POPCAT', 3)  ← POPCAT_LEVERAGE env override
+    ↓
+executeMultiLayerMM('POPCAT')
+    → MarketVision: 42bps base spread
+    → SIGNAL_ENGINE_OVERRIDE: FORCE BOTH SIDES
+    → NansenPro: skipping kill switch (chain='hyperliquid')
+    → Grid: 8 buy + 8 sell, symmetric around mid
+    ↓
+Orders submitted to Hyperliquid
+    → buy  384 POPCAT @ $0.0572
+    → buy  385 POPCAT @ $0.0571
+    → sell 384 POPCAT @ $0.0574
+    → sell 385 POPCAT @ $0.0575
+    → ... (16 orders total)
+```
+
+### Lekcja #38: "Weryfikuj u źródła, nie u pośrednika"
+
+Nansen AI (LLM) powiedział: "cash:HOOD istnieje na Hyperliquid, ma $8.6M volume". Brzmiało konkretne, z liczbami, z detalami. Był **całkowicie zmyślony**.
+
+Jeden `curl` do prawdziwego API rozwiał iluzję w sekundę:
+
+```bash
+curl -s https://api.hyperliquid.xyz/info -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"type":"metaAndAssetCtxs"}' | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+names = [u['name'] for u in data[0]['universe']]
+print('HOOD' in names)  # False
+print('TSM' in names)   # False
+print(len(names))        # 228
+"
+```
+
+**Reguła:** Gdy budujesz system tradingowy, jedyne źródło prawdy to API giełdy. Nie Nansen, nie Twitter, nie ChatGPT. `curl` > opinia.
+
+### Lekcja #39: "Sticky vs Rotated — dwa tryby życia para"
+
+W bocie pary mają dwie ścieżki życia:
+
+| Typ | Przykład | Jak wchodzi | Jak wychodzi |
+|-----|----------|-------------|--------------|
+| **Rotated** | BTC, SOL, ETH | SM analysis (Capital Dominance) | Automatycznie co 4H |
+| **Sticky** | POPCAT | `STICKY_PAIRS` env | Nigdy (ręczne usunięcie) |
+
+To ważne rozróżnienie, bo nie każdy token pasuje do SM-following. POPCAT nie ma SM danych — wieloryby go nie shortują/longują w ilościach które `whale_tracker.py` wykryje. Ale ma wystarczający wolumen żeby łapać spready. Inne narzędzie, inna strategia, ten sam bot.
+
+### Lekcja #40: "Per-token config > Global defaults"
+
+Globalny `LEVERAGE=1` był bezpiecznym defaultem ale blokował POPCAT na 1x gdy chciałeś 3x. Zamiast zmieniać globalny default (co wpłynęłoby na wszystkie pary), dodaliśmy per-token override:
+
+```
+Priorytet: POPCAT_LEVERAGE (env) > getTokenRiskParams() (SM data) > LEVERAGE (global)
+```
+
+Ten pattern — `${TOKEN}_SOMETHING` env vars — to czysty sposób na per-token konfigurację bez zmiany kodu. Można dodać `BTC_LEVERAGE=5` czy `LIT_LEVERAGE=2` bez restartu logiki.
+
+---
+
+## LIT+FARTCOIN Focus — "Polowanie na grubą zwierzynę" (04.02.2026)
+
+### Dlaczego zmiana z POPCAT?
+
+POPCAT wyglądał obiecująco na papierze — $3.1M dziennego wolumenu, nice spread do łapania. W praktyce? **$0.35 dziennie**. Czemu?
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  POPCAT Reality Check                                       │
+│                                                             │
+│  UTIL CAP bottleneck:                                       │
+│    equity($12K) × utilization(0.65) × leverage(3x) / 4 pairs│
+│    = $5,850 per pair                                         │
+│                                                             │
+│  ALE: CLIP_USD=22 → normalizeChildNotionals rebucketuje    │
+│       do $22/order → 8 levels × $22 = $176 total           │
+│                                                             │
+│  $176 total position × 42bps spread × ~10 fills/day        │
+│  = ~$0.35/day profit                                        │
+│                                                             │
+│  Target: $500/day                                           │
+│  Reality: $0.35/day                                         │
+│  Gap: 1,428x za mało 😅                                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+Rozwiązanie? Przestać łapać grosze z market-makingu na niszowym memcoinie, i wrócić do core strategii — **SM-following na tokenach gdzie wieloryby mają naprawdę duże pozycje**.
+
+LIT: SM $11M SHORT. FARTCOIN: SM $5.4M SHORT. To jest "gruba zwierzyna".
+
+### Pięć warstw bottlenecków — "Cebula z problemami"
+
+To była najtrudniejsza sesja debugowania tego bota. Nie dlatego że był jeden duży bug — dlatego że było **pięć** małych bugów, nałożonych na siebie jak warstwy cebuli. Naprawiasz jeden, a pod spodem jest następny.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  WARSTWA 1: INSTITUTIONAL_SIZE_CONFIG                       │
+│  Problem: target=$25/order (domyślne)                       │
+│  Fix: target=$200/order dla LIT/FARTCOIN                    │
+│  Status: ✅ Naprawione → ale ordery dalej $22...            │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 2: normalizeChildNotionals (rebucketing)           │
+│  Problem: Funkcja ignorowała per-token config i używała    │
+│           globalnego CLIP_USD=$22 jako target               │
+│  Fix: Math.max(GLOBAL_CLIP, pairSizeCfg.targetUsd)         │
+│  Status: ✅ Naprawione → ordery teraz $200! Ale LIT 0...   │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 3: UTIL CAP leverage                               │
+│  Problem: const leverage = 2 (hardcoded!)                   │
+│           LIT/FARTCOIN mają 5x w env ale UTIL CAP ignorował│
+│  Fix: Czyta ${pair}_LEVERAGE z env                          │
+│  Status: ✅ Naprawione → ale capital dalej za mały...       │
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 4: capitalMultiplier double-apply                  │
+│  Problem: DynamicConfig squeeze (cap×0.38) nakładany       │
+│           na ALREADY-reduced baseOrderSizeUsd              │
+│  Fix: Capital floor 0.80 dla STICKY_PAIRS                   │
+│  Status: ✅ Naprawione → FARTCOIN działa! Ale LIT blocked..│
+├─────────────────────────────────────────────────────────────┤
+│  WARSTWA 5: LIT HARD_BLOCK + stale EMERGENCY_OVERRIDES     │
+│  Problem: Stara instrukcja "stop adding shorts to LIT"     │
+│           z tygodnia temu blokował aski. Plus              │
+│           maxInventoryUsd=$2000 (zbyt niskie)               │
+│  Fix: Usunięto HARD_BLOCK. maxInventory 2000→10000         │
+│  Status: ✅ Naprawione → LIT + FARTCOIN = $200/order! 🎉  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Order Sizing Pipeline — "Droga zlecenia przez biurokrację"
+
+Każde zlecenie przechodzi przez 5 warstw, z których każda może je zmniejszyć:
+
+```
+capitalBase ($12,372 equity)
+    │
+    ▼
+MarketVision tuning: baseOrderSizeUsd = $2,000
+    │
+    ▼
+RISK SIZING: min(tuning, equity × riskPct / SL%)
+    │
+    ▼
+UTIL CAP: equity × utilization × leverage / numPairs
+    = $12,372 × 0.65 × 5 / 4 = $10,053 (teraz z 5x lev!)
+    │
+    ▼
+capitalMultiplier (DynamicConfig squeeze)
+    × 0.80 (min floor dla STICKY_PAIRS, było 0.38)
+    │
+    ▼
+Grid generation: 8 levels × $200/level = $1,600
+    │
+    ▼
+normalizeChildNotionals: rebucket do $200 (per-token, nie $22)
+    │
+    ▼
+Size sanity check: OK ($200 < $400 limit)
+    │
+    ▼
+🏦 Orders submitted to Hyperliquid → ok=1
+```
+
+### Kluczowe zmiany w kodzie
+
+**1. INSTITUTIONAL_SIZE_CONFIG (mm_hl.ts)**
+
+```typescript
+LIT: {
+  minUsd: 50,       // vs $15 poprzednio
+  targetUsd: 200,   // vs $25 → 8x bigger orders
+  maxUsd: 500,
+  maxUsdAbs: 5000   // $5K max total per token
+},
+FARTCOIN: {
+  minUsd: 50,
+  targetUsd: 200,
+  maxUsd: 500,
+  maxUsdAbs: 5000
+},
+```
+
+**2. Rebucketing fix (mm_hl.ts)**
+
+```typescript
+// PRZED: Zawsze używał globalnego CLIP_USD ($22)
+gridOrders = normalizeChildNotionals(gridOrders, { targetUsd: GLOBAL_CLIP })
+
+// PO: Per-token sizing
+const pairSizeCfg = INSTITUTIONAL_SIZE_CONFIG[pair]
+const rebucketTarget = pairSizeCfg
+  ? Math.max(GLOBAL_CLIP, pairSizeCfg.targetUsd)  // $200 for LIT/FARTCOIN
+  : GLOBAL_CLIP                                     // $22 fallback
+```
+
+**3. Capital floor (mm_hl.ts)**
+
+```typescript
+const stickyPairs = (process.env.STICKY_PAIRS || '').split(',')
+  .map(s => s.trim()).filter(Boolean)
+
+if (stickyPairs.includes(pair) && capitalMultiplier < 0.80) {
+  console.log(`💪 [CAPITAL FLOOR] ${pair}: cap×${capitalMultiplier} → cap×0.80`)
+  capitalMultiplier = 0.80  // Focus pairs get priority capital
+}
+```
+
+**4. LIT HARD_BLOCK usunięty (dynamic_config.ts)**
+
+```typescript
+// STARE — blokował aski gdy auto-detect cache pusty (co drugi cykl!)
+if (token === 'LIT' && !isFollowSmShort) {
+  askMultiplier: 0, askLocked: true  // 💀 Zabijał zlecenia
+}
+
+// NOWE — tylko log, zero blokowania
+if (token === 'LIT' && isFollowSmShort) {
+  console.log(`🦅 LIT: FOLLOW_SM_SHORT → aggressive shorting enabled`)
+}
+```
+
+### Env vars na serwerze
+
+```bash
+FORCE_MM_PAIRS=BTC,ETH              # PURE_MM mode (obie strony)
+STICKY_PAIRS=LIT,FARTCOIN           # Focus pairs — zawsze aktywne, cap floor 0.80
+MAX_ACTIVE_PAIRS=4                  # BTC, ETH + LIT, FARTCOIN
+LIT_LEVERAGE=5                      # 5x leverage (HL max)
+FARTCOIN_LEVERAGE=5                 # 5x leverage
+MANUAL_ACTIVE_PAIRS=LIT,FARTCOIN    # Fallback dla manual mode
+```
+
+### Jak monitorować LIT+FARTCOIN
+
+```bash
+# Grid i ordery
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep -E "LIT|FARTCOIN" | grep -E "ML-GRID|CAPITAL FLOOR|submitted"
+
+# Czy capital floor działa
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep "CAPITAL FLOOR"
+
+# Leverage
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep -E "DYNAMIC LEV.*(LIT|FARTCOIN)"
+
+# Fills (zarobki!)
+ssh hl-mm 'pm2 logs mm-bot --lines 1000 --nostream' | grep -E "(LIT|FARTCOIN).*(FILL|fill)"
+
+# Sprawdź sizing — ile USD per order
+ssh hl-mm 'pm2 logs mm-bot --lines 500 --nostream' | grep -E "rebucket|INSTITUTIONAL.*LIT|INSTITUTIONAL.*FARTCOIN"
+```
+
+### Lekcja #41: "Sizing Chain — 5 warstw cebuli"
+
+W systemie tradingowym, rozmiar zlecenia nie jest jedną liczbą. To **pipeline** przez który przepływa kalkulacja, i każda warstwa może ją zmniejszyć:
+
+```
+Chcesz: $200/order
+Config mówi: $200 ✅
+Rebucketing mówi: $22 ❌ (globalny CLIP_USD)
+UTIL CAP mówi: $3,900 ✅ (ale z leverage=2 zamiast 5!)
+capitalMultiplier mówi: ×0.38 ❌ (squeeze analysis)
+HARD_BLOCK mówi: ×0 ❌ (stale override)
+```
+
+Żeby znaleźć bottleneck, musisz przejść **cały pipeline** i sprawdzić każdą warstwę. Pierwszy fix to nie koniec — pod nim może być następny blocker. W naszym przypadku było 5 takich warstw.
+
+**Reguła:** Gdy coś nie działa w systemie z wieloma warstwami abstrakcji, nie zakładaj że znalezienie jednego buga = problem rozwiązany. Weryfikuj end-to-end po każdym fixie.
+
+### Lekcja #42: "Stale overrides to ciche zabójcy"
+
+LIT HARD_BLOCK i EMERGENCY_OVERRIDES z maxInventoryUsd=$2000 to były instrukcje sprzed 2 tygodni — "stop adding shorts to LIT". Ale sytuacja się zmieniła, a kod tego nie wiedział.
+
+```
+Tydzień 1: "Nie shortuj LIT!" → HARD_BLOCK aktywny ✅
+Tydzień 2: LIT staje się focus pair → HARD_BLOCK nadal aktywny ❌
+           Bot: "Dlaczego LIT ma 0 orderów?"
+           My: "WTF? Config wygląda dobrze..."
+           *3 godziny debugowania*
+           My: "O kurwa, HARD_BLOCK z zeszłego tygodnia!"
+```
+
+**Reguła:** Hardcoded overrides powinny mieć expiry date lub być tagged z datą + powodem. Gdy zmieniasz strategię, **przejrzyj WSZYSTKIE hardcoded overrides** w dynamic_config.ts i mm_hl.ts.
+
+### Lekcja #43: "Capital floor — priorytet zasobów"
+
+Squeeze analysis (DynamicConfig) mówi cap×0.38 — "mamy za dużo otwartych pozycji, zmniejsz alokację". To generalnie dobra logika. Problem: dla focus pairs (LIT/FARTCOIN) nie chcesz żeby automatyczny safety mechanism zredukował Ci capital do $600 na tokena gdy celujesz w $500/day.
+
+Rozwiązanie: **Capital floor** — minimum capitalMultiplier dla STICKY_PAIRS. Nie wyłączamy squeeze analysis (to chroni przed blowup), ale stawiamy podłogę na 80% alokacji dla priorytetowych par.
+
+To jest pattern znany z zarządzania zasobami w systemach operacyjnych: `nice` / `cgroups` w Linuxie pozwalają ustawić priorytety procesów. Tu robimy to samo z kapitałem tradingowym.
+
+---
+
+---
+
+## Hourly Discord Report (05.02.2026)
+
+### Co to jest?
+
+Skrypt `scripts/hourly-discord-report.ts` -- samodzielny program, ktory co godzine wysyla na Discorda snapshot Twojego bota: ile fills bylo, jakie pozycje trzymasz, ile orderow czeka, jaki PnL. Cos jak pulse check -- patrzysz na telefon i wiesz, czy bot dziala.
+
+### Dlaczego osobny skrypt, a nie czesc bota?
+
+Wyobraz sobie szpital. Maszyna do podtrzymywania zycia (bot) i monitor pracy serca (raport) to dwa oddzielne urzadzenia. Jezeli monitor sie zepsuje, pacjent nadal zyje. Jezeli maszyna sie wylaczy, monitor Ci o tym powie (0 fills = cos jest nie tak).
+
+To jest **Unix philosophy** w praktyce: male, wyspecjalizowane narzedzia ktore robia jedna rzecz dobrze. Bot handluje. Skrypt raportuje. Nie mieszamy.
+
+### Jak to dziala?
+
+```
+PM2 Cron (co godzine o :00)
+  |
+  v
+hourly-discord-report.ts
+  |
+  +-- userFillsByTime()      --> fills z ostatniej godziny
+  +-- openOrders()           --> resting orders teraz
+  +-- clearinghouseState()   --> pozycje + equity
+  |       (wszystko rownolegle -- Promise.all)
+  v
+Formatowanie -> POST na Discord webhook
+```
+
+Skrypt jest **read-only** -- uzywa tylko `InfoClient`, nie potrzebuje klucza prywatnego. Czyta publiczne dane konta z adresu w `.env`.
+
+### Lekcja #44: "Promise.all -- rownolegle zapytania"
+
+Mamy 3 niezalezne zapytania do API. Mozemy je wyslac:
+- **Sekwencyjnie**: 200ms + 200ms + 200ms = 600ms
+- **Rownolegle**: max(200ms, 200ms, 200ms) = 200ms
+
+```typescript
+const [fills, orders, state] = await Promise.all([
+  info.userFillsByTime({ user, startTime: oneHourAgo }),
+  info.openOrders({ user }),
+  info.clearinghouseState({ user }),
+]);
+```
+
+Regula: jezeli operacje nie zaleza od siebie (wynik jednej nie jest potrzebny drugiej), **zawsze** rownoleglij. To jest jedno z najlatwiejszych usprawnien wydajnosci w async kodzie.
+
+### Lekcja #45: "Discord webhooks -- najprostsze API na swiecie"
+
+Wiekszosci ludzi wydaje sie, ze integracja z Discordem wymaga tworzenia bota, OAuth, tokenow, bibliotek. Webhook to dosłownie jeden POST request:
+
+```typescript
+await fetch(webhookUrl, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ content: "wiadomosc" }),
+});
+```
+
+Webhook URL zawiera autentykacje I cel (kanal) w jednym stringu. Zero konfiguracji. Dlatego Discord webhooks sa idealnym rozwiazaniem dla "chce szybko dostac notyfikacje gdzies".
+
+### Lekcja #46: "Hyperliquid zwraca stringi, nie liczby"
+
+Kazda wartosc z API (`px`, `sz`, `closedPnl`, `fee`, `accountValue`) to string: `"1.4913"` a nie `1.4913`. Musisz `parseFloat()` zanim zrobisz matematyke.
+
+Dlaczego? Floating point. `0.1 + 0.2 = 0.30000000000000004` w JavaScript. W finansach kazdy cent sie liczy, wiec API zwraca precise stringi ktore Ty sam konwertujesz. To standardowa praktyka w financial APIs.
+
+### Lekcja #47: "PM2 --cron z --no-autorestart"
+
+PM2 normalnie restartuje proces gdy sie zakonczy (to dobre dla serwerow ktore powinny byc zawsze wlaczone). Ale dla one-shot skryptow to katastrofa -- bez `--no-autorestart` skrypt uruchamiałby sie w nieskonczonosc:
+
+```
+run -> exit -> restart -> exit -> restart -> ...
+```
+
+Z `--no-autorestart` + `--cron "0 * * * *"`:
+```
+:00 run -> exit -> czekaj -> :00 run -> exit -> czekaj -> ...
+```
+
+### Co moze pojsc nie tak?
+
+1. **API Hyperliquid down**: Skrypt crashuje, PM2 nie restartuje (no-autorestart), nastepna proba za godzine. OK.
+2. **0 fills**: To informacja, nie blad. Znaczy: rynek cichy, albo bot ma problem.
+3. **Discord rate limit**: 30 wiadomosci/min. Jedna na godzine = zero ryzyka.
+
+### Pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/hourly-discord-report.ts` | NOWY |
+| `.env` | Dodano `DISCORD_WEBHOOK_URL` |
+| PM2 | Nowy proces `hourly-report` z cron `0 * * * *` |
+
+---
+
+## kPEPE Custom 4-Layer Grid + Inventory Management (05.02.2026)
+
+### Problem: Generyczny grid nie pasuje do kPEPE
+
+Wyobraz sobie, ze prowadzisz stoisko z wymiana walut na bazarze. Wczesniej miałeś jedna tabliczke z cenami kupna i sprzedazy -- jak wszyscy inni. Kazdy token dostal ten sam 5-warstwowy grid (20/30/45/65/90 bps) pomnozony przez UNHOLY TRINITY (×2.0 w calm, ×6.0 w volatile). L1 ladowalo na 40 bps minimum -- daleko od mid price.
+
+kPEPE ma $23.6M dziennego wolumenu. High Balance traderzy robia $70-100k co kilka minut w scalpingu. Token Millionaire i wieloryby robia $280-450k mega-trade'y. Przy 40 bps od mid, te drobne scalpy nas omijaly. Przy mega-trade'ach, nasz L4 na 90bps × 6.0 = 540 bps (5.4%!) byl absurdalnie daleko.
+
+Potrzebowalismy **czterech tabliczek**, kazdej na inna okazje.
+
+### Rozwiazanie: 4 warstwy z wlasnymi spreadami
+
+```
+Cena mid: $0.003900
+
+L1 Scalping  | <-- 5 bps -->  |   $0.003898 -- $0.003902   (10% kapitalu)
+L2 Core      | <-- 14 bps --> |   $0.003895 -- $0.003905   (24% kapitalu)
+L3 Buffer    | <-- 28 bps --> |   $0.003889 -- $0.003911   (30% kapitalu)
+L4 Sweep     | <-- 55 bps --> |   $0.003879 -- $0.003921   (20% kapitalu)
+Rezerwa: 16% niezaalokowane
+
+             <---- BID ----------- MID ----------- ASK ---->
+```
+
+**Dlaczego akurat takie spready?**
+
+- **L1 (5 bps)**: Lapie scalpowanie High Balance traderow. Mala stawka ($500 = 10%), szybkie obroty. Ryzyko adverse selection jest male, bo to male ordery.
+- **L2 (14 bps)**: Chleb powszedni -- matchuje `baseSpreadBps: 14` z market_vision tuning. Wiekszosc tradingowej aktywnosci laduje tutaj.
+- **L3 (28 bps)**: Najwieksza alokacja (30% = $1,500) bo fillowana regularnie bez duzego ryzyka. Srodek drogi -- nie za blisko mid, nie za daleko.
+- **L4 (55 bps)**: Lapie mega-trade'y i sweep'y. Kiedy ktos paniczny sprzedaje market orderem, cena przesuwa sie o 50-100 bps. L4 kupuje z premia.
+- **Rezerwa (16%)**: Wolna gotowka na rebalancing. Nie alokowana do zadnej warstwy.
+
+### Architektura: Trzy pliki, jeden pipeline
+
+```
+market_vision.ts
+  "Mapa" -- tuning tokena (spread caps, inventory skew mult)
+  kPEPE: baseSpread=14bps, min=5bps, max=60bps, inventorySkewMult=2.0
+         |
+         | tuning config flows down
+         v
+mm_hl.ts
+  "Mozg" -- decyzje: ile, gdzie, kiedy
+  1. Oblicz inventory skew + time decay
+  2. Oblicz sizeMultipliers (bid/ask scaling)
+  3. Oblicz time-of-day spread adjustment
+  4. Wywolaj generateGridOrdersCustom()
+  5. Layer removal jesli skew > 40%
+         |
+         | custom layers + multipliers
+         v
+grid_manager.ts
+  "Rece" -- generuje konkretne zlecenia
+  generateGridOrdersCustom() --> 16 zlecen (4 warstwy x 2 strony x 2 per side)
+```
+
+### GridLayer vs GridOrder -- Blueprint vs Product
+
+To kluczowe rozroznienie ktore latwo pomylić.
+
+**`GridLayer`** to **przepis** -- mowi "warstwa L1 ma byc 5 bps od mid, dostaje 10% kapitału, 2 zlecenia na strone":
+
+```typescript
+// CONFIG (input)
+{ level: 1, offsetBps: 5, capitalPct: 10, ordersPerSide: 2, isActive: true }
+```
+
+**`GridOrder`** to **gotowe danie** -- konkretne zlecenie do wyslania na gielde:
+
+```typescript
+// ORDER (output)
+{ layer: 1, side: 'bid', price: 0.003898, sizeUsd: 125, units: 32051.3 }
+```
+
+Jedna `GridLayer` z `ordersPerSide: 2` produkuje do **4** `GridOrder` (2 bidy + 2 aski). Cztery warstwy = do 16 zlecen.
+
+### generateGridOrdersCustom() vs generateGridOrders()
+
+Dodalismy nowa metode zamiast modyfikowac istniejaca, bo:
+
+1. **Bezpieczenstwo** -- stary kod dziala dla FARTCOIN, LIT, HYPE, ETH, BTC. Jedna zmiana i psujesz 5 par naraz.
+2. **Czytelnosc** -- `if (pair === 'kPEPE')` w mm_hl.ts jest jasne. Zagiezdzone `if` wewnatrz istniejacego generatora to spaghetti.
+3. **Kluczowa roznica** -- nowa metoda *naprawde stosuje* `sizeMultipliers`.
+
+```typescript
+// STARY (generateGridOrders): sizeMultipliers IGNOROWANE
+const orderSizeUsd = layerCapital / (layer.ordersPerSide * 2)
+// <-- zawsze ta sama wartosc, niezaleznie od inventory
+
+// NOWY (generateGridOrdersCustom): sizeMultipliers APLIKOWANE
+const orderSizeUsdBase = layerCapital / (layer.ordersPerSide * 2)
+const bidOrderSize = orderSizeUsdBase * sizeMultipliers.bid  // <-- skalowane!
+const askOrderSize = orderSizeUsdBase * sizeMultipliers.ask  // <-- skalowane!
+```
+
+Stary `generateGridOrders()` mial parametr `_sizeMultipliers` z podkreslnikiem -- to konwencja TypeScript oznaczajaca "parametr istnieje ale nie jest uzywany". Tygodniami bot obliczal piekne sizeMultipliers, przekazywal je do GridManagera... i GridManager je ignorowal.
+
+To jest **Open/Closed Principle** -- kod jest otwarty na rozszerzenie (nowa metoda) ale zamkniety na modyfikacje (stara dziala jak dotad).
+
+### UNHOLY TRINITY -- Dlaczego kPEPE wyszedl
+
+```typescript
+// STARY:
+const unholyTrinity = ['FARTCOIN', 'HYPE', 'LIT', 'kPEPE'];
+// Calm: x2.0 na WSZYSTKIE warstwy
+// Volatile: x6.0 na WSZYSTKIE warstwy
+
+// NOWY:
+const unholyTrinity = ['FARTCOIN', 'HYPE', 'LIT'];
+// kPEPE zarzadza swoja zmiennoscia sam
+```
+
+Problem: mnoznik jest **jednolity**. L1 na 5 bps x 2.0 = 10 bps. OK. L4 na 55 bps x 6.0 = 330 bps. Absurd. UNHOLY TRINITY nie rozumie koncepcji "rozne warstwy, rozne cele".
+
+kPEPE teraz zarzadza zmiennoscia przez: time-of-day multiplier (lekka korekta) + naturalnie rozna szerokosc warstw (L1=5bps, L4=55bps). Nie potrzebuje mlota.
+
+### Time-of-Day Spread Adjustment
+
+```
+UTC:  02  04  06  08  10  12  14  16  18  20  22  00  02
+      |==========|  |==========|  |=================|  |==|
+      Low (0.85x)   Standard(1.0) Peak (1.15x)         Cool
+                                                       (1.0)
+```
+
+- **02-08 UTC** (noc Azji, wczesna Europa): wolumen spada, book cienki. Tighter = wiecej fillow.
+- **08-14 UTC** (Europa + wczesna Ameryka): normalny wolumen, standardowe spready.
+- **14-22 UTC** (szczyt Ameryki, wieczor Europy): najwieksza aktywnosc. Wider = mniej adverse selection.
+- **22-02 UTC** (cool-down): powrot do normy.
+
+Analogia: restauracja obniża ceny w happy hour (malo klientow) i podnosi w piatkowy wieczor (kuchnia nie nadaza).
+
+### Inventory Management -- Trzy Linie Obrony
+
+#### Linia 1: Size Skewing (ciagla, zawsze aktywna, prog >10%)
+
+Kiedy masz za duzo kPEPE (long heavy):
+
+| Inventory | Bid Size | Ask Size | Co sie dzieje |
+|-----------|----------|----------|---------------|
+| 0% | 100% | 100% | Symetrycznie |
+| +15% | ~78% | ~123% | Lekko przesuniete |
+| +25% | ~63% | ~138% | Wyraznie przesuniete |
+| +40% | 40% | 160% | Agresywnie -- prawie nie kupujesz |
+
+Formula:
+```typescript
+skewFactor = min(absSkew / 0.40, 1.0)    // 0->1 over 10-40%
+bid = bid x (1.0 - skewFactor x 0.6)     // 100%->40%
+ask = ask x (1.0 + skewFactor x 0.6)     // 100%->160%
+```
+
+#### Linia 2: Time-Based Inventory Decay (progresywna, eskaluje z czasem)
+
+Problem: co jesli masz 20% skew i size skewing dziala, ale fillow po prostu nie ma? Siedzisz z tym skewem minute, 5 minut, 30 minut...
+
+Im dluzej trzymasz skew, tym bardziej bot go "wzmacnia". 20% skew trzymany 30 minut jest traktowany jak ~25% skew.
+
+| Czas trzymania | Mnoznik | Efektywny skew (przy real 20%) |
+|----------------|---------|-------------------------------|
+| 0-5 min | 1.0x | 20% -> bid 70%, ask 130% |
+| 5-15 min | 1.1x | 22% -> bid 67%, ask 133% |
+| 15-30 min | 1.25x | 25% -> bid 63%, ask 138% |
+| 30-60 min | 1.5x | 30% -> bid 55%, ask 145% |
+| >60 min | 2.0x | 40% -> bid 40%, ask 160% |
+
+Technicznie: module-level state sledzi kiedy skew pierwszy raz przekroczyl 10% i w jakim kierunku. Kiedy skew zmieni kierunek (long->short) albo spadnie ponizej 10%, timer resetuje sie.
+
+```typescript
+const kpepeSkewState = {
+  skewStartTime: 0,    // kiedy skew > 10%
+  lastSkewSign: 0,     // +1 long, -1 short, 0 neutral
+}
+```
+
+**Dlaczego module-level a nie class property?** kPEPE to jedyny token z tym mechanizmem. Dodawanie property do klasy `HyperliquidMM` (ktora zarzadza wszystkimi parami) byloby over-engineering. Prosty obiekt na poziomie modulu jest czysty i czytelny.
+
+**Dlaczego cap na 1.5?** Bez capu, 40% skew x 2.0 time decay = skewFactor 2.0 → bid = 1.0 - 2.0×0.6 = **-0.2** (ujemny!). Cap na 1.5 daje minimum bid = 10%, ask = 190%. Nadal agresywny, ale sensowny.
+
+#### Linia 3: Layer Removal (nuklearna, >40% skew)
+
+Kiedy dwie poprzednie linie nie wystarcza i skew przekracza 40%:
+
+```
+Skew > +40% (LONG heavy):
+  -> Usun WSZYSTKIE L1-L2 bidy (przestań kupowac na bliskich warstwach)
+  -> Zostaw L3-L4 bidy (daleko od mid, bezpieczne)
+  -> Aski na wszystkich warstwach (sprzedawaj!)
+
+Skew < -40% (SHORT heavy):
+  -> Analogicznie -- usun L1-L2 aski
+```
+
+Dlaczego L1-L2 a nie L3-L4? Bo L1-L2 sa najblizej mid price -- najbardziej narazone na adverse selection. Kiedy masz 40% long i cena spada, **ostatnie** czego chcesz to kupowac jeszcze wiecej po cenie blisko mid.
+
+L3-L4 zostaja, bo jesli ktos filluje Twojego bida na L4 (55 bps od mid), to jest duze odchylenie -- prawdopodobnie mean reversion nastapi.
+
+Analogia wojskowa: wycofujesz zolnierzy z pierwszej linii frontu do drugiej. Nie uciekasz z pola bitwy (to byloby zamkniecie WSZYSTKICH bidow), ale cofasz sie na bezpieczniejsza pozycje.
+
+### Pelny pipeline -- krok po kroku
+
+Zalozmy: kPEPE, godzina 15:00 UTC, skew +25% trzymany 25 minut.
+
+```
+1. TIME DECAY
+   skew +25% > prog 10% -> sign = +1
+   Trwa od 25 minut -> timeDecayMult = 1.25
+
+2. SIZE MULTIPLIERS
+   rawSkewFactor = 0.25 / 0.40 = 0.625
+   skewFactor = min(0.625 x 1.25, 1.5) = 0.78
+   sizeMultipliers.bid = 1.0 x (1.0 - 0.78x0.6) = 0.53
+   sizeMultipliers.ask = 1.0 x (1.0 + 0.78x0.6) = 1.47
+
+3. CLAMP
+   bid 0.53 -> max(0.25, min(2.5, 0.53)) = 0.53 OK
+   ask 1.47 -> max(0.25, min(2.5, 1.47)) = 1.47 OK
+
+4. TIME-OF-DAY
+   15:00 UTC -> timeMult = 1.15 (peak hours)
+
+5. GRID GENERATION (generateGridOrdersCustom)
+   L1: 2 bids ($125 x 0.53 = $66) + 2 asks ($125 x 1.47 = $184)
+   L2: 2 bids ($300 x 0.53 = $159) + 2 asks ($300 x 1.47 = $441)
+   L3: 2 bids ($375 x 0.53 = $199) + 2 asks ($375 x 1.47 = $551)
+   L4: 2 bids ($250 x 0.53 = $133) + 2 asks ($250 x 1.47 = $368)
+   Total: 16 zlecen
+
+6. LAYER REMOVAL
+   |skew| = 25% < 40% -> nie usuwamy
+   Wynik: 16 zlecen (bez zmian)
+```
+
+Gdyby skew wynosil 45%:
+```
+6. LAYER REMOVAL
+   |skew| = 45% > 40% -> AKTYWACJA
+   actualSkew > 0 (long heavy) -> usun L1-L2 bidy
+   Usunieto: 4 zlecenia (2xL1 + 2xL2 bidy)
+   Wynik: 12 zlecen (4 bidy na L3-L4 + 8 askow)
+```
+
+### Zmiany w plikach
+
+| Plik | Co sie zmienilo |
+|------|-----------------|
+| `src/utils/grid_manager.ts` | +`generateGridOrdersCustom()` -- nowa metoda z sizeMultipliers |
+| `src/mm_hl.ts` | +`KPEPE_GRID_LAYERS`, +`getKpepeTimeMultiplier()`, +`kpepeSkewState` + `getKpepeTimeDecayMult()`, +enhanced skew z time decay, +layer removal >40%, +kPEPE branch w grid generation, -kPEPE z UNHOLY TRINITY, -kPEPE z LOW-LIQ EXPANSION, INSTITUTIONAL_SIZE_CONFIG maxUsd 200->300 maxUsdAbs 2000->5000 |
+| `src/signals/market_vision.ts` | kPEPE tuning: baseSpread 15->14, minSpread 14->5, maxSpread 15->60, inventorySkewMult 1.3->2.0 |
+
+### Lekcja #48: "_sizeMultipliers -- Parametr Duch"
+
+W oryginalnym `generateGridOrders()` parametr mial podkreslnik: `_sizeMultipliers?`. To konwencja TypeScript oznaczajaca "wiem ze istnieje, celowo nie uzywam". Przez tygodnie bot obliczal piekne sizeMultipliers w mm_hl.ts, przekazywal je do GridManagera... a GridManager je ignorowal. Zamowienia zawsze mialy ten sam rozmiar niezaleznie od inventory.
+
+**Zawsze sprawdz czy parametr jest faktycznie *uzyty* w ciele funkcji, nie tylko *przyjety* w sygnaturze.** TypeScript nie ostrzeze Cie ze nie uzywasz optional parametru.
+
+### Lekcja #49: "Jednolite mnozniki to zly pomysl dla wielowarstwowych systemow"
+
+UNHOLY TRINITY aplikowal x2.0 (lub x6.0) uniform na caly grid. L1 na 5 bps x 6.0 = 30 bps (OK). L4 na 55 bps x 6.0 = 330 bps (absurd). Kazda warstwa ma inny cel -- scalping (L1), sweep (L4) -- i potrzebuje innego traktowania.
+
+Jesli budujesz system z warstwami, kazda warstwa powinna miec sens niezaleznie od globalnego mnoznika. "Multiplier hell" to moment w ktorym global scaling niszczy lokalne zachowanie.
+
+### Lekcja #50: "Czas trzymania to tykajaca bomba"
+
+Bez time decay, bot z 20% long skew zachowywal sie tak samo po 1 minucie i po 60 minutach. Ale ryzyko rosnie z czasem -- im dluzej trzymasz skew, tym wieksze prawdopodobienstwo ze rynek pojdzie przeciw Tobie.
+
+To pattern znany z risk management: "stale positions are ticking bombs". Dotyczy nie tylko inventory w tradingu -- jesli Twoj system trzyma jakis stan (cache, lock, polaczenie), pytaj sie "co sie stanie jesli to trwa 10x dluzej niz oczekiwalem?".
+
+### Lekcja #51: "Escalation ladder -- nie strzelaj od razu z armaty"
+
+Trzy linie obrony (size skew -> time decay -> layer removal) to wzorzec "progressive enhancement". Kazdy poziom ma jasny prog:
+- Size skew: >10% inventory
+- Time decay: >5 minut trzymania
+- Layer removal: >40% inventory
+
+Nie zamykasz calej pozycji od razu. Zaczynasz od delikatnego przesuniecia, potem nasilasz. To samo dotyczy alertow (info -> warn -> error), rate limiting (throttle -> backoff -> circuit break), i degradacji uslug (reduce features -> maintenance mode -> shutdown).
+
+### Weryfikacja po deploy
+
+```bash
+# Logi PM2 -- szukaj kPEPE
+ssh hl-mm 'pm2 logs mm-bot --lines 100 | grep "kPEPE"'
+
+# Grid powinien pokazac bids=8 asks=8 (lub mniej po layer removal)
+# Szukaj: [kPEPE GRID] 4-layer custom: bids=8 asks=8
+
+# Time decay -- po 15+ minutach z pozycja
+# Szukaj: [kPEPE SKEW] inventory=25.0% held=15.3min decay x1.25
+
+# Layer removal -- przy duzej pozycji (>40% kapitalu)
+# Szukaj: [kPEPE LAYER_REMOVAL] skew=45.0% -> removed 4 L1-L2 bids
+
+# Spread check -- L1 ordery ~5 bps od mid
+# Przy mid $0.0039: bid ~$0.003898, ask ~$0.003902
+```
+
+---
+
+*Ostatnia aktualizacja: 2026-02-05*
+*Autor: Claude (z pomoca Jerry'ego)*
