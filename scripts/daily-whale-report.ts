@@ -36,7 +36,7 @@ const VIP_WALLETS: Record<string, { name: string; note: string }> = {
   },
   '0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed': {
     name: 'Winner d7a678',
-    note: 'BTC short @$125K exact top (Oct 6), cashed out +$1.15M, account empty — watching for return',
+    note: 'BTC short @$125K exact top (Oct 6), cashed out +$4.6M Jan 31, account empty — watching for return',
   },
 };
 
