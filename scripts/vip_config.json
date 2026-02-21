@@ -1,5 +1,5 @@
 {
-  "watched_coins": ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "XMR", "MON", "kPEPE", "BCH", "PAXG"],
+  "watched_coins": ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "XMR", "MON", "kPEPE", "BCH", "PAXG", "AVAX"],
   "poll_intervals": {
     "tier1": 30,
     "tier2": 120,
@@ -137,6 +137,18 @@
       "emoji": "\ud83c\udfe6",
       "tier": "fund",
       "notes": "Fund - BTC + LIT"
+    },
+    "0x7fdafde5cfb5465924316eced2d3715494c517d1": {
+      "name": "Fasanara Capital",
+      "emoji": "\ud83c\udfe6",
+      "tier": "tier1",
+      "notes": "+$30.8M Oct 2025 BTC short, $94.5M notional, ETH SHORT $49M, BTC SHORT $25M, HYPE SHORT $14.6M — London hedge fund"
+    },
+    "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36": {
+      "name": "Abraxas Capital",
+      "emoji": "\ud83c\udfe6",
+      "tier": "tier2",
+      "notes": "+$37.9M Oct 2025, withdrew $144M to Binance, now XRP $3.6M + HYPE $3.4M SHORT"
     }
   }
 }
