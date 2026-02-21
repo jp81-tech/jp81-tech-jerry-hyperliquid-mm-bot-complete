@@ -301,11 +301,20 @@ function formatVipSection(vips: VipResult[]): string[] {
   const DISCORD_LIMIT = 1950;
 
   let current = '';
+  let inCodeBlock = false;
 
   function flush() {
     if (current.trim()) {
+      // Close code block if open before splitting
+      if (inCodeBlock) {
+        current += '```\n';
+      }
       messages.push(current.trim());
       current = '';
+      // Re-open code block in new message if we were inside one
+      if (inCodeBlock) {
+        current = '```\n';
+      }
     }
   }
 
@@ -328,6 +337,7 @@ function formatVipSection(vips: VipResult[]): string[] {
     header += `> _${v.note}_\n`;
     header += '```\n';
     append(header);
+    inCodeBlock = true;
 
     for (const p of v.positions) {
       const pnlSign = p.pnlPct >= 0 ? '+' : '';
@@ -337,7 +347,8 @@ function formatVipSection(vips: VipResult[]): string[] {
       append(line);
     }
 
-    append('```\n');
+    current += '```\n';
+    inCodeBlock = false;
   }
 
   flush();
