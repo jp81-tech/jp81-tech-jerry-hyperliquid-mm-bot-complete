@@ -3431,6 +3431,7 @@ class HyperliquidMMBot {
   private shadowAlertIntegration?: ShadowAlertIntegration
   private processedShadowTradeKeys: string[] = []
   private processedShadowTradeSet: Set<string> = new Set()
+  private shadowFeedErrorCount = 0
 
   private intervalSec: number
   private baseOrderUsd: number
@@ -9497,9 +9498,15 @@ class HyperliquidMMBot {
       clearTimeout(timeout)
 
       if (!response.ok) {
-        this.notifier.warn(`🔮 [SHADOW] Trade feed error: HTTP ${response.status}`)
+        this.shadowFeedErrorCount++
+        // Log first error, then only every 10th to avoid spam
+        if (this.shadowFeedErrorCount === 1 || this.shadowFeedErrorCount % 10 === 0) {
+          this.notifier.warn(`🔮 [SHADOW] Trade feed error: HTTP ${response.status} (count: ${this.shadowFeedErrorCount}, set SHADOW_TRADING_ENABLED=false to disable)`)
+        }
         return
       }
+
+      this.shadowFeedErrorCount = 0
 
       const payload: any = await response.json()
       const trades: any[] = Array.isArray(payload)
