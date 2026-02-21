@@ -212,27 +212,38 @@ function formatReport(results: WalletResult[]): string[] {
   const now = new Date();
   const timeStr = now.toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   const messages: string[] = [];
+  const DISCORD_LIMIT = 1950;
 
-  // Header
-  let header = `**SM Whale Report -- ${timeStr}**\n`;
+  let current = `**SM Whale Report -- ${timeStr}**\n`;
+
+  function flush() {
+    if (current.trim()) {
+      messages.push(current.trim());
+      current = '';
+    }
+  }
+
+  function append(text: string) {
+    if ((current + text).length > DISCORD_LIMIT) {
+      flush();
+    }
+    current += text;
+  }
 
   // Group by tier
   for (const tierKey of TIER_ORDER) {
     const tierWallets = results.filter(r => r.whale.tier === tierKey);
-    // Skip tier if no wallets with positions
     const activeWallets = tierWallets.filter(r => r.equity > 100 && r.positions.length > 0);
     if (activeWallets.length === 0) continue;
 
     const tierLabel = TIER_LABEL[tierKey];
-    let section = `\n**=== ${tierLabel} (${activeWallets.length} wallets) ===**\n`;
+    append(`\n**=== ${tierLabel} (${activeWallets.length} wallets) ===**\n`);
 
     for (const w of activeWallets) {
-      // Wallet header line
       let line = `**${w.whale.name}** (${shortAddr(w.address)}): ${fmtUsdNoSign(w.equity)} eq`;
       if (w.totalUPnl !== 0) line += ` | uPnl ${fmtUsd(w.totalUPnl)}`;
       line += '\n';
 
-      // Positions (only > $100K, capped at MAX_POSITIONS_PER_WALLET)
       const bigPositions = w.positions.filter(p => p.valueUsd >= MIN_POSITION_VALUE);
       if (bigPositions.length > 0) {
         const shown = bigPositions.slice(0, MAX_POSITIONS_PER_WALLET);
@@ -249,23 +260,11 @@ function formatReport(results: WalletResult[]): string[] {
         line += '> No positions\n';
       }
 
-      section += line;
-    }
-
-    // Check if adding this section would exceed Discord limit
-    // If so, push current message and start new one
-    if ((header + section).length > 1900) {
-      messages.push(header.trim());
-      header = section;
-    } else {
-      header += section;
+      append(line);
     }
   }
 
-  // Push remaining content
-  if (header.trim()) {
-    messages.push(header.trim());
-  }
+  flush();
 
   // ============================================================
   // AGGREGATE SUMMARY — per-coin long vs short
@@ -293,26 +292,28 @@ function formatReport(results: WalletResult[]): string[] {
     .sort((a, b) => b.total - a.total);
 
   if (sortedCoins.length > 0) {
-    let summary = '**=== AGGREGATE SUMMARY ===**\n```\n';
-
+    const lines: string[] = [];
     for (const c of sortedCoins) {
       const totalSide = c.shortUsd > c.longUsd ? 'SHORT' : 'LONG';
       const dominant = Math.max(c.shortUsd, c.longUsd);
       const pctDominant = c.total > 0 ? ((dominant / c.total) * 100).toFixed(0) : '0';
       const totalUPnl = c.longUPnl + c.shortUPnl;
       const pnlStr = Math.abs(totalUPnl) >= 1000 ? ` uPnl ${fmtUsd(totalUPnl)}` : '';
-      summary += `${c.coin.padEnd(10)} ${fmtUsdNoSign(c.shortUsd).padStart(8)} SHORT vs ${fmtUsdNoSign(c.longUsd).padStart(8)} LONG  (${pctDominant}% ${totalSide})${pnlStr}\n`;
+      lines.push(`${c.coin.padEnd(10)} ${fmtUsdNoSign(c.shortUsd).padStart(8)} SHORT vs ${fmtUsdNoSign(c.longUsd).padStart(8)} LONG  (${pctDominant}% ${totalSide})${pnlStr}`);
     }
 
-    summary += '```';
-
-    // Check if summary fits in last message
-    const lastMsg = messages[messages.length - 1];
-    if (lastMsg && (lastMsg + '\n' + summary).length <= 2000) {
-      messages[messages.length - 1] = lastMsg + '\n' + summary;
-    } else {
-      messages.push(summary);
+    // Split aggregate into chunks that fit Discord limit
+    let chunk = '**=== AGGREGATE SUMMARY ===**\n```\n';
+    for (const line of lines) {
+      if ((chunk + line + '\n```').length > DISCORD_LIMIT) {
+        chunk += '```';
+        messages.push(chunk);
+        chunk = '```\n';
+      }
+      chunk += line + '\n';
     }
+    chunk += '```';
+    messages.push(chunk);
   }
 
   return messages;
