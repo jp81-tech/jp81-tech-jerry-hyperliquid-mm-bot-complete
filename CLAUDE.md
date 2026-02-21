@@ -775,6 +775,111 @@ Hyperliquid API → clearinghouseState → VIP positions
 
 ---
 
+## 🐋 whale_tracker.py — Smart Money Snapshot Engine
+
+### Źródło danych: Hyperliquid API (darmowe!)
+
+Skrypt korzysta z jednego endpointu: `https://api.hyperliquid.xyz/info`
+
+Dwa typy zapytań:
+
+1. **`clearinghouseState`** — dla każdego trackowanego adresu wieloryba:
+```python
+POST https://api.hyperliquid.xyz/info
+{"type": "clearinghouseState", "user": "0xa312..."}
+```
+Zwraca: wszystkie otwarte pozycje — coin, side (Long/Short), size, entry price, unrealized PnL, liquidation price, leverage
+
+2. **`allMids`** — aktualne ceny wszystkich perpów
+
+### Trackowane adresy (~30 wielorybów w 3 tierach)
+
+| Tier | Typ | signal_weight | Przykłady |
+|------|-----|---------------|-----------|
+| **TIER 1** (Conviction) | Nansen-verified SM | 0.80-1.0 | Generał (a31211), Pułkownik (5d2f44), Major (35d115), Bitcoin OG (b317d2) |
+| **TIER 2** (Funds) | Instytucje | 0.70-0.85 | Galaxy Digital, Laurent Zeimes, 58bro.eth, Arrington XRP |
+| **TIER 3** (Active) | Aktywni SM traderzy | 0.50-0.85 | ~15 weryfikowanych adresów z Nansen |
+
+### System ważenia
+
+```
+Final weight = signal_weight (rozmiar pozycji) × credibility_multiplier (weryfikacja Nansen)
+```
+
+| Nansen Label | Credibility | Efekt |
+|-------------|-------------|-------|
+| Smart HL Perps Trader | **1.0** | Pełna waga |
+| All Time Smart Trader | 0.95 | Prawie pełna |
+| Fund | 0.90 | Wysoka |
+| Whale (bez labela) | **0.30** | ~3.5x mniejszy wpływ niż verified SM |
+| Market Maker | **0.0** | Ignorowany (flipują ciągle) |
+
+### Produkowane pliki
+
+**`/tmp/smart_money_data.json`** — dla każdego coina:
+- `mode`: FOLLOW_SM_SHORT / FOLLOW_SM_LONG / CONTRARIAN_LONG / CONTRARIAN_SHORT / NEUTRAL
+- `confidence`: 0-100%
+- `maxPositionMultiplier`: 0.0-1.0
+- `longValueUsd` / `shortValueUsd` — ważone pozycje SM
+- `longPnlUsd` / `shortPnlUsd` — unrealized PnL
+- `trend`: increasing_longs / increasing_shorts / stable (7 dni historii)
+- `velocity`: flow momentum
+- Ostrzeżenia: momentum, squeeze, divergence
+
+**`/tmp/nansen_bias.json`** — prosty bias per coin:
+- 0.0 = 100% SHORT, 0.5 = neutral, 1.0 = 100% LONG
+
+### Logika decyzyjna (`determine_trading_mode`)
+
+```
+SM SHORT dominant (ratio>2x) + shorts w zysku  → FOLLOW_SM_SHORT
+SM SHORT dominant + shorts underwater           → CONTRARIAN_LONG (squeeze potential)
+SM LONG dominant (ratio<0.5x) + longs w zysku  → FOLLOW_SM_LONG
+SM LONG dominant + longs underwater             → CONTRARIAN_SHORT
+Mieszane/neutral                                → NEUTRAL
+```
+
+### Zabezpieczenia
+
+| Mechanizm | Co robi | Kiedy |
+|-----------|---------|-------|
+| **Squeeze timeout** | Maleje confidence po 4h, wyjście po 12h | CONTRARIAN mode trwa za długo |
+| **Stale PnL** | Penalty gdy SM traci momentum (24h change) | SM w zysku ale trend odwraca |
+| **Perps vs Spot divergence** | Penalty gdy flow nie zgadza się z pozycjami | Np. shorts winning + duży inflow |
+| **Confidence → sizing** | 90-100%=full, 60-75%=50%, <40%=10% | Zawsze — mniejsza pewność = mniejsza pozycja |
+
+### Jak bot konsumuje dane
+
+```
+whale_tracker.py (cron co 15-30 min)
+  → /tmp/smart_money_data.json
+  → /tmp/nansen_bias.json
+      ↓
+SmAutoDetector.ts (loadAndAnalyzeAllTokens)
+  → czyta smart_money_data.json
+  → przekazuje mode/confidence do SignalEngine
+      ↓
+SignalEngine (Generał)
+  → decyduje: FOLLOW_SM_SHORT / FOLLOW_SM_LONG / PURE_MM
+  → ustawia bidMultiplier / askMultiplier
+```
+
+### Cache i historia
+
+| Plik | Opis |
+|------|------|
+| `~/.whale_tracker/positions_cache.json` | Ostatni snapshot (do detekcji zmian) |
+| `~/.whale_tracker/daily_history.json` | 7-dniowa historia (analiza trendów) |
+| `~/.whale_tracker/hourly_history.json` | 48h historia godzinowa (bottom detection, 24h changes) |
+| `/tmp/contrarian_state.json` | Śledzenie czasu w CONTRARIAN mode (squeeze timeout) |
+
+### Uwaga: whale_tracker.py vs whale_tracker_pro.py
+
+- **`whale_tracker.py`** — główny, produkcyjny skrypt (~2400 linii). Trackuje ~30 adresów, system ważenia, trend analysis, bot data generation
+- **`whale_tracker_pro.py`** — uproszczona wersja "Trading Manual" z mock data. Tylko 3 adresy, generuje raport na Telegram. Nie używany przez bota
+
+---
+
 ## Git / GitHub
 
 ```bash
