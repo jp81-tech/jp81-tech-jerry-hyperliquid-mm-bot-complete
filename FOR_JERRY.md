@@ -15,7 +15,8 @@
 7. [Diamond Hands — psychologia i matematyka](#diamond-hands)
 8. [Bugi, katastrofy i lekcje](#bugi-katastrofy-i-lekcje)
 9. [Jak mysla dobrzy inzynierowie](#jak-mysla-dobrzy-inzynierowie)
-10. [Slowniczek](#slowniczek)
+10. [Daily Whale Report — Rentgen portfeli wielorybow](#daily-whale-report--rentgen-portfeli-wielorybow)
+11. [Slowniczek](#slowniczek)
 
 ---
 
@@ -241,6 +242,7 @@ To jak w armii: rozkaz Generala jest wazniejszy niz regulamin straznika.
 | `scripts/vip_spy.py` | ~300 | Real-time monitoring 4 VIP whales | Szpieg |
 | `src/signals/nansen_alert_parser_v2.ts` | ~400 | Parser alertow Nansen | Dekoder wiadomosci |
 | `src/shadow/` | ~800 | Modul kopiowania SM trades | Nieaktywny (brak backendu) |
+| `scripts/daily-whale-report.ts` | ~390 | Codzienny raport pozycji 57 wielorybow na Discord | Lornetka |
 
 ### Pliki danych (na serwerze):
 
@@ -562,6 +564,189 @@ Deploy: `scp` pliku na serwer + `pm2 restart mm-bot`. Proste i skuteczne.
 
 ---
 
+## Daily Whale Report — Rentgen portfeli wielorybow
+
+### Co to jest?
+
+Wyobraz sobie, ze masz lornetke i co rano mozesz podejrzec portfele 57 najlepszych traderow na gieldzie. Nie musisz logowac sie na Nansen, nie musisz recznie sprawdzac adresow. O 12:00 UTC na Discord leci raport:
+
+```
+BTC    $153.5M SHORT vs  $11.0M LONG  (93% SHORT)
+ETH     $63.0M SHORT vs  $17.8M LONG  (78% SHORT)
+SOL     $51.9M SHORT vs   $3.7M LONG  (93% SHORT)
+```
+
+Jedno spojrzenie i wiesz: "Smart Money sa masywnie SHORT na BTC/ETH/SOL. Nie kupuj."
+
+### Plik: `scripts/daily-whale-report.ts`
+
+Jeden plik, ~390 linii, zero zewnetrznych zaleznosci poza tym co juz jest w projekcie (`@nktkas/hyperliquid`, `dotenv`).
+
+### Jak dziala? (krok po kroku)
+
+```
+1. ZALADUJ ADRESY
+   57 wielorybow hardcoded w WHALES dict
+   (synced z whale_tracker.py, bez Tier 4 Market Makers)
+        |
+        v
+2. FETCH DANYCH Z HYPERLIQUID API
+   Dla kazdego adresu: clearinghouseState
+   (batche po 5, 200ms delay miedzy batchami)
+        |
+        v
+3. PARSUJ POZYCJE
+   Equity, uPnL, lista pozycji (coin, side, value)
+   Closed/empty accounts -> skip
+        |
+        v
+4. FORMATUJ RAPORT
+   Tier 1 -> Tier 2 -> Tier 3 -> Aggregate Summary
+   Split na wiadomosci <2000 znaków (limit Discord)
+        |
+        v
+5. WYSLIJ NA DISCORD
+   POST do webhookURL z { content: "..." }
+```
+
+### Kluczowe decyzje techniczne (i dlaczego)
+
+#### 1. `Promise.allSettled` zamiast `Promise.all`
+
+```typescript
+const settled = await Promise.allSettled(
+  batch.map(async ([address, whale]) => {
+    const state = await info.clearinghouseState({ user });
+    // ...
+  })
+);
+```
+
+**Dlaczego?** `Promise.all` rzuca blad jesli JAKIKOLWIEK promise fail'uje. Czyli jesli 1 z 57 wielorybow ma zamkniete konto i API rzuca blad — caly raport nie generuje sie.
+
+`Promise.allSettled` czeka az WSZYSTKIE promisy sie rozwiaza (fulfill lub reject) i zwraca status kazdego. Mozesz obsluzyc bledy indywidualnie.
+
+To jak roznica miedzy:
+- `Promise.all` = "Jesli JEDEN zolnierz nie zamelduje sie, cala operacja jest odwolana"
+- `Promise.allSettled` = "Raportujcie co wiecie. Brakujacych oznaczymy jako BRAK DANYCH"
+
+W realnym swiecie 14 z 57 kont jest zamknietych. Bez `allSettled` raport nigdy by sie nie wygenerował.
+
+#### 2. Rate limiting (batch po 5 + 200ms delay)
+
+```typescript
+const BATCH_SIZE = 5;
+const BATCH_DELAY_MS = 200;
+
+for (let i = 0; i < entries.length; i += BATCH_SIZE) {
+  const batch = entries.slice(i, i + BATCH_SIZE);
+  // ... fetch batch
+  await sleep(BATCH_DELAY_MS);
+}
+```
+
+**Dlaczego?** Hyperliquid API ma rate limity. 57 requestow naraz = HTTP 429 (Too Many Requests). Batche po 5 z 200ms pauzą = ~2.5 sekundy na caly fetch. Szybko, ale grzecznie.
+
+To jak kolejka w sklepie — mozesz wejsc z 5 osobami naraz, ale nie z 57.
+
+**Dlaczego nie po 1?** Bo byloby zbyt wolno (57 x 200ms = 11 sekund). Batch 5 to dobry balans.
+
+#### 3. Message splitting (limit 2000 znakow Discord)
+
+```typescript
+if ((header + section).length > 1900) {
+  messages.push(header.trim());
+  header = section;  // nowa wiadomosc
+}
+```
+
+**Dlaczego 1900 a nie 2000?** Bufor bezpieczenstwa. Discord obcina na 2000 — lepiej wyslac 2 wiadomosci niz stracic koniec raportu. Margines 100 znakow na ewentualne markdown formatting.
+
+#### 4. Position value = |size| * entryPx
+
+```typescript
+const valueUsd = Math.abs(szi) * entryPx;
+```
+
+Nie `Math.abs(szi) * currentPrice`. Dlaczego? Bo `entryPx` jest w danych z API, a `currentPrice` wymaga dodatkowego API call. Roznica jest minimalna (pozycja +5% vs pozycja nominalna), a oszczedzamy 1 API call i unikamy timing issues.
+
+#### 5. Filtry czytelnosci
+
+Trzy stale kontroluja ile szumu widzisz w raporcie:
+
+| Stala | Wartosc | Efekt |
+|-------|---------|-------|
+| `MIN_POSITION_VALUE` | $100K | Chowaj male pozycje |
+| `MAX_POSITIONS_PER_WALLET` | 10 | Cap na pozycje (Wice-General ma 36!) |
+| `MIN_AGGREGATE_VALUE` | $1M | Aggregate tylko duze coiny |
+
+Bez tych filtrow raport mialby 200+ linii i bylby nieczytelny. Z nimi — konkretna informacja ktora mozesz przeskanowac w 30 sekund.
+
+### Wzorce z istniejacego kodu (pattern matching)
+
+Ten skrypt nie zostal napisany od zera. Wzorce sa zaczerpniete z istniejacych skryptow:
+
+| Wzorzec | Zrodlo | Uzycie |
+|---------|--------|--------|
+| Shebang `#!/usr/bin/env -S npx tsx` | `hourly-discord-report.ts` | Mozna uruchomic jako `./daily-whale-report.ts` |
+| `config({ path: ... })` | `daily_report.ts` | Ladowanie .env |
+| `new hl.HttpTransport() + InfoClient` | `hourly-discord-report.ts` | Klient API |
+| `clearinghouseState` parsing | `hourly-discord-report.ts:39-44` | Equity, pozycje, uPnL |
+| Discord webhook `{ content }` | `daily_report.ts:20` | Format payloadu |
+| Error reporting do Discord | `daily_report.ts:115-121` | Jesli skrypt padnie, wyslij blad na Discord |
+| `--dry-run` flag | Nowy (ale standardowa praktyka) | Testowanie bez wysylania |
+
+**Lekcja:** W dojrzalym kodzie nie wymyslasz kola na nowo. Patrzysz jak robi to istniejacy kod i naśladujesz wzorce. Konsystencja > kreatywnosc.
+
+### Adresy wielorybow — duplikacja vs single source of truth
+
+Adresy wielorybow sa hardcoded w dwoch miejscach:
+1. `whale_tracker.py` (Python, ~600 linii) — autorytatywne zrodlo
+2. `daily-whale-report.ts` (TypeScript) — kopia
+
+**Dlaczego duplikacja?** Bo to sa dwa rozne jezyki (Python vs TS). Importowanie Python dict z TypeScript wymagaloby:
+- Albo wspolnego pliku JSON (dodatkowa warstwa, ryzyko desynchronizacji)
+- Albo parsowania Python z TS (szalone)
+- Albo wspolnej bazy danych (overengineering dla 57 adresow)
+
+**Tradeoff:** Duplikacja = ryzyko ze adresy sie rozjada. Ale te adresy zmieniaja sie raz na kilka tygodni (audit po Bitcoin OG liquidation). Przy takiej czestotliwosci, manualna synchronizacja jest OK.
+
+**Kiedy to NIE jest OK:** Gdy dane zmieniaja sie czesto (np. codziennie). Wtedy single source of truth (JSON file, baza danych) jest obowiazkowy.
+
+### Uruchamianie
+
+```bash
+# Lokalnie — dry run (tylko konsola)
+npx tsx scripts/daily-whale-report.ts --dry-run
+
+# Produkcja — wyslij na Discord
+npx tsx scripts/daily-whale-report.ts
+
+# PM2 cron — codziennie o 12:00 UTC
+pm2 start scripts/daily-whale-report.ts \
+  --name whale-report \
+  --interpreter "npx" \
+  --interpreter-args "tsx" \
+  --cron "0 12 * * *" \
+  --no-autorestart
+```
+
+**Dlaczego `--no-autorestart`?** Bo to skrypt jednorazowy (run-and-exit), nie daemon. PM2 domyslnie restartuje procesy ktore sie koncza — bez tej flagi skrypt uruchomilby sie w petli.
+
+### Co mozna nauczyc sie z tego skryptu
+
+1. **Resilient data fetching** — `Promise.allSettled` + rate limiting + graceful error handling. W realnym swiecie dane sa brudne (puste konta, API errory, timeouty). Kod musi to obslugiwac.
+
+2. **Platform constraints drive design** — Limit 2000 znaków Discord ksztaltuje cala logike formatowania. Dobrzy inzynierowie znaja limity platformy ZANIM zaczna pisac kod, nie po deploymencie.
+
+3. **Readability > completeness** — Raport moglby pokazac WSZYSTKIE pozycje. Ale 200-liniowy raport nikt nie czyta. Filtry ($100K min, 10 pozycji max, $1M aggregate) czynia raport uzytecznym.
+
+4. **Copy existing patterns** — Nie wymyslaj nowego sposobu na webhook, format daty, klient API. Uzyj tego co juz dziala w projekcie. Mniej bugow, szybciej, latwiej review.
+
+5. **Dry run mode** — Kazdy skrypt ktory robi cos nieodwracalnego (wysyla wiadomosc, sklada zlecenie, kasuje dane) powinien miec `--dry-run`. Kosztuje 3 linie kodu, oszczedza godziny debugowania.
+
+---
+
 ## Podsumowanie
 
 Ten bot to nie jest "kup tanio, sprzedaj drogo". To jest **system wywiadowczy** ktory:
@@ -576,5 +761,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 21 lutego 2026*
+*Ostatnia aktualizacja: 21 lutego 2026 (dodano Daily Whale Report)*
 *Wygenerowane przez Claude Code*
