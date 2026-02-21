@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-01-25
+- Data: 2026-02-21
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -17,14 +17,17 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 **PR:** https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 
 **Główne komponenty:**
-- `src/mm_hl.ts` - główny silnik market-making
-- `src/mm/SmAutoDetector.ts` - auto-detekcja SM mode z whale_tracker.py
+- `src/mm_hl.ts` - główny silnik market-making (SM-following + PURE_MM)
+- `src/mm/SmAutoDetector.ts` - auto-detekcja SM mode z whale_tracker.py, TOKEN_VOLATILITY_CONFIG
 - `src/mm/dynamic_config.ts` - dynamiczna konfiguracja, HARD_BLOCK logika
+- `src/mm/TokenRiskCalculator.ts` - dynamic leverage + Vision SL (ATR-based)
 - `src/core/strategy/SignalEngine.ts` - SignalEngine v3.1 z whale override
+- `src/signals/market_vision.ts` - MarketVision, NANSEN_TOKENS config, per-token tuning
 - `src/signals/nansen_alert_parser_v2.ts` - parser alertów Nansen (SM OUTFLOW/INFLOW)
 - `src/signals/nansen_alert_integration.ts` - integracja alertów z botem
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
+- `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
 
 **Kluczowe pliki danych:**
@@ -34,6 +37,221 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 21 lutego 2026
+
+### 19. Fix: Shadow Trade Feed HTTP 404 spam (21.02)
+**Problem:** Logi bota spamowane co 30 sekund: `🔮 [SHADOW] Trade feed error: HTTP 404`
+
+**Przyczyna:**
+- `SHADOW_TRADING_ENABLED=true` w `.env` ale **nie istnieje żaden serwer shadow trades** na maszynie
+- Domyślny URL `http://127.0.0.1:8081/api/latest_trades` trafiał w **telemetry server** (który wylądował na porcie 8081 bo 8080 zajęty przez nansen-bridge)
+- Telemetry server nie ma endpointu `/api/latest_trades` → HTTP 404 co 30 sekund (poll interval)
+
+**Diagnostyka portów:**
+| Port | Proces | Endpoint |
+|------|--------|----------|
+| 8080 | nansen-bridge | - |
+| 8081 | mm-bot (telemetry fallback) | `/telemetry/*` |
+| 8082 | nic (telemetry chciał tu, ale wylądował na 8081) | - |
+
+**Fix 1 — `.env` na serwerze:**
+```
+SHADOW_TRADING_ENABLED=false  # było: true
+```
+
+**Fix 2 — `src/mm_hl.ts` (rate-limit error logging):**
+```typescript
+// Nowe pole:
+private shadowFeedErrorCount = 0
+
+// W pollShadowTrades():
+if (!response.ok) {
+  this.shadowFeedErrorCount++
+  // Log first error, then only every 10th to avoid spam
+  if (this.shadowFeedErrorCount === 1 || this.shadowFeedErrorCount % 10 === 0) {
+    this.notifier.warn(`🔮 [SHADOW] Trade feed error: HTTP ${response.status} (count: ${this.shadowFeedErrorCount}, set SHADOW_TRADING_ENABLED=false to disable)`)
+  }
+  return
+}
+this.shadowFeedErrorCount = 0  // Reset on success
+```
+
+**Efekt:** Zero logów `[SHADOW]` po restarcie. Gdyby ktoś w przyszłości włączył shadow trading z błędnym URL, logi będą rate-limited (1. + co 10. błąd zamiast każdego).
+
+**Commit:** `83420a4` — `fix: rate-limit shadow trade feed error logs + disable on server`
+
+---
+
+## Zmiany 5 lutego 2026
+
+### 18. kPEPE Toxicity Engine + Advanced Inventory Management (05.02)
+**Cel:** Detekcja toksycznego flow na kPEPE (pattern-based, bo Hyperliquid fills nie zawierają adresów counterparty) + automatyczne dostosowanie grida.
+
+**Nowy plik:** `src/mm/kpepe_toxicity.ts`
+
+**8 sygnałów detekcji:**
+
+| # | Sygnał | Warunek | Reakcja |
+|---|--------|---------|---------|
+| 1 | Consecutive toxic fills | 3/5/7/10 z rzędu | Widen +20% / removeL1 / removeL1,2 / PAUSE 2min |
+| 2 | Rapid fill burst | 3+ fills w 10s | Widen +30%, remove L1 |
+| 3 | Sweep detection | 20+ bps range w 30s | Widen +50% |
+| 4 | Coordinated attack | VPIN HIGH + adverse + rapid | PAUSE 2min |
+| 5 | Volatility sizing | momentum >3%/5% | Size ×0.60 / ×0.40 |
+| 6 | OI-based spread | OI zmiana >±10% | Widen +15% / +10% |
+| 7 | Funding asymmetry | funding >0.01% | Reduce paying side ×0.80 |
+| 8 | Hedge trigger | skew >50% przez 30min | IOC 20% pozycji, cooldown 15min |
+
+**Zmiany w 4 plikach:**
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm/kpepe_toxicity.ts` | NOWY — KpepeToxicityEngine + getKpepeTimeZoneProfile (10-zone) |
+| `src/mm_hl.ts` | Import + instantiate engine, feed fills, tick() w grid pipeline, hedge IOC, per-layer refresh, VPIN bucket fix ($500) |
+| `src/config/short_only_config.ts` | KPEPE funding filter override (crowded 0.03%, caution ×0.70) |
+| `src/api/hyperliquid_data_fetcher.ts` | kPEPE dodane do CANDLE_COINS (momentum data) |
+
+**Enhanced 10-zone Time-of-Day (zastąpiła starą 4-zone `getKpepeTimeMultiplier`):**
+- Asia low (02-04 UTC): spread ×0.85, size ×1.10 (tight, niska toksyczność)
+- US open (14-16 UTC): spread ×1.20, size ×0.85 (najwyższa toksyczność)
+
+**Per-layer refresh rates:**
+- L1: co tick (60s) — closest to mid
+- L2-L3: co 2 ticki (120s)
+- L4: co 5 ticków (300s) — oszczędza API rate limit
+
+**VPIN tuning:** kPEPE bucket $500 (default $50K za duży dla memecoin volume, buckety nigdy się nie zapełniały → VPIN stuck na 0.5)
+
+**Kluczowa lekcja:** Hyperliquid fills nie zawierają adresów counterparty (tylko oid, coin, side, px, sz, time, fee, closedPnl). Detekcja toksyczności musi opierać się na wzorcach fill, nie na śledzeniu adresów.
+
+---
+
+## Zmiany 4 lutego 2026
+
+### 17. LIT+FARTCOIN Focus — $500/day Target (04.02)
+**Cel:** Pivot z POPCAT (~$0.35/day) na LIT+FARTCOIN jako SM-following focus pairs z celem $500/day.
+
+**Problem:** Po analizie POPCAT okazało się że UTIL CAP bottleneck ($22/order), tick-size constraints (17bps minimum), i mała alokacja (~$3,248 per pair) dawały realistyczny P&L ~$0.35/dziennie. Zmiana strategii na agresywne SM-following na LIT i FARTCOIN.
+
+**Zmiany w 3 plikach + server .env:**
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | INSTITUTIONAL_SIZE_CONFIG: LIT/FARTCOIN target=$200 (10x poprzednio) |
+| `src/mm_hl.ts` | UTIL CAP leverage: per-token `${pair}_LEVERAGE` zamiast hardcoded `2` |
+| `src/mm_hl.ts` | Rebucketing: per-token INSTITUTIONAL_SIZE_CONFIG zamiast globalny CLIP_USD=$22 |
+| `src/mm_hl.ts` | Capital floor: STICKY_PAIRS min cap×0.80 (zapobiega squeeze throttling) |
+| `src/signals/market_vision.ts` | Tuning: LIT 15bps/$2K/level/$10K max, FARTCOIN 20bps/$2K/level/$10K max |
+| `src/signals/market_vision.ts` | activePairs: LIT, FARTCOIN, ETH, BTC, HYPE, SOL |
+| `src/mm/dynamic_config.ts` | LIT HARD_BLOCK usunięty (blokował aski gdy auto-detect cache pusty) |
+| `src/mm/dynamic_config.ts` | LIT EMERGENCY_OVERRIDES: maxInventoryUsd 2000→10000 |
+
+**5 bottlenecków naprawionych (pełny sizing chain):**
+
+1. **INSTITUTIONAL_SIZE_CONFIG** — target $25→$200, max $150→$500
+2. **normalizeChildNotionals** — używał CLIP_USD=$22 jako rebucket target zamiast per-token config
+3. **UTIL CAP leverage** — hardcoded `const leverage = 2` zamiast per-token `${pair}_LEVERAGE=5`
+4. **capitalMultiplier double-apply** — DynamicConfig squeeze (cap×0.38) nakładany dwukrotnie. Fix: capital floor 0.80 dla STICKY_PAIRS
+5. **LIT HARD_BLOCK + EMERGENCY_OVERRIDES** — stale overrides blokowały aski i limitowały do $2K
+
+**Rebucketing fix (kluczowy):**
+```typescript
+const pairSizeCfg = INSTITUTIONAL_SIZE_CONFIG[pair]
+const rebucketTarget = pairSizeCfg ? Math.max(GLOBAL_CLIP, pairSizeCfg.targetUsd) : GLOBAL_CLIP
+const rebucketMin = pairSizeCfg ? Math.max(MIN_NOTIONAL, pairSizeCfg.minUsd) : MIN_NOTIONAL
+```
+
+**Capital floor fix:**
+```typescript
+const stickyPairs = (process.env.STICKY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
+if (stickyPairs.includes(pair) && capitalMultiplier < 0.80) {
+  capitalMultiplier = 0.80  // Prevent squeeze from over-throttling focus pairs
+}
+```
+
+**LIT HARD_BLOCK usunięty:**
+```typescript
+// STARE (usunięte): Blokował aski gdy isFollowSmShort=false (stale z tygodnie temu)
+// NOWE: Tylko log gdy FOLLOW_SM_SHORT aktywny
+if (token === 'LIT' && isFollowSmShort) {
+  console.log(`🦅 [SIGNAL_ENGINE] LIT: FOLLOW_SM_SHORT → aggressive shorting enabled (focus pair)`)
+}
+```
+
+**Env vars na serwerze:**
+```
+FORCE_MM_PAIRS=BTC,ETH              # usunięto SOL, POPCAT
+STICKY_PAIRS=LIT,FARTCOIN           # focus pairs (zawsze aktywne)
+MAX_ACTIVE_PAIRS=4                  # zmniejszone z 6
+LIT_LEVERAGE=5                      # 5x leverage
+FARTCOIN_LEVERAGE=5                 # 5x leverage
+MANUAL_ACTIVE_PAIRS=LIT,FARTCOIN    # manual mode fallback
+```
+
+**Wynik końcowy:**
+```
+LIT:      8 sell levels, $1,600 total, Ask×2.00, 5x leverage, ~$200/order ✅
+FARTCOIN: 8 sell levels, $1,600 total, 5x leverage, ~$200/order ✅
+```
+
+---
+
+### 16. POPCAT PURE_MM - Symetryczny Market Maker (04.02)
+**Cel:** Dodanie POPCAT jako PURE_MM pary (pasywny market-making, obie strony)
+
+**Kontekst:** Próba dodania stock perpów (TSM, HOOD) nie powiodła się — Nansen AI halucynował symbole `xyz:TSM` i `cash:HOOD` które nie istnieją na Hyperliquid API. Po weryfikacji wszystkich 228 perpów przez API wybrano POPCAT ($3.1M/d volume, 3x max leverage).
+
+**Zmiany w 4 plikach:**
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm/SmAutoDetector.ts` | `TOKEN_VOLATILITY_CONFIG['POPCAT']`: SL=1.5%, maxLev=3, ATR×2.5 |
+| `src/mm_hl.ts` | `INSTITUTIONAL_SIZE_CONFIG.POPCAT`: min=$15, target=$50, max=$150 |
+| `src/mm_hl.ts` | Per-token leverage override: `${pair}_LEVERAGE` env var |
+| `src/signals/market_vision.ts` | `NANSEN_TOKENS['POPCAT']`: chain='hyperliquid', 42bps spread, $11K max pos |
+| `src/signals/market_vision.ts` | `activePairs` += 'POPCAT' |
+
+**Per-token leverage override (nowy pattern):**
+```typescript
+const perTokenLev = Number(process.env[`${pair}_LEVERAGE`] || 0)
+const targetLeverage = perTokenLev > 0 ? perTokenLev : (riskParams?.recommendedLeverage ?? fallbackLeverage)
+```
+Dodano w dwóch miejscach: mainLoop leverage setup + rotateIfNeeded.
+
+**Env vars na serwerze:**
+```
+FORCE_MM_PAIRS=BTC,SOL,ETH,POPCAT
+STICKY_PAIRS=POPCAT
+MAX_ACTIVE_PAIRS=6
+POPCAT_LEVERAGE=3
+```
+
+**Problemy napotkane:**
+1. **ROTATION_MODE=sm ignorował POPCAT** — SM rotacja wybiera top 3 pary po imbalance, POPCAT nie ma SM danych. Fix: `STICKY_PAIRS=POPCAT` (sticky pairs zawsze aktywne).
+2. **Leverage defaultował do 1x** — `getTokenRiskParams('POPCAT')` zwracał undefined (brak cache SM). Fix: `POPCAT_LEVERAGE=3` env + per-token override w kodzie.
+3. **Kill switch blokował** — chain='hyperliquid' automatycznie omija flow-based kill switch.
+
+**Parametry POPCAT tuning:**
+- Base spread: 42bps (0.42%)
+- Min/Max spread: 25-90bps
+- SM adjustments: OFF (smFlowSpreadMult=1.0, smSignalSkew=0.0)
+- Order size: $1,000/level, 5 levels per side
+- Max position: $11,000 (92% equity)
+- Inventory skew: 1.5x (aggressive rebalancing)
+- Leverage: 3x, SL: 1.5%
+
+**Log potwierdzenia:**
+```
+🧲 Sticky pairs: POPCAT
+📊 Allowed pairs (rotation + sticky): POPCAT, BTC, SOL, ETH (count=4/6)
+✅ Set POPCAT leverage to 3x
+🎯 [DYNAMIC LEV] POPCAT: 3x (conviction+vol) | Vision SL: 0%
+[FORCE_MM] POPCAT: PURE_MM forced → both sides enabled
+📊 [ML-GRID] pair=POPCAT mid≈0.0573 buyLevels=8 sellLevels=8
+```
 
 ---
 
@@ -567,7 +785,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-f3f6476 feat: SM OUTFLOW/INFLOW signal parsers + Telemetry improvements
+83420a4 fix: rate-limit shadow trade feed error logs + disable on server
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -592,13 +810,24 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 ---
 
 ## Do zrobienia
+- [ ] Monitorować kPEPE Toxicity Engine — logi `🐸 [kPEPE TOXICITY]` co 20 ticków, sprawdzić VPIN readings
+- [ ] Sprawdzić kPEPE VPIN po deployu — czy readings != 0.5 (baseline) po przejściu na $500 buckets
+- [ ] Monitorować hedge triggers — czy IOC fires gdy skew >50% przez 30min
+- [ ] Sprawdzić per-layer refresh — L4 NIE powinno być cancel/replace co tick, tylko co 5
+- [ ] Monitorować LIT+FARTCOIN focus — $200/order fills, P&L tracking, inventory balance
+- [ ] Sprawdzić PnL po kilku dniach — cel $500/day z LIT+FARTCOIN
+- [ ] Monitorować capital floor (cap×0.80) — czy squeeze analysis nie blokuje focus pairs
 - [ ] Monitorować działanie SM OUTFLOW/INFLOW alertów w produkcji
-- [ ] Sprawdzić PnL po kilku dniach działania nowych parserów
 - [ ] Rozważyć dodanie więcej tokenów do monitoringu
+- [x] kPEPE Toxicity Engine deployed — 8 sygnałów, 10-zone time, hedge triggers (DONE 05.02)
+- [x] LIT+FARTCOIN focus deployed — 5 bottlenecków naprawionych (DONE 04.02)
+- [x] POPCAT PURE_MM deployed (DONE 04.02, zastąpiony przez LIT+FARTCOIN)
+- [x] Per-token leverage override (DONE 04.02)
 - [x] VIP Spy - monitoring Generała i Wice-Generała (DONE 25.01)
 - [x] Fix HOLD_FOR_TP dla HYPE po rotacji tokenów (DONE 25.01)
 - [x] Fix fałszywych alarmów Nansen Kill Switch dla FARTCOIN (DONE 25.01)
 - [x] GENERALS_OVERRIDE - USUNIĘTY 03.02 (wieloryby flipnęły LONG na HYPE, LIT/FARTCOIN nie potrzebują override)
+- [x] Shadow trade feed HTTP 404 spam — wyłączony + rate-limited error logging (DONE 21.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -606,5 +835,17 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 - Telemetry działa na porcie 8082 (8080/8081 zajęte przez inne serwisy)
 - gh CLI zainstalowane i zalogowane jako `jp81-tech`
 - **KNOWN_ACTIVE_TOKENS**: FARTCOIN, LIT - omijają kill switch gdy Nansen nie ma danych
-- **Hyperliquid perps**: chain='hyperliquid' automatycznie omija flow-based kill switch
+- **Hyperliquid perps**: chain='hyperliquid' automatycznie omija flow-based kill switch (HYPE, POPCAT)
 - **☢️ GENERALS_OVERRIDE**: USUNIĘTY (wieloryby flipnęły LONG na HYPE; LIT/FARTCOIN działają z danych)
+- **LIT+FARTCOIN focus**: STICKY_PAIRS, 5x leverage, $200/order, $10K max pos, SM-following
+- **POPCAT**: Zastąpiony przez LIT+FARTCOIN (dawał ~$0.35/day z powodu UTIL CAP bottleneck)
+- **Order sizing chain**: 5 warstw bottlenecków — INSTITUTIONAL_SIZE_CONFIG → rebucketing → UTIL CAP → capitalMultiplier → HARD_BLOCK
+- **Capital floor**: STICKY_PAIRS mają min cap×0.80 (zapobiega squeeze throttling poniżej 80%)
+- **Per-token leverage**: `${TOKEN}_LEVERAGE` env var overriduje globalny `LEVERAGE` i SM-calculated leverage
+- **Nansen AI hallucynacje**: Symbole `xyz:TSM` i `cash:HOOD` NIE istnieją na HL — zawsze weryfikuj przez `curl` do API giełdy
+- **Dwa tryby par**: SM-rotated (BTC/ETH — co 4H) vs Sticky (LIT/FARTCOIN — zawsze aktywne)
+- **kPEPE Toxicity Engine**: 8 sygnałów detekcji, 10-zone time-of-day, per-layer refresh, hedge triggers (IOC), VPIN $500 buckets
+- **kPEPE CANDLE_COINS**: Dodane do data fetcher — bez tego momentum=0 i volatility sizing nie działa
+- **Hyperliquid fills bez adresów**: Fills dają tylko oid/coin/side/px/sz/time/fee — toksyczność musi być wykrywana z wzorców (VPIN, adverse selection, rapid fills, sweeps)
+- **Shadow trading**: Wyłączone (`SHADOW_TRADING_ENABLED=false`). Nie ma serwera shadow trades. Domyślny URL trafia w telemetry (port 8081). Gdyby trzeba było włączyć — najpierw postawić serwer i ustawić `SHADOW_TRADING_TRADES_URL`
+- **Porty na serwerze**: 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8082=wolny
