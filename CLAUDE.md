@@ -76,22 +76,27 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - Wszystkie 6 "similar traders" z Nansen już trackowane w VIP spy
 - Status: w `vip_config.json` jako tier1, "watching for return"
 
-**VIP Intelligence Snapshot (21.02.2026, 22 portfele):**
+**VIP Intelligence Snapshot (21.02.2026, 25 portfeli — updated):**
 
 | Metryka | Wartość |
 |---------|---------|
-| Equity | $151.7M |
-| Notional | $416.6M |
-| uPnL | +$104.3M |
-| SHORT dominacja | 3.9x ($330M SHORT vs $86M LONG) |
-| Aktywne | 18/22 (4 puste) |
+| Equity | $187.1M |
+| Notional | $528.1M |
+| uPnL | +$114.3M |
+| SHORT dominacja | **5.2x** ($443M SHORT vs $86M LONG) |
+| Aktywne | 23/25 (2 puste: Winner, OG#2) |
 
 | Coin | SHORT | LONG | Sygnał |
 |------|-------|------|--------|
-| BTC | $128M | $0 | **100% SHORT** (najsilniejszy) |
-| SOL | $54M | $2M | 96% SHORT |
-| ETH | $33M | $0 | 100% SHORT |
-| HYPE | $42.9M | $39.7M | **Contested** |
+| BTC | $153M | $0 | **100% SHORT** (najsilniejszy) |
+| ETH | $103M | $7M | **15x SHORT** (Fasanara $50M!) |
+| SOL | $40M | $2M | 21x SHORT |
+| HYPE | $64M | $40M | **Contested** |
+| FARTCOIN | $7.6M | $0.1M | 61x SHORT |
+| LIT | $4.8M | $0 | 100% SHORT |
+
+Top 5: Laurent Zeimes $36.8M (LONG!), Fasanara $27.6M, Wice-Generał $17.1M, Kapitan BTC $16.2M, Major $13.5M.
+Tylko 3/23 LONG: Laurent Zeimes (HYPE/ZEC/PAXG), ZEC Conviction, Porucznik ea66 (flip).
 
 ---
 
@@ -1141,6 +1146,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] October 2025 BTC Crash analysis — top 8 traders, $355M profits, Fasanara+Abraxas odkryte i dodane (DONE 21.02)
 - [x] Fasanara Capital dodany do VIP spy (tier1, $94.5M notional, London hedge fund) (DONE 21.02)
 - [x] Abraxas Capital dodany do VIP spy (tier2, $7.2M, +$37.9M Oct crash) (DONE 21.02)
+- [x] Bitcoin OG #2 dodany do VIP spy (tier1, watching for return, +$72.5M Oct crash) (DONE 21.02)
+- [x] VIP Intelligence updated — 25 portfeli, $528M notional, 5.2x SHORT (DONE 21.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1164,11 +1171,11 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Porty na serwerze**: 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8082=wolny
 - **Paginated fills**: `src/utils/paginated_fills.ts` — ZAWSZE używaj `fetchAllFillsByTime()` zamiast raw `userFillsByTime`. API zwraca max 2000 fills.
 - **Winner d7a678**: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed` — konto zamknięte od 31.01.2026 ($0, zero pozycji). W VIP spy tier1 "watching for return". +$5.5M total profit (SOL/BTC/ETH short). 6 powiązanych adresów z Nansen — zero aktywności na HL.
-- **VIP Intelligence (21.02)**: 24 portfele (po dodaniu Fasanara+Abraxas), $416.6M notional, 3.9x SHORT dominant. BTC $128M ALL SHORT (najsilniejszy sygnał). HYPE contested ($42.9M S vs $39.7M L). 4 puste konta.
+- **VIP Intelligence (21.02, updated)**: 25 portfeli (po dodaniu Bitcoin OG #2), $528.1M notional, **5.2x SHORT** ($443M S vs $86M L). BTC $153M ALL SHORT, ETH $103M (15x SHORT, Fasanara $50M!), HYPE contested ($64M S vs $40M L). Tylko 3/23 aktywnych portfeli LONG (Laurent Zeimes, ZEC Conviction, Porucznik ea66). 2 puste (Winner, OG#2).
 - **BTC SHORT Deep Dive (21.02)**: 10 portfeli shortuje BTC, 0 longuje. Łącznie 1,410 BTC ($96M), uPnL +$32M. Top entries: Kraken A $108K (-1% od ATH), Kapitan BTC $106K (-2.6%), Galaxy Digital $104K (-5%). Dwa klastry wejść: 1 paź (SOL2+fce0 tego samego dnia) i 12-13 paź (feec+Kapitan BTC dzień po dniu). Galaxy Digital jedyny kto redukuje (kupuje 37 BTC w lutym). 58bro.eth BTC SHORT $18.4M na 40x — liquidation $90,658.
 - **5 podwójnie zweryfikowanych (Smart HL + Consistent Winner)**: Major (3 poz, $30.6M), Pułkownik (0 poz, $5.5M cash, 331% ROI), Wice-Generał (45 poz, $30.8M, HYPE $16.6M underwater), 58bro.eth (7 poz, $31.4M, +$17.6M DeFi), Kapitan 99b1 (5 poz, $1.35M, mid-cap shorter)
 - **October 2025 BTC Crash ($126K→$103K, -18% w 11 dni)**: Top 8 traderów zarobiło $355M. Bitcoin OG (+$165M z 2 adresów), Abraxas Capital (+$37.9M), Galaxy Digital (+$31.4M), Fasanara Capital (+$30.8M), Generał (+$30.3M z 2 adresów), Silk Capital/Token Millionaire (+$29.9M), Wintermute (+$29.6M, market maker — pomijamy).
 - **Fasanara Capital** (`0x7fdafde5cfb5465924316eced2d3715494c517d1`): London hedge fund, tier1, +$30.8M Oct crash. Obecne: ETH SHORT $49M, BTC SHORT $25M, HYPE SHORT $14.6M = **$94.5M notional** (największy trackowany portfel). Dodany 21.02.
 - **Abraxas Capital** (`0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36`): tier2, +$37.9M Oct crash, wypłacił $144M na Binance. Obecne: XRP $3.6M + HYPE $3.4M SHORT = $7.2M. Dodany 21.02.
 - **Bitcoin OG pełny cykl**: +$165M na BTC shorts paź 2025 → zlikwidowany -$128M na ETH LONG sty 2026. Konto zamknięte.
-- **VIP Spy (po update 21.02)**: 24 VIPów (tier1=9, tier2=10, fund=5), 25 watched coins (dodano AVAX). vip_config.json zaktualizowany, vip-spy zrestartowany.
+- **VIP Spy (po update 21.02)**: 25 VIPów (tier1=10, tier2=10, fund=5), 25 watched coins (dodano AVAX). Bitcoin OG #2 dodany jako "watching for return". vip-spy zrestartowany.
