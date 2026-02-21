@@ -16,6 +16,26 @@ interface WhaleEntry {
   weight: number;
 }
 
+// ============================================================
+// VIP INTEL — separate deep tracking for key wallets
+// These wallets showed exceptional timing on short entries
+// ============================================================
+
+const VIP_WALLETS: Record<string, { name: string; note: string }> = {
+  '0x06cecfbac34101ae41c88ebc2450f8602b3d164b': {
+    name: 'Kraken A',
+    note: 'BTC short @$87K (Nov 25), SOL short @$133 (Jan 8)',
+  },
+  '0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a': {
+    name: 'Kraken B',
+    note: 'SOL short @$193 (Oct 28), XRP short @$2.60 (Oct 28) — best timing',
+  },
+  '0x880ac484a1743862989a441d6d867238c7aa311c': {
+    name: 'Token Millionaire',
+    note: 'XMR $10M + HYPE $9M shorts (Feb 7) — $20M+ in one evening',
+  },
+};
+
 const WHALES: Record<string, WhaleEntry> = {
   // === TIER 1: CONVICTION TRADERS ===
   '0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae': { name: 'Bitcoin OG', tier: 'CONVICTION', weight: 1.0 },
@@ -90,7 +110,16 @@ interface WalletResult {
   whale: WhaleEntry;
   equity: number;
   totalUPnl: number;
-  positions: { coin: string; side: 'LONG' | 'SHORT'; valueUsd: number; uPnl: number }[];
+  positions: { coin: string; side: 'LONG' | 'SHORT'; valueUsd: number; uPnl: number; entryPx: number; leverage: number }[];
+}
+
+interface VipResult {
+  address: string;
+  name: string;
+  note: string;
+  equity: number;
+  totalUPnl: number;
+  positions: { coin: string; side: 'LONG' | 'SHORT'; valueUsd: number; uPnl: number; entryPx: number; leverage: number; pnlPct: number }[];
 }
 
 interface CoinAggregate {
@@ -172,12 +201,15 @@ async function fetchAllWhales(info: hl.InfoClient): Promise<WalletResult[]> {
           // Calculate position value = |size| * entry price
           const entryPx = parseFloat(p.entryPx);
           const valueUsd = Math.abs(szi) * entryPx;
+          const leverage = p.leverage ? parseInt(p.leverage.value) : 0;
 
           positions.push({
             coin: p.coin,
             side: szi > 0 ? 'LONG' : 'SHORT',
             valueUsd,
             uPnl,
+            entryPx,
+            leverage,
           });
         }
 
@@ -202,6 +234,114 @@ async function fetchAllWhales(info: hl.InfoClient): Promise<WalletResult[]> {
   }
 
   return results;
+}
+
+// ============================================================
+// FETCH VIP WALLETS (separate deep tracking)
+// ============================================================
+
+async function fetchVipWallets(info: hl.InfoClient): Promise<VipResult[]> {
+  const entries = Object.entries(VIP_WALLETS);
+  const results: VipResult[] = [];
+
+  const settled = await Promise.allSettled(
+    entries.map(async ([address, vip]) => {
+      const user = address.toLowerCase() as `0x${string}`;
+      const state = await info.clearinghouseState({ user });
+
+      const equity = parseFloat(state.marginSummary.accountValue);
+      let totalUPnl = 0;
+      const positions: VipResult['positions'] = [];
+
+      for (const ap of state.assetPositions) {
+        const p = ap.position;
+        const szi = parseFloat(p.szi);
+        if (szi === 0) continue;
+
+        const uPnl = parseFloat(p.unrealizedPnl);
+        totalUPnl += uPnl;
+
+        const entryPx = parseFloat(p.entryPx);
+        const valueUsd = Math.abs(szi) * entryPx;
+        const leverage = p.leverage ? parseInt(p.leverage.value) : 0;
+        const pnlPct = valueUsd > 0 ? (uPnl / valueUsd) * 100 : 0;
+
+        positions.push({
+          coin: p.coin,
+          side: szi > 0 ? 'LONG' : 'SHORT',
+          valueUsd,
+          uPnl,
+          entryPx,
+          leverage,
+          pnlPct,
+        });
+      }
+
+      positions.sort((a, b) => b.valueUsd - a.valueUsd);
+
+      return { address, name: vip.name, note: vip.note, equity, totalUPnl, positions };
+    })
+  );
+
+  for (const result of settled) {
+    if (result.status === 'fulfilled') {
+      results.push(result.value);
+    }
+  }
+
+  return results;
+}
+
+// ============================================================
+// FORMAT VIP INTEL SECTION
+// ============================================================
+
+function formatVipSection(vips: VipResult[]): string[] {
+  const messages: string[] = [];
+  const DISCORD_LIMIT = 1950;
+
+  let current = '';
+
+  function flush() {
+    if (current.trim()) {
+      messages.push(current.trim());
+      current = '';
+    }
+  }
+
+  function append(text: string) {
+    if ((current + text).length > DISCORD_LIMIT) {
+      flush();
+    }
+    current += text;
+  }
+
+  append('**=== VIP INTEL (Deep Tracking) ===**\n');
+
+  for (const v of vips) {
+    if (v.equity < 100) {
+      append(`**${v.name}**: CLOSED\n`);
+      continue;
+    }
+
+    let header = `\n**${v.name}** — ${fmtUsdNoSign(v.equity)} equity | uPnl ${fmtUsd(v.totalUPnl)}\n`;
+    header += `> _${v.note}_\n`;
+    header += '```\n';
+    append(header);
+
+    for (const p of v.positions) {
+      const pnlSign = p.pnlPct >= 0 ? '+' : '';
+      const pnlStr = `${pnlSign}${p.pnlPct.toFixed(1)}%`;
+      const entryStr = p.entryPx < 0.01 ? `$${p.entryPx.toPrecision(4)}` : p.entryPx < 1 ? `$${p.entryPx.toFixed(4)}` : p.entryPx >= 1000 ? `$${p.entryPx.toFixed(0)}` : `$${p.entryPx.toFixed(2)}`;
+      const line = `${p.side.padEnd(5)} ${p.coin.padEnd(10)} ${fmtUsdNoSign(p.valueUsd).padStart(8)} @ ${entryStr.padStart(8)} ${p.leverage}x  ${fmtUsd(p.uPnl).padStart(8)} (${pnlStr})\n`;
+      append(line);
+    }
+
+    append('```\n');
+  }
+
+  flush();
+  return messages;
 }
 
 // ============================================================
@@ -348,18 +488,24 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`Fetching positions for ${Object.keys(WHALES).length} whale addresses...`);
+  console.log(`Fetching positions for ${Object.keys(WHALES).length} whale + ${Object.keys(VIP_WALLETS).length} VIP addresses...`);
 
   const transport = new hl.HttpTransport();
   const info = new hl.InfoClient({ transport });
 
-  const results = await fetchAllWhales(info);
+  const [results, vipResults] = await Promise.all([
+    fetchAllWhales(info),
+    fetchVipWallets(info),
+  ]);
+
   const activeCount = results.filter(r => r.equity > 100).length;
   const closedCount = results.length - activeCount;
 
-  console.log(`Fetched ${results.length} wallets (${activeCount} active, ${closedCount} closed/empty)`);
+  console.log(`Fetched ${results.length} wallets (${activeCount} active, ${closedCount} closed/empty) + ${vipResults.length} VIPs`);
 
-  const messages = formatReport(results);
+  const whaleMessages = formatReport(results);
+  const vipMessages = formatVipSection(vipResults);
+  const messages = [...whaleMessages, ...vipMessages];
 
   for (const msg of messages) {
     console.log(msg);
