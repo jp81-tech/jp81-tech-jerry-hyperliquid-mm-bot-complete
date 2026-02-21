@@ -795,6 +795,83 @@ https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 
 ---
 
+## 🔮 Shadow Trading — moduł kopiowania SM trades
+
+### Co to jest
+Shadow Trading = moduł "podglądania" i kopiowania ruchów elitarnych traderów (Smart Money) w real-time. Nazwa "shadow" = "cień" — bot chodzi jak cień za wielorybami.
+
+### Architektura
+
+```
+Zewnętrzny serwer (Nansen API)
+  → wystawia endpoint /api/latest_trades
+    → lista ostatnich trade'ów SM traderów (kto, co, buy/sell, ile $)
+      ↓
+mm-bot polluje co 30s (pollShadowTrades w mm_hl.ts)
+      ↓
+EliteTraderRegistry — rejestr 8 wielorybów z seed data
+  (Abraxas Capital, Pułkownik, Wice-Generał, Major, Generał...)
+  → sprawdza czy trade jest od znanego wieloryba
+      ↓
+SignalDetector — analizuje i generuje sygnały:
+  • WHALE_ENTRY  — wieloryb otwiera pozycję
+  • WHALE_EXIT   — wieloryb zamyka
+  • CONSENSUS_LONG/SHORT — 2+ wielorybów po tej samej stronie
+  • MOMENTUM_SHIFT — duża zmiana sentymentu
+      ↓
+ShadowTradingIntegration — dostosowuje grid MM:
+  • getGridBiasAdjustment() → przesuwa bias grida (+/- 30%)
+  • detectShadowContrarianConflict() → wykrywa gdy bot jest po złej stronie
+      ↓
+ShadowAlertIntegration → alerty do AlertManager/Telegram
+```
+
+### Pliki modułu
+
+| Plik | Rola |
+|------|------|
+| `src/shadow/types.ts` | Typy: EliteTrader, TradeSignal, ShadowConfig, NansenTrade |
+| `src/shadow/EliteTraderRegistry.ts` | Rejestr 8 wielorybów (seed data z Nansen leaderboard) |
+| `src/shadow/SignalDetector.ts` | Analiza trade'ów → generowanie sygnałów (WHALE_ENTRY/EXIT, CONSENSUS, MOMENTUM_SHIFT) |
+| `src/shadow/ShadowTradingIntegration.ts` | Główna klasa — grid bias adjustment, conflict detection |
+| `src/shadow/ShadowAlertIntegration.ts` | Łącznik z AlertManager — emituje alerty na silne sygnały |
+| `src/shadow/index.ts` | Eksporty |
+
+### Siła sygnałów
+
+| Strength | Pozycja | Traderzy | Bias grida |
+|----------|---------|----------|------------|
+| WEAK | <$100K | 1 | ±3% |
+| MODERATE | $100K-$500K | 1-2 | ±8% |
+| STRONG | $500K-$2M | 2-3 | ±15% |
+| EXTREME | >$2M | 4+ | ±25% |
+
+### Status: WYŁĄCZONY (od 21.02.2026)
+
+**Powód:** Brak backendu. Shadow trading wymaga zewnętrznego serwera który zbiera trade'y SM z Nansen API i wystawia je na `/api/latest_trades`. Ten serwer **nigdy nie został postawiony**.
+
+Domyślny URL (`http://127.0.0.1:8081/api/latest_trades`) trafiał w telemetry server → HTTP 404 spam co 30s.
+
+### Dlaczego nie jest potrzebny (na razie)
+
+Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które działają:
+
+| Komponent | Źródło danych | Typ | Status |
+|-----------|--------------|-----|--------|
+| **whale_tracker.py** | Snapshot pozycji SM co 15-30 min | Snapshot | Działa |
+| **vip_spy.py** | Real-time polling 4 wielorybów co 30s | Stream | Działa |
+| **SignalEngine** | Agregacja whale_tracker + Nansen alerts | Agregator | Działa |
+| **Shadow Trading** | Dedykowany feed SM trades z Nansen API | Stream | **Brak backendu** |
+
+### Jak włączyć w przyszłości
+
+1. Postawić serwer który fetchuje SM trades z Nansen API i wystawia `/api/latest_trades`
+2. Ustawić `SHADOW_TRADING_ENABLED=true` w `.env`
+3. Ustawić `SHADOW_TRADING_TRADES_URL=http://127.0.0.1:<port>/api/latest_trades`
+4. Restart mm-bot
+
+---
+
 ## Nansen Dashboard Alerts (Telegram)
 
 **Chat ID:** `-1003886465029` (Nansen alerts)
