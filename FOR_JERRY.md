@@ -981,6 +981,25 @@ Wsrod 5 portfeli z oboma etykietami Nansen (Smart HL Perps Trader + Consistent P
 
 **58bro.eth** ma BTC SHORT $18.4M na **40x** z liquidation **$90,658** — jesli BTC dotknie $91K, traci wszystko. Trzyma $17.6M w DeFi (Aave/Morpho) osobno. Smart capital allocation ale ryzykowny BTC short.
 
+### Pazdziernik 2025 — kto zarobil na krachu BTC $126K → $103K?
+
+Nansen ujawnil top 8 traderow ktorzy zarobili lacznie **$355M** w pierwszych 2 tygodniach pazdziernika 2025, gdy BTC spadl z $126K do $103K (-18% w 11 dni):
+
+| # | Trader | PnL (1-15 paz) | ROI | Typ |
+|---|--------|----------------|-----|-----|
+| 1 | **Bitcoin OG #1** | **+$93M** | **4,331%** | Whale — zlikwidowany pozniej |
+| 2 | **Bitcoin OG #2** | **+$72.5M** | 381% | Ten sam podmiot, 2. adres |
+| 3 | **Abraxas Capital** | +$37.9M | ~0% | Fundusz — wyplacil $144M do Binance |
+| 4 | **Galaxy Digital** | +$31.4M | 0.1% | Fundusz — wyplacil $92M |
+| 5 | **Fasanara Capital** | +$30.8M | ~0% | Londynski hedge fund |
+| 6 | **General (a31211)** | +$30.3M | ~0% | Nasz tier1 VIP |
+| 7 | **Silk Capital** | +$29.9M | ~0% | Trading bot |
+| 8 | **Wintermute** | +$29.6M | ~0% | Market maker |
+
+**Bitcoin OG** (2 adresy, "Unidentified Entity 1KAt6STt") zarobil lacznie **$165M** z ROI 4,331%. Potem probowal powtorzyc na ETH LONG — i zostal **zlikwidowany 31 stycznia 2026** tracac $128M. Klasyczny cykl: geniusz → overconfidence → katastrofa.
+
+**Kluczowe odkrycie:** Fasanara Capital ($94.5M notional!) i Abraxas Capital ($7.2M) nie byly w naszym VIP Spy — **dodane 21.02.2026**. Fasanara to teraz nasz **najwiekszy trackowany portfel** (wiekszy niz Wice-General i Galaxy Digital razem).
+
 ### Lekcja: co mozemy z tego wyciagnac?
 
 1. **Timing matters, ale size wazniejszy.** Kraken A shortuje 1% od ATH ale z $3M. Kapitan BTC shortuje 2.6% od ATH ale z $18.7M i zarabia 6x wiecej.

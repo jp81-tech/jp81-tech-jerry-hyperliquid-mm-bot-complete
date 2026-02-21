@@ -1015,7 +1015,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-de1844d feat: paginated fill fetcher utility (2000-fill API limit fix)
+23fff3b feat: add Fasanara Capital + Abraxas Capital to VIP spy
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1137,7 +1137,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Shadow trade feed HTTP 404 spam — wyłączony + rate-limited error logging (DONE 21.02)
 - [x] Paginated fills utility — `src/utils/paginated_fills.ts` + 6 plików zmodyfikowanych (DONE 21.02)
 - [x] Winner d7a678 analiza — 2220 fills, +$4.09M HL, +$5.5M total, konto zamknięte (DONE 21.02)
-- [x] VIP Intelligence Report — 22 portfeli, $416.6M notional, 3.9x SHORT (DONE 21.02)
+- [x] VIP Intelligence Report — 22→24 portfeli, $416.6M notional, 3.9x SHORT (DONE 21.02)
+- [x] October 2025 BTC Crash analysis — top 8 traders, $355M profits, Fasanara+Abraxas odkryte i dodane (DONE 21.02)
+- [x] Fasanara Capital dodany do VIP spy (tier1, $94.5M notional, London hedge fund) (DONE 21.02)
+- [x] Abraxas Capital dodany do VIP spy (tier2, $7.2M, +$37.9M Oct crash) (DONE 21.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1161,6 +1164,11 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Porty na serwerze**: 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8082=wolny
 - **Paginated fills**: `src/utils/paginated_fills.ts` — ZAWSZE używaj `fetchAllFillsByTime()` zamiast raw `userFillsByTime`. API zwraca max 2000 fills.
 - **Winner d7a678**: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed` — konto zamknięte od 31.01.2026 ($0, zero pozycji). W VIP spy tier1 "watching for return". +$5.5M total profit (SOL/BTC/ETH short). 6 powiązanych adresów z Nansen — zero aktywności na HL.
-- **VIP Intelligence (21.02)**: 22 portfele, $416.6M notional, 3.9x SHORT dominant. BTC $128M ALL SHORT (najsilniejszy sygnał). HYPE contested ($42.9M S vs $39.7M L). 4 puste konta.
+- **VIP Intelligence (21.02)**: 24 portfele (po dodaniu Fasanara+Abraxas), $416.6M notional, 3.9x SHORT dominant. BTC $128M ALL SHORT (najsilniejszy sygnał). HYPE contested ($42.9M S vs $39.7M L). 4 puste konta.
 - **BTC SHORT Deep Dive (21.02)**: 10 portfeli shortuje BTC, 0 longuje. Łącznie 1,410 BTC ($96M), uPnL +$32M. Top entries: Kraken A $108K (-1% od ATH), Kapitan BTC $106K (-2.6%), Galaxy Digital $104K (-5%). Dwa klastry wejść: 1 paź (SOL2+fce0 tego samego dnia) i 12-13 paź (feec+Kapitan BTC dzień po dniu). Galaxy Digital jedyny kto redukuje (kupuje 37 BTC w lutym). 58bro.eth BTC SHORT $18.4M na 40x — liquidation $90,658.
 - **5 podwójnie zweryfikowanych (Smart HL + Consistent Winner)**: Major (3 poz, $30.6M), Pułkownik (0 poz, $5.5M cash, 331% ROI), Wice-Generał (45 poz, $30.8M, HYPE $16.6M underwater), 58bro.eth (7 poz, $31.4M, +$17.6M DeFi), Kapitan 99b1 (5 poz, $1.35M, mid-cap shorter)
+- **October 2025 BTC Crash ($126K→$103K, -18% w 11 dni)**: Top 8 traderów zarobiło $355M. Bitcoin OG (+$165M z 2 adresów), Abraxas Capital (+$37.9M), Galaxy Digital (+$31.4M), Fasanara Capital (+$30.8M), Generał (+$30.3M z 2 adresów), Silk Capital/Token Millionaire (+$29.9M), Wintermute (+$29.6M, market maker — pomijamy).
+- **Fasanara Capital** (`0x7fdafde5cfb5465924316eced2d3715494c517d1`): London hedge fund, tier1, +$30.8M Oct crash. Obecne: ETH SHORT $49M, BTC SHORT $25M, HYPE SHORT $14.6M = **$94.5M notional** (największy trackowany portfel). Dodany 21.02.
+- **Abraxas Capital** (`0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36`): tier2, +$37.9M Oct crash, wypłacił $144M na Binance. Obecne: XRP $3.6M + HYPE $3.4M SHORT = $7.2M. Dodany 21.02.
+- **Bitcoin OG pełny cykl**: +$165M na BTC shorts paź 2025 → zlikwidowany -$128M na ETH LONG sty 2026. Konto zamknięte.
+- **VIP Spy (po update 21.02)**: 24 VIPów (tier1=9, tier2=10, fund=5), 25 watched coins (dodano AVAX). vip_config.json zaktualizowany, vip-spy zrestartowany.
