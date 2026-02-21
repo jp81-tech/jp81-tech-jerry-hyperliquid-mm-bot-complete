@@ -16,7 +16,9 @@
 8. [Bugi, katastrofy i lekcje](#bugi-katastrofy-i-lekcje)
 9. [Jak mysla dobrzy inzynierowie](#jak-mysla-dobrzy-inzynierowie)
 10. [Daily Whale Report — Rentgen portfeli wielorybow](#daily-whale-report--rentgen-portfeli-wielorybow)
-11. [Slowniczek](#slowniczek)
+11. [Case Study: Winner d7a678](#case-study-winner-d7a678--anatomia-idealnego-tradea)
+12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026)
+13. [Slowniczek](#slowniczek)
 
 ---
 
@@ -436,7 +438,30 @@ Po zamianie VIRTUAL na HYPE w portfelu, 10+ miejsc w kodzie nadal mialo "VIRTUAL
 
 **Lekcja:** Hardcoded token listy w 13 miejscach to proszenie sie o buga. Powinny byc w jednym configu. Ale — w tradingowym bocie gdzie kazda zmiana moze kosztowac $$, czasem lepiej miec explicit listy ktore latwo audytowac niz sprytna abstrakcja ktora moze zrobic cos niespodziewanego.
 
-### Bug #9: Nansen Kill Switch falszywy alarm (25.01)
+### Bug #9: 2000-fill API limit — gubienie danych (21.02)
+
+Hyperliquid API `userFillsByTime` zwraca **maksymalnie 2000 fills** na request (najstarsze w oknie). Przez miesiac bot i skrypty analityczne nie paginowaly — po prostu braly co API dalo i szly dalej.
+
+**Jak to odkrylismy:** Analizowalismy wieloryba d7a678 ("Winner"). API zwrocilo dokladnie 2000 fills (z pazdziernika do grudnia 2025) i pominelo nowsze fills ze stycznia 2026. Myslismy ze zarobil +$1.15M (3 tokeny) — w rzeczywistosci zarobil +$4.09M. **60% danych bylo ukryte.**
+
+**Skutki:**
+- `syncPnLFromHyperliquid` w mm_hl.ts — PnL tracking mogl gubic fills przy aktywnym tradingu
+- Skrypty analityczne (perfill_hist, perfill_bypair) — niekompletne dane
+- Skrypt hourly-discord-report — raport mogl byc uciety
+
+**Fix:** Stworzylismy `src/utils/paginated_fills.ts` — utility z automatyczna paginacja:
+1. Fetch fills z `startTime` do `endTime`
+2. Jesli 2000 fills (limit) → przesuwa `startTime` za ostatni fill i fetchuje kolejna strone
+3. Deduplikacja po `tid` (unique transaction ID)
+4. Powtarza do max 10 stron (20K fills)
+
+**Weryfikacja:** d7a678 zwrocil 2220 fills w 2 stronach. Bez paginacji mielibysmy 2000 i brak najnowszych 220.
+
+**Lekcja:** Kazde API ma limity. Jesli nie wiesz jaki jest limit — sprawdz dokumentacje. Jesli dokumentacji nie ma (Hyperliquid) — testuj z duzymi zbiorami danych. Magiczna liczba 2000 powinna byc red flag ("czemu dokladnie okragla liczba?"). **Zawsze sprawdzaj czy wynik API nie jest rowny limitowi.**
+
+To jak czytanie 200-stronicowej ksiazki i nie zauwazenie ze brakuje stron 201-300. Wydaje sie kompletna, ale nie jest.
+
+### Bug #10: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
 
@@ -747,6 +772,115 @@ pm2 start scripts/daily-whale-report.ts \
 
 ---
 
+## Case Study: Winner d7a678 — anatomia idealnego trade'a
+
+### Kim jest Winner?
+
+Adres: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed`
+
+Jeden z najlepszych traderow na Hyperliquid w Q4 2024 / Q1 2025. Nansen labeluje go jako "Smart HL Perps Trader" i "Consistent Perps Winner". Zarobil **+$4.09M** na Hyperliquid i **~$5.5M lacznie** (wliczajac Deribit i Venus Protocol) w ciagu 4 miesiecy.
+
+### Co zrobil (timeline)
+
+```
+6 pazdziernika 2025  — Pierwsza transakcja na Hyperliquid
+Pazdziernik-Grudzien — Buduje shortow na SOL, BTC, ETH (shortuje z topu!)
+Styczen 2026         — Kolekcjonuje zyski, zamyka pozycje
+31 stycznia 2026     — Ostatnia transakcja. Konto zamkniete. $0.
+```
+
+### Wyniki per token
+
+| Token | PnL z fills | Strategia |
+|-------|------------|-----------|
+| **SOL** | **+$3.2M** | SHORT od topu, glowna pozycja |
+| **BTC** | **+$487K** | SHORT, mniejsza pozycja |
+| **ETH** | **+$397K** | SHORT, mniejsza pozycja |
+| **Lacznie HL** | **+$4.09M** | 2220 fills w 4 miesiace |
+
+Dodatkowo:
+- **Deribit**: +$969K (opcje — prawdopodobnie hedge albo dodatkowe shorty)
+- **Venus Protocol**: ~$900 (yield farming na stablecoiny — parkowal gotowke w DeFi)
+- **Lacznie**: **~$5.5M**
+
+### Dlaczego jest to wazne dla nauki
+
+#### 1. Koncentracja na jednym trade
+
+Winner nie tradowal 20 tokenow. Mial 3 tokeny i **78% zysku z jednego** (SOL). To potwierdzenie zasady: lepiej miec jedna swietna teze niz 10 srednich.
+
+#### 2. Wejscie z topu, wyjscie z dolu
+
+Shortowal SOL/BTC/ETH od pazdziernikowych szczytow i trzymal do stycznia. To znaczy ze mial **teze makro** (krypto jest za drogie) i ja realizowal z cierpliwoscia. Nie zamykal po 5% — trzymal do 50%+.
+
+#### 3. Multi-venue strategy
+
+Nie ograniczal sie do jednej gieldy:
+- **Hyperliquid** — glowne pozycje perp
+- **Deribit** — opcje (hedge? dodatkowe shorty?)
+- **Venus Protocol** — yield na gotowce (stablecoiny zarabiaja 5-8% APY)
+
+#### 4. Clean exit
+
+31 stycznia zamknal WSZYSTKO i odsunol krzeslo od stolu. Konto = $0. Zadnych pozycji. To cecha profesjonalisty — wie kiedy wyjsc. Nie "jeszcze troche", nie "moze jeszcze spadnie".
+
+#### 5. Powiazane adresy — nic na Hyperliquid
+
+Nansen znalazl 6 powiazanych adresow (Gnosis Safe, counterparties). Sprawdzilismy je wszystkie na Hyperliquid — **zero fills, zero equity**. Winner dziala z jednego adresu na HL. Nie rozklada ryzyka na wiele portfeli.
+
+### Co to znaczy dla naszego bota
+
+Winner jest w naszym VIP Spy jako tier1 z nota "watching for return". Jesli kiedykolwiek wroci na Hyperliquid i otworzy pozycje — dostaniemy alert w ciagu 30 sekund.
+
+Jego strategia potwierdza nasza doktryne: **podazaj za SM, trzymaj do TP, nie zamykaj na szumie.** Winner zrobil dokladnie to — i zarobil $5.5M.
+
+---
+
+## VIP Intelligence Report — Snapshot 21 lutego 2026
+
+### Podsumowanie 22 portfeli
+
+Na 21 lutego 2026 monitorujemy 22 portfeli VIP (tier1, tier2, fund). Oto agregat:
+
+| Metryka | Wartosc |
+|---------|---------|
+| **Laczne equity** | $151.7M |
+| **Laczny notional** | $416.6M |
+| **Laczny uPnL** | +$104.3M |
+| **Dominacja SHORT** | **3.9x** (SHORT $330M vs LONG $86M) |
+| **Aktywne konta** | 18/22 (4 puste) |
+
+### Top sygnaly per coin
+
+| Coin | SHORT | LONG | Dominacja | Sygnal |
+|------|-------|------|-----------|--------|
+| **BTC** | $128M | $0 | **100% SHORT** | Najsilniejszy sygnal |
+| **SOL** | $54M | $2M | 96% SHORT | Bardzo silny |
+| **ETH** | $33M | $0 | 100% SHORT | Silny |
+| **HYPE** | $42.9M | $39.7M | **Contested** | Wieloryby sie nie zgadzaja! |
+| **FARTCOIN** | $7M | $0 | 100% SHORT | Silny ale maly |
+
+### Kluczowe wnioski
+
+1. **BTC $128M ALL SHORT** — najsilniejszy sygnal w calym raporcie. ZERO longow. Wszystkie wieloryby shortuja BTC.
+
+2. **HYPE contested** — jedyny token gdzie wieloryby sa po obu stronach. $42.9M SHORT vs $39.7M LONG. To jest "pole bitwy" — uwazaj.
+
+3. **4 puste konta**: Pulkownik (gotowka $5.5M, zero pozycji), Winner d7a678 (zamkniety), Hikari (zamkniety), BTC/LIT Trader (zamkniety).
+
+4. **Mega-bearish** — wieloryby jako grupa sa 3.9x bardziej SHORT niz LONG. Lacznie +$104M niezrealizowanego zysku. Zarabiaja na spadkach.
+
+### Lekcja: VIP Intelligence jako edge
+
+Ten raport to nasz "satelitarny obraz pola bitwy". W ciagu 60 sekund wiemy:
+- **Co robia najlepsi** (kierunek)
+- **Ile wkladaja** (przekonanie)
+- **Czy zarabiaja** (walidacja)
+
+Zaden indywidualny trader nie ma dostepu do takich danych. Nansen + Hyperliquid API + nasze narzedzia daja nam **asymetryczny edge** — widzimy wiecej niz 99% rynku.
+
+---
+
 ## Podsumowanie
 
 Ten bot to nie jest "kup tanio, sprzedaj drogo". To jest **system wywiadowczy** ktory:
@@ -761,5 +895,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 21 lutego 2026 (dodano Daily Whale Report)*
+*Ostatnia aktualizacja: 21 lutego 2026 (dodano Winner d7a678 case study, VIP Intelligence Report, paginated fills bug)*
 *Wygenerowane przez Claude Code*

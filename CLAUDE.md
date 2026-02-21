@@ -28,6 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
+- `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
 
 **Kluczowe pliki danych:**
@@ -41,6 +42,58 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 ---
 
 ## Zmiany 21 lutego 2026
+
+### 20. Paginated Fills Utility + Winner d7a678 Analysis (21.02)
+
+**Problem:** Hyperliquid API `userFillsByTime` zwraca max 2000 fills per request. 14 miejsc w codebase nie obsługiwało paginacji — gubiły dane przy aktywnym tradingu.
+
+**Odkrycie:** Analiza wieloryba d7a678 ("Winner") ujawniła problem — API zwróciło 2000 fills (paź-gru 2025) a ukryło nowsze (sty 2026). Myśleliśmy +$1.15M, w rzeczywistości +$4.09M.
+
+**Nowy plik:** `src/utils/paginated_fills.ts`
+- `fetchAllFillsByTime(user, startTime, endTime?, opts?)` — paginacja forward, deduplikacja po tid
+- Max 10 stron (20K fills), sort ascending po time
+
+**Zmodyfikowane pliki (6):**
+
+| Plik | Zmiana |
+|------|--------|
+| `src/utils/paginated_fills.ts` | NOWY — utility z paginacją |
+| `src/mm_hl.ts` (L894) | `syncPnLFromHyperliquid` → `fetchAllFillsByTime` |
+| `src/mm_hl.ts` (L3352) | `getRecentFills` → `fetchAllFillsByTime` |
+| `scripts/hourly-discord-report.ts` | `info.userFillsByTime` → `fetchAllFillsByTime` |
+| `scripts/reset_daily_pnl_anchor.ts` | `infoClient.userFills` → `fetchAllFillsByTime` |
+| `scripts/perfill_hist.ts` + `perfill_bypair.ts` | `info.userFills` → `fetchAllFillsByTime` |
+
+**Commit:** `de1844d` — deployed to server, mm-bot restarted
+
+**Winner d7a678 — pełna analiza:**
+- Adres: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed`
+- Nansen: "Smart HL Perps Trader", "Consistent Perps Winner"
+- Timeline: 6 paź 2025 → 31 sty 2026 (konto zamknięte, $0)
+- PnL: SOL +$3.2M, BTC +$487K, ETH +$397K = **+$4.09M** (HL) + $969K Deribit + $900 Venus = **~$5.5M total**
+- 2220 fills w 2 stronach (potwierdzenie paginacji!)
+- 6 powiązanych adresów z Nansen — ZERO fills na HL
+- Wszystkie 6 "similar traders" z Nansen już trackowane w VIP spy
+- Status: w `vip_config.json` jako tier1, "watching for return"
+
+**VIP Intelligence Snapshot (21.02.2026, 22 portfele):**
+
+| Metryka | Wartość |
+|---------|---------|
+| Equity | $151.7M |
+| Notional | $416.6M |
+| uPnL | +$104.3M |
+| SHORT dominacja | 3.9x ($330M SHORT vs $86M LONG) |
+| Aktywne | 18/22 (4 puste) |
+
+| Coin | SHORT | LONG | Sygnał |
+|------|-------|------|--------|
+| BTC | $128M | $0 | **100% SHORT** (najsilniejszy) |
+| SOL | $54M | $2M | 96% SHORT |
+| ETH | $33M | $0 | 100% SHORT |
+| HYPE | $42.9M | $39.7M | **Contested** |
+
+---
 
 ### 19. Fix: Shadow Trade Feed HTTP 404 spam (21.02)
 **Problem:** Logi bota spamowane co 30 sekund: `🔮 [SHADOW] Trade feed error: HTTP 404`
@@ -962,7 +1015,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-83420a4 fix: rate-limit shadow trade feed error logs + disable on server
+de1844d feat: paginated fill fetcher utility (2000-fill API limit fix)
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1082,6 +1135,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Fix fałszywych alarmów Nansen Kill Switch dla FARTCOIN (DONE 25.01)
 - [x] GENERALS_OVERRIDE - USUNIĘTY 03.02 (wieloryby flipnęły LONG na HYPE, LIT/FARTCOIN nie potrzebują override)
 - [x] Shadow trade feed HTTP 404 spam — wyłączony + rate-limited error logging (DONE 21.02)
+- [x] Paginated fills utility — `src/utils/paginated_fills.ts` + 6 plików zmodyfikowanych (DONE 21.02)
+- [x] Winner d7a678 analiza — 2220 fills, +$4.09M HL, +$5.5M total, konto zamknięte (DONE 21.02)
+- [x] VIP Intelligence Report — 22 portfeli, $416.6M notional, 3.9x SHORT (DONE 21.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1103,3 +1159,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Hyperliquid fills bez adresów**: Fills dają tylko oid/coin/side/px/sz/time/fee — toksyczność musi być wykrywana z wzorców (VPIN, adverse selection, rapid fills, sweeps)
 - **Shadow trading**: Wyłączone (`SHADOW_TRADING_ENABLED=false`). Nie ma serwera shadow trades. Domyślny URL trafia w telemetry (port 8081). Gdyby trzeba było włączyć — najpierw postawić serwer i ustawić `SHADOW_TRADING_TRADES_URL`
 - **Porty na serwerze**: 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8082=wolny
+- **Paginated fills**: `src/utils/paginated_fills.ts` — ZAWSZE używaj `fetchAllFillsByTime()` zamiast raw `userFillsByTime`. API zwraca max 2000 fills.
+- **Winner d7a678**: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed` — konto zamknięte od 31.01.2026 ($0, zero pozycji). W VIP spy tier1 "watching for return". +$5.5M total profit (SOL/BTC/ETH short). 6 powiązanych adresów z Nansen — zero aktywności na HL.
+- **VIP Intelligence (21.02)**: 22 portfele, $416.6M notional, 3.9x SHORT dominant. BTC $128M ALL SHORT (najsilniejszy sygnał). HYPE contested ($42.9M S vs $39.7M L). 4 puste konta.
