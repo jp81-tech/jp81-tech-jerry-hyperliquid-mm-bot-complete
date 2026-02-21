@@ -18,7 +18,8 @@
 10. [Daily Whale Report — Rentgen portfeli wielorybow](#daily-whale-report--rentgen-portfeli-wielorybow)
 11. [Case Study: Winner d7a678](#case-study-winner-d7a678--anatomia-idealnego-tradea)
 12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026)
-13. [Slowniczek](#slowniczek)
+13. [BTC SHORT Deep Dive](#btc-short-deep-dive--kto-shortowal-od-topu-i-mogl-cos-wiedziec)
+14. [Slowniczek](#slowniczek)
 
 ---
 
@@ -881,6 +882,119 @@ Zaden indywidualny trader nie ma dostepu do takich danych. Nansen + Hyperliquid 
 
 ---
 
+## BTC SHORT Deep Dive — Kto shortowal od topu i mogl cos wiedziec?
+
+### Kontekst
+
+BTC ATH: ~$109,500 (styczen 2025). BTC teraz: ~$68,300 (luty 2026). Spadek -37.6%.
+
+Wsrod 22 monitorowanych portfeli VIP, **10 aktywnie shortuje BTC**. Zero longuje. Lacznie **1,410 BTC ($96M) w shortach** z niezrealizowanym zyskiem **+$32M**.
+
+Pytanie: czy to zbieznosc, czy ktos wiedzial wiecej?
+
+### Top 10 BTC Shorterow — ranking po entry price
+
+| # | Trader | Tier | Entry | Od ATH | Size | Value | uPnL | Lev |
+|---|--------|------|-------|--------|------|-------|------|-----|
+| 1 | **Kraken A** | tier1 | **$108,415** | **-1.0%** | 44 BTC | $3.0M | +$1.8M | 20x |
+| 2 | **Kapitan BTC** | tier2 | **$106,677** | **-2.6%** | 274 BTC | $18.7M | +$10.5M | 20x |
+| 3 | **Galaxy Digital** | fund | **$103,994** | **-5.0%** | 123 BTC | $8.4M | +$4.4M | 20x |
+| 4 | **Wice-General** | tier1 | **$101,885** | **-7.0%** | 97 BTC | $6.6M | +$3.3M | 20x |
+| 5 | **Kapitan feec** | tier2 | **$101,600** | **-7.2%** | 215 BTC | $14.7M | +$7.2M | 16x |
+| 6 | Porucznik SOL2 | tier2 | $94,282 | -13.9% | 25 BTC | $1.7M | +$645K | 20x |
+| 7 | Kapitan fce0 | tier2 | $90,472 | -17.4% | 130 BTC | $8.9M | +$2.9M | 20x |
+| 8 | Major | tier1 | $75,273 | -31.3% | 200 BTC | $13.7M | +$1.4M | 40x |
+| 9 | 58bro.eth | tier2 | $69,034 | -37.0% | 270 BTC | $18.4M | +$202K | 40x |
+| 10 | Porucznik SOL3 | tier2 | $66,976 | -38.8% | 31 BTC | $2.1M | -$41K | 20x |
+
+### Dwie fale wejsc
+
+#### Fala 1: "Prescient Shorters" — pazdziernik 2025 (BTC $110-117K)
+
+6 portfeli otwieralo BTC SHORT w ciagu 2 tygodni gdy BTC byl blisko ATH:
+
+| Kto | Kiedy | Cena |
+|-----|-------|------|
+| Porucznik SOL2 | 1 paz | $117,251 (shortuje NAJWYZEJ!) |
+| Kapitan fce0 | 1 paz | $113,896 (tego samego dnia) |
+| Kapitan feec | 12 paz | $110,616 |
+| Kapitan BTC | 13 paz | $114,963 (dzien po feec) |
+| 58bro.eth | 31 paz | $109,500 |
+| Kapitan feec | do 16 lis | $94,341 (dodaje po drodze w dol) |
+
+**Kraken A** i **Wice-General** weszli PRZED pazdziernikiem — ich fills nie sa widoczne w oknie od Oct 1. Najwczesiejsi "prescient" shorterzy.
+
+#### Fala 2: "Confirmation Adders" — luty 2026 (BTC $68-75K)
+
+| Kto | Kiedy | Cena | Ruch |
+|-----|-------|------|------|
+| Galaxy Digital | 3-4 lut | $73-76K | **KUPUJE** — redukuje short! |
+| Major | 4-5 lut | $71-73K | Nowy short, 40x |
+| Porucznik SOL3 | 6-10 lut | $68-70K | Nowy short, 20x |
+
+Galaxy Digital jedyny ktory aktywnie realizuje zyski. Reszta trzyma albo powieksza.
+
+### Klasterowanie wejsc — przypadek czy koordynacja?
+
+```
+1 pazdziernika:    SOL2 + fce0           — 2 portfele tego samego dnia
+12-13 pazdziernika: feec + Kapitan BTC   — 2 portfele dzien po dniu
+31 pazdziernika:    58bro.eth            — samotny
+4-6 lutego:         Major + Galaxy + SOL3 — 3 portfele w 3 dni
+```
+
+Dwa klastry sa szczegolnie ciekawe:
+- **1 pazdziernika** — 2 niezalezne portfele shortuja BTC tego samego dnia
+- **12-13 pazdziernika** — kolejne 2 portfele shortuja dzien po dniu
+
+Mozliwe wyjasnienia:
+1. **Zbieznosc** — wszyscy czytali te same dane makro (FED, treasury yields, raporty on-chain)
+2. **Koordynacja** — znaja sie, dzielenia sie tezami inwestycyjnymi
+3. **Insider info** — ktos wiedzial ze BTC top jest blisko (np. duza sprzedaz OTC, whale outflow z gield)
+
+### Kto "wiedzial najwiecej"? — Scoring
+
+| # | Trader | Timing | Size | Conviction | Risk Mgmt | Total |
+|---|--------|--------|------|------------|-----------|-------|
+| 1 | **Kapitan BTC** | 9/10 | 9/10 | 10/10 | 7/10 | **35** |
+| 2 | **Kapitan feec** | 8/10 | 8/10 | 10/10 | 8/10 | **34** |
+| 3 | **Wice-General** | 8/10 | 4/10 | 10/10 | 9/10 | **31** |
+| 4 | **Kraken A** | 10/10 | 3/10 | 9/10 | 8/10 | **30** |
+| 5 | **Galaxy Digital** | 7/10 | 6/10 | 7/10 | 10/10 | **30** |
+
+**Kapitan BTC wygrywa** — entry 2.6% od ATH, $18.7M pozycji, +$10.5M uPnL, i nadal trzyma.
+
+### 5 podwojnie zweryfikowanych — analiza stylow
+
+Wsrod 5 portfeli z oboma etykietami Nansen (Smart HL Perps Trader + Consistent Perps Winner) wyrozniamy dwa style:
+
+| Styl | Kto | Pozycje | Podejscie |
+|------|-----|---------|-----------|
+| **Koncentracja** | Major (3 poz), 58bro (7 poz) | Duze rozmiary, duze dzwignie | "Kilka strzalow, kazdy celny" |
+| **Dywersyfikacja** | Wice-General (45 poz!) | Male rozmiary, szerokie pokrycie | "Short everything, cos spadnie" |
+| **Cash** | Pulkownik (0 poz, $5.5M gotowki) | Zero pozycji | "Wiem kiedy nie grac" |
+| **Mid-cap** | Kapitan 99b1 (5 poz, $339K) | Unika BTC/SOL, shortuje LTC/BCH/HYPE | "Szukam slabszych celow" |
+
+**Pulkownik** ma najlepszy ROI z calej piatki (331%) i jedyny jest 100% w gotowce. Lekcja: najlepszy trade to czasem BRAK trade'a.
+
+**Wice-General** ma 45 shortow, z czego **HYPE $16.6M jest underwater (-$547K)** — jego jedyny duzy problem. HYPE to pole minowe.
+
+**58bro.eth** ma BTC SHORT $18.4M na **40x** z liquidation **$90,658** — jesli BTC dotknie $91K, traci wszystko. Trzyma $17.6M w DeFi (Aave/Morpho) osobno. Smart capital allocation ale ryzykowny BTC short.
+
+### Lekcja: co mozemy z tego wyciagnac?
+
+1. **Timing matters, ale size wazniejszy.** Kraken A shortuje 1% od ATH ale z $3M. Kapitan BTC shortuje 2.6% od ATH ale z $18.7M i zarabia 6x wiecej.
+
+2. **Klasterowanie wejsc to sygnal.** Gdy 6 niezaleznych portfeli shortuje w 2-tygodniowym oknie — to nie przypadek. Nasz bot powinien reagowac na klastry, nie na pojedyncze ruchy.
+
+3. **Diamond Hands dziala — ale z ryzykiem.** Ci traderzy trzymaja shorty 4+ miesiecy. Funding kosztuje (~$6M lacznie) ale uPnL ($32M) wielokrotnie to rekompensuje.
+
+4. **Galaxy Digital jedyny kto redukuje** — jako fund maja lepszy risk management. Realizacja zysku to tez umiejetnosc, nie tylko wchodzenie.
+
+5. **Zero BTC LONG wsrod top traderow.** Absolutny consensus. Gdy najlepsi nie widza powodu zeby longowac — nie longuj.
+
+---
+
 ## Podsumowanie
 
 Ten bot to nie jest "kup tanio, sprzedaj drogo". To jest **system wywiadowczy** ktory:
@@ -895,5 +1009,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 21 lutego 2026 (dodano Winner d7a678 case study, VIP Intelligence Report, paginated fills bug)*
+*Ostatnia aktualizacja: 21 lutego 2026 (dodano BTC SHORT Deep Dive, Winner d7a678 case study, VIP Intelligence Report, paginated fills bug)*
 *Wygenerowane przez Claude Code*
