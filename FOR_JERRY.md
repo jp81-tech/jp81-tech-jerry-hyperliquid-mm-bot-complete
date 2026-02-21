@@ -17,7 +17,7 @@
 9. [Jak mysla dobrzy inzynierowie](#jak-mysla-dobrzy-inzynierowie)
 10. [Daily Whale Report — Rentgen portfeli wielorybow](#daily-whale-report--rentgen-portfeli-wielorybow)
 11. [Case Study: Winner d7a678](#case-study-winner-d7a678--anatomia-idealnego-tradea)
-12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026)
+12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026) *(updated: 25 VIPs)*
 13. [BTC SHORT Deep Dive](#btc-short-deep-dive--kto-shortowal-od-topu-i-mogl-cos-wiedziec)
 14. [Slowniczek](#slowniczek)
 
@@ -839,37 +839,69 @@ Jego strategia potwierdza nasza doktryne: **podazaj za SM, trzymaj do TP, nie za
 
 ## VIP Intelligence Report — Snapshot 21 lutego 2026
 
-### Podsumowanie 22 portfeli
+> **Update:** Raport aktualizowany tego samego dnia — po dodaniu Fasanara Capital, Abraxas Capital i Bitcoin OG #2 mamy teraz 25 portfeli.
 
-Na 21 lutego 2026 monitorujemy 22 portfeli VIP (tier1, tier2, fund). Oto agregat:
+### Podsumowanie 25 portfeli
 
-| Metryka | Wartosc |
-|---------|---------|
-| **Laczne equity** | $151.7M |
-| **Laczny notional** | $416.6M |
-| **Laczny uPnL** | +$104.3M |
-| **Dominacja SHORT** | **3.9x** (SHORT $330M vs LONG $86M) |
-| **Aktywne konta** | 18/22 (4 puste) |
+| Metryka | Poprzednio (22 VIP) | Teraz (25 VIP) | Zmiana |
+|---------|---------------------|----------------|--------|
+| **Laczne equity** | $151.7M | **$187.1M** | +$35.4M |
+| **Laczny notional** | $416.6M | **$528.1M** | +$111.5M |
+| **Laczny uPnL** | +$104.3M | **+$114.3M** | +$10M |
+| **Dominacja SHORT** | 3.9x | **5.2x** | Silniejsza! |
+| **Aktywne konta** | 18/22 | **23/25** | |
+
+### Top 5 portfeli (po equity)
+
+| # | Nazwa | Equity | Notional | uPnL | Styl |
+|---|-------|--------|----------|------|------|
+| 1 | **Laurent Zeimes** | $36.8M | $56.4M | +$6.5M | LONG (HYPE $37.6M, ZEC $9.4M) — jedyny duzy bull |
+| 2 | **Fasanara Capital** | $27.6M | $101.3M | +$6.9M | Short everything (23 poz), London hedge fund |
+| 3 | **Wice-General** | $17.1M | $59.2M | +$28.2M | Short everything (45 poz!), najlepszy uPnL |
+| 4 | **Kapitan BTC** | $16.2M | $35.1M | +$13.0M | BTC SHORT $29.2M — koncentracja |
+| 5 | **Major** | $13.5M | $38.8M | +$8.2M | SOL+BTC SHORT — macro shorter |
 
 ### Top sygnaly per coin
 
 | Coin | SHORT | LONG | Dominacja | Sygnal |
 |------|-------|------|-----------|--------|
-| **BTC** | $128M | $0 | **100% SHORT** | Najsilniejszy sygnal |
-| **SOL** | $54M | $2M | 96% SHORT | Bardzo silny |
-| **ETH** | $33M | $0 | 100% SHORT | Silny |
-| **HYPE** | $42.9M | $39.7M | **Contested** | Wieloryby sie nie zgadzaja! |
-| **FARTCOIN** | $7M | $0 | 100% SHORT | Silny ale maly |
+| **BTC** | $153M | $0 | **100% SHORT** | Najsilniejszy — wzrosl z $128M! |
+| **ETH** | $103M | $7M | **15x SHORT** | Wzrosl z $33M (Fasanara $50M!) |
+| **SOL** | $40M | $2M | **21x SHORT** | Stabilny |
+| **HYPE** | $64M | $40M | **Contested** | Nadal pole bitwy |
+| **XMR** | $10M | $0 | 100% SHORT | Token Millionaire |
+| **FARTCOIN** | $7.6M | $0.1M | 61x SHORT | Silny |
+| **ZEC** | $3M | $18M | **6x LONG** | Jedyny wyrazny LONG! |
+| **LIT** | $4.8M | $0 | 100% SHORT | General shortuje |
+
+### Kto jest LONG? (tylko 3 z 23 aktywnych)
+
+Interesujace pytanie: kto plynie pod prad?
+
+| Trader | Co longuje | Notional | Dlaczego? |
+|--------|-----------|----------|-----------|
+| **Laurent Zeimes** | HYPE $37.6M, ZEC $9.4M, PAXG $8M | $54.9M LONG | Fund — jedyny duzy bull |
+| **ZEC Conviction** | ZEC $8.3M, HYPE $2.1M | $10.4M LONG | Fund — ZEC thesis |
+| **Porucznik ea66** | ETH $3.9M, XPL $2.3M | $11.6M LONG | Flipnal na LONG! |
+
+Reszta (20/23 aktywnych) jest **dominujaco SHORT**.
+
+### 2 puste konta (watching for return)
+
+- **Winner d7a678** — +$4.6M net, konto zamkniete od 31 stycznia 2026
+- **Bitcoin OG #2** — +$72.5M na Oct crash, ten sam podmiot co OG #1 (zlikwidowany)
 
 ### Kluczowe wnioski
 
-1. **BTC $128M ALL SHORT** — najsilniejszy sygnal w calym raporcie. ZERO longow. Wszystkie wieloryby shortuja BTC.
+1. **Consensus bearish SILNIEJSZY niz tydzien temu** — SHORT/LONG ratio wzrosl z 3.9x do 5.2x. Dodanie Fasanary ($101M notional, 99% SHORT) drastycznie przesunelo bilans.
 
-2. **HYPE contested** — jedyny token gdzie wieloryby sa po obu stronach. $42.9M SHORT vs $39.7M LONG. To jest "pole bitwy" — uwazaj.
+2. **BTC $153M ALL SHORT** — najsilniejszy sygnal. Zero longow. Fasanara dodala $25M do puli.
 
-3. **4 puste konta**: Pulkownik (gotowka $5.5M, zero pozycji), Winner d7a678 (zamkniety), Hikari (zamkniety), BTC/LIT Trader (zamkniety).
+3. **ETH skoczylo z $33M do $103M SHORT** — Fasanara ma ETH SHORT $50M (15x leverage). To teraz drugi najsilniejszy sygnal po BTC.
 
-4. **Mega-bearish** — wieloryby jako grupa sa 3.9x bardziej SHORT niz LONG. Lacznie +$104M niezrealizowanego zysku. Zarabiaja na spadkach.
+4. **Tylko 3 portfele sa LONG** — i 2 z nich to fundy z tezami na konkretne tokeny (ZEC, HYPE). Jeden (ea66) to flip — wczesniej byl SHORT.
+
+5. **Fasanara Capital to game changer** — $101M notional na $27.6M equity, 23 pozycje, prawie wszystko SHORT. To profesjonalny hedge fund ktory robi dokladnie to samo co nasi SM traderzy ale na 3x wiekszej skali.
 
 ### Lekcja: VIP Intelligence jako edge
 
@@ -1028,5 +1060,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 21 lutego 2026 (dodano BTC SHORT Deep Dive, Winner d7a678 case study, VIP Intelligence Report, paginated fills bug)*
+*Ostatnia aktualizacja: 21 lutego 2026 (VIP Intelligence updated to 25 portfeli, Fasanara Capital + Abraxas Capital + Bitcoin OG #2 dodane, October 2025 crash analysis)*
 *Wygenerowane przez Claude Code*
