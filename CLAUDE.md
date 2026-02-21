@@ -878,6 +878,78 @@ SignalEngine (Generał)
 - **`whale_tracker.py`** — główny, produkcyjny skrypt (~2400 linii). Trackuje ~30 adresów, system ważenia, trend analysis, bot data generation
 - **`whale_tracker_pro.py`** — uproszczona wersja "Trading Manual" z mock data. Tylko 3 adresy, generuje raport na Telegram. Nie używany przez bota
 
+### Audit TIER 1 portfeli (snapshot 21.02.2026)
+
+**4 z 14 kont ZAMKNIĘTE (account = $0):**
+
+| Adres | Alias | Było (styczeń) | Status |
+|-------|-------|-----------------|--------|
+| `0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae` | Bitcoin OG | $717M ETH, $92M BTC, $68M SOL LONG | **ZLIKWIDOWANY 31.01.2026** |
+| `0xbaae15f6ffe2aa6e0e9ffde6f1888c8092f4b22a` | SM baae15 | FARTCOIN SHORT, BTC/PUMP LONG | Zamknięty |
+| `0x2ed5c47a79c27c75188af495a8093c22ada4f6e7` | SM 2ed5c4 | ASTER LONG $3.8M | Zamknięty |
+| `0x689f15c9047f73c974e08c70f12a5d6a19f45c15` | SM 689f15 | BTC LONG $3.2M | Zamknięty |
+
+#### Bitcoin OG — likwidacja 31.01.2026
+
+Adres: `0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae`
+
+Największy wieloryb w trackerze ($877M pozycji) został zlikwidowany jednego dnia:
+
+| Coin | Fills | Wartość | Closed PnL | Jak |
+|------|-------|---------|-----------|-----|
+| ETH | 1,266 | $292M | **-$121.8M** | **Liquidated Cross Long** |
+| SOL | 734 | $18.9M | **-$6.1M** | Close Long |
+| **Łącznie** | 2,000 | $311M | **-$127.9M** | Jednego dnia |
+
+ETH LONG ($717M) został przymusowo zamknięty przez giełdę — margin nie wystarczył po spadku ceny. Reszta (SOL) zamknięta tego samego dnia.
+
+#### Drastyczne redukcje (aktywne konta)
+
+| Alias | Pozycja | Styczeń | Luty 2026 | Zmiana |
+|-------|---------|---------|-----------|--------|
+| Pułkownik (5d2f44) | BTC SHORT | $46.3M | $0 (puste konto $5.5M) | **Zamknął wszystko** |
+| Major (35d115) | SOL SHORT | $64.3M | $15.1M | **-76%** |
+| Wice-Generał (45d26f) | BTC SHORT | $40.5M | $9.9M | **-75%** |
+| Wice-Generał | ETH SHORT | $28.9M | $2.9M | **-90%** |
+| 71dfc0 | ETH SHORT | $19.8M | $2.8M | **-86%** |
+| Generał (a31211) | LIT SHORT | $7.4M | $3.3M | **-55%** |
+
+#### Kto zwiększył pozycje
+
+| Alias | Pozycja | Styczeń | Luty 2026 | Zmiana |
+|-------|---------|---------|-----------|--------|
+| 71dfc0 | BTC SHORT | $25.4M | $29.2M (+$10.5M uPnL) | **+15%** |
+| 06cecf | SOL SHORT | $11.8M | $15.2M (+$7.6M uPnL) | **+29%** |
+| 06cecf | BTC/HYPE/FARTCOIN SHORT | - | $4.8M/$4.3M/$1.0M | **Nowe pozycje** |
+
+#### Zmiany portfela Generała (a31211)
+
+| Pozycja | Styczeń | Luty 2026 |
+|---------|---------|-----------|
+| LIT SHORT | $7.4M | $3.3M (+$1.3M uPnL) — zredukował 55% |
+| DOGE SHORT | $2M | **ZAMKNIĘTY** |
+| ASTER SHORT | - | $2.4M (+$935K) — NOWA, największa |
+| PUMP SHORT | - | $1.7M (+$394K) — NOWA |
+| FARTCOIN SHORT | - | $959K (+$486K) — trzyma |
+| WLFI/APEX/MET SHORT | - | ~$250K każda — NOWE |
+
+#### Flip na 936cf4
+
+| Pozycja | Styczeń | Luty 2026 |
+|---------|---------|-----------|
+| SOL | SHORT $6.6M | **LONG $1.9M** — FLIP! |
+| BTC | - | SHORT $2.1M (underwater) |
+| ETH | - | SHORT $4.9M (underwater) |
+| XRP | - | LONG $1.8M — nowa |
+
+#### Wnioski
+
+- Mega-bearish trend słabnie — wieloryby realizują zyski i zmniejszają ekspozycję SHORT
+- 4/14 kont zamkniętych, w tym Bitcoin OG (likwidacja -$128M)
+- Pułkownik zamknął $46M BTC SHORT — brak pozycji
+- Nadal SHORT: 71dfc0 (BTC $29M), 06cecf (SOL $15M), Wice-Generał (rozproszone altcoiny)
+- Generał zmienił focus: LIT/DOGE → ASTER/PUMP/LIT/FARTCOIN
+
 ---
 
 ## Git / GitHub
