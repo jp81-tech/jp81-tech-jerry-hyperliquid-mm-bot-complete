@@ -89,6 +89,7 @@ import {
 import { GridManager, GridOrder, GridLayer } from './utils/grid_manager.js'
 import { KpepeToxicityEngine, getKpepeTimeZoneProfile } from './mm/kpepe_toxicity.js'
 import { killSwitchActive } from './utils/kill_switch.js'
+import { fetchAllFillsByTime } from './utils/paginated_fills.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder } from './utils/legacy_unwinder.js'
 import { mmAlertBot } from './utils/mm_alert_bot.js'
 import { ConsoleNotifier } from './utils/notifier.js'
@@ -889,14 +890,9 @@ class StateManager {
     onFill?: (pair: string, notionalUsd: number, fillTime: Date) => void
   ): Promise<{ newFills: number, pnlDelta: number }> {
     try {
-      // Fetch fills from last 24h using userFillsByTime (userFills returns stale data)
+      // Fetch fills from last 24h using paginated fetcher (handles 2000-fill API limit)
       const startTime = Date.now() - 24 * 60 * 60 * 1000
-      const response = await fetch('https://api.hyperliquid.xyz/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'userFillsByTime', user: walletAddress, startTime })
-      })
-      const fills = await response.json() as any[]
+      const fills = await fetchAllFillsByTime(walletAddress, startTime)
 
       if (!fills || fills.length === 0) {
         return { newFills: 0, pnlDelta: 0 }
@@ -3348,19 +3344,10 @@ class LiveTrading implements TradingInterface {
    */
   async getRecentFills(): Promise<{ time: number; coin: string; side: string }[]> {
     try {
-      // Use userFillsByTime for real-time data (last 24h)
+      // Use paginated fetcher for real-time data (last 24h, handles 2000-fill limit)
       const startTime = Date.now() - 24 * 60 * 60 * 1000
-      const response = await fetch('https://api.hyperliquid.xyz/info', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: 'userFillsByTime',
-          user: this.walletAddress,
-          startTime
-        })
-      })
-      const fills = await response.json() as any[]
-      return fills.map((f: any) => ({
+      const fills = await fetchAllFillsByTime(this.walletAddress, startTime)
+      return fills.map((f) => ({
         time: f.time,
         coin: f.coin,
         side: f.side

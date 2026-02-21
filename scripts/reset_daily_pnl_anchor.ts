@@ -16,25 +16,21 @@ import 'dotenv/config'
 import fs from 'fs'
 import path from 'path'
 import { ethers } from 'ethers'
-import * as hl from '@nktkas/hyperliquid'
+import { fetchAllFillsByTime } from '../src/utils/paginated_fills.js'
 
-async function fetchRawDailyPnlUsd(infoClient: hl.InfoClient, walletAddress: string): Promise<{ rawDaily: number; fillsConsidered: number }> {
-  const fills = await infoClient.userFills({ user: walletAddress })
+async function fetchRawDailyPnlUsd(walletAddress: string): Promise<{ rawDaily: number; fillsConsidered: number }> {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const fills = await fetchAllFillsByTime(walletAddress, today.getTime())
 
   if (!fills || fills.length === 0) {
     return { rawDaily: 0, fillsConsidered: 0 }
   }
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
   let rawDaily = 0
   let fillsConsidered = 0
 
   for (const fill of fills) {
-    const fillTime = new Date(fill.time)
-    if (fillTime < today) continue
-
     const closedPnl = parseFloat(fill.closedPnl || '0')
     const fee = parseFloat(fill.fee || '0')
     const netPnl = closedPnl + fee
@@ -59,12 +55,8 @@ async function main() {
   const wallet = new ethers.Wallet(privateKey)
   const walletAddress = wallet.address
 
-  const infoClient = new hl.InfoClient({
-    transport: new hl.HttpTransport()
-  })
-
   console.log(`🔄 Fetching raw daily PnL for ${walletAddress} ...`)
-  const { rawDaily, fillsConsidered } = await fetchRawDailyPnlUsd(infoClient, walletAddress)
+  const { rawDaily, fillsConsidered } = await fetchRawDailyPnlUsd(walletAddress)
   console.log(`   ↳ rawDailyPnL=${rawDaily.toFixed(2)} USD from ${fillsConsidered} fills today`)
 
   const dataDir = path.join(process.cwd(), 'data')

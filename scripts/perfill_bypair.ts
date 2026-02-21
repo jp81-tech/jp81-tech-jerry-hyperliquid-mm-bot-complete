@@ -3,8 +3,8 @@ import * as path from "path";
 import { config as dotenv } from "dotenv";
 dotenv({ path: path.resolve(process.cwd(), "src/.env") });
 
-import * as hl from "@nktkas/hyperliquid";
 import { ethers } from "ethers";
+import { fetchAllFillsByTime } from "../src/utils/paginated_fills.js";
 
 type Fill = {
   time: number;
@@ -77,20 +77,16 @@ async function getFillsSince(msFrom: number): Promise<Fill[]> {
   const wallet = new ethers.Wallet(pk);
   const addr = wallet.address.toLowerCase();
 
-  const info = new hl.InfoClient({ transport: new hl.HttpTransport() });
-  const allFills: any[] = await info.userFills({ user: addr });
+  const allFills = await fetchAllFillsByTime(addr, msFrom);
 
   const fills: Fill[] = [];
   for (const f of allFills) {
-    const tms = Number(f.time);
-    if (tms < msFrom) continue;
-
     const pnl = Number(f.closedPnl || 0);
-    const fee = Number(f.feeUsd || 0);
+    const fee = Number(f.fee || 0);
     const netPnl = pnl - Math.abs(fee);
 
     fills.push({
-      time: tms,
+      time: f.time,
       pair: f.coin || "",
       side: f.side || "",
       px: Number(f.px),
