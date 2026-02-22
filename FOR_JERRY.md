@@ -489,6 +489,22 @@ Efekt: skrzynka alertow pelna bezuzytecznych wiadomosci typu "Selini Capital FLI
 
 **Lekcja:** `signal_weight: 0` nie wystarczy jesli system i tak raportuje zmiany. Jesli cos jest na liscie "ignoruj" — **usun to z listy calkowicie**. "Ignorowany ale monitorowany" to oksymoron ktory generuje spam. Albo sledzisz, albo nie.
 
+### Bug #13: ai-executor Nansen relay martwy od miesiaca (22.02)
+
+`ai-executor` (PM2 id 5) logowal `Main loop error: fetch failed` non-stop od okolo 24 stycznia. Plik `.env.ai-executor` zniknal z katalogu bota — proces nie mial tokena Telegram i nie mogl pollowac kanalu Nansen. Przez miesiac alerty Nansen (SM Accumulation, AI Trend Reversal, SM Outflow) **nie trafialy do kolejki** `/tmp/nansen_raw_alert_queue.json` — bot MM ich nie przetwarzal.
+
+**Diagnoza — odkrycie 3 procesow AI:**
+Na serwerze dzialaly 3 oddzielne procesy AI (a nie jeden jak myslalismy):
+1. **ai-executor** (PM2) — Nansen alert relay, KRYTYCZNY, zepsuty
+2. **ai-chat-gemini.mjs** (poza PM2) — prosty Gemini chatbot
+3. **ai-executor.mjs GOD MODE** (poza PM2) — interaktywny asystent z /panic, /close, /positions
+
+Kazdy uzywal **innego tokena Telegram** i wyglądalo jakby wszystko dzialalo bo procesy 2 i 3 odpowiadaly na Telegramie. Ale jedyny KRYTYCZNY (relay alertow do bota) byl martwy.
+
+**Fix:** Stworzenie brakujacego `.env.ai-executor` z tokenem Telegram `@HyperliquidMM_bot`.
+
+**Lekcja:** Proces ktory cicho failuje jest gorszy od procesu ktory crashuje. `ai-executor` logowal `fetch failed` co sekundę ale PM2 pokazywal go jako "online" (bo proces nie crashowal — pollowal z pustym tokenem w nieskonczonosc). Gdyby proces sprawdzil token na starcie i zcrashowawl (`if (!TELEGRAM_TOKEN) process.exit(1)`), PM2 pokazalby "errored" i ktos by zareagowal wczesniej. **Fail loud, not quiet.**
+
 ### Bug #12: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
@@ -516,13 +532,28 @@ Shadow Trading 404 to przyklad cichego bledu — bot dzialal, ale logowal smieci
 - Dodac hint w logu: "set SHADOW_TRADING_ENABLED=false to disable"
 - Auto-disable po N bledach z rzedu
 
-### 3. Dane > Opinie
+### 3. Fail loud, not quiet
+
+`ai-executor` logowal `fetch failed` co sekunde przez miesiac. PM2 pokazywal go jako "online" (status zielony!). Nikt nie zareagowal bo proces NIE crashowal — cicho pollowal Telegram z pustym tokenem w nieskonczonej petli. Tymczasem alerty Nansen nie trafialy do bota MM przez caly luty.
+
+Gdyby kod mial na starcie:
+```javascript
+if (!TELEGRAM_TOKEN) {
+  console.error("FATAL: TELEGRAM_BOT_TOKEN not set!");
+  process.exit(1);
+}
+```
+PM2 pokazalby "errored" (czerwony), ktos by zobaczyl i naprawil w 5 minut zamiast w miesiac.
+
+**Zasada:** Jesli konfiguracja jest wymagana do dzialania — sprawdz ja na starcie i **crashnij glosno**. Cichy blad w petli jest gorszy od crashu, bo crash jest widoczny.
+
+### 4. Dane > Opinie
 
 Bot nie ma opinii. Bot ma dane. Kiedy SM shortuja z ratio 5.5x i zarabiaja — bot shortuje. Kiedy SM flipuja na LONG — bot flipuje.
 
 Najlepsi inzynierowie tez tak dzialaja: nie przywiazuj sie do rozwiazania. Przywiazuj sie do problemu. Jesli dane mowia ze twoje rozwiazanie nie dziala — zmien rozwiazanie, nie dane.
 
-### 4. System wazenia > Binarne decyzje
+### 5. System wazenia > Binarne decyzje
 
 whale_tracker nie mowi "shortuj / nie shortuj". Mowi:
 - Mode: FOLLOW_SM_SHORT
@@ -532,7 +563,7 @@ whale_tracker nie mowi "shortuj / nie shortuj". Mowi:
 
 To pozwala botowi podejmowac **niuansowane decyzje** zamiast binarnych. W inzynierii oprogramowania to odpowiednik feature flagow z percentage rollout zamiast on/off.
 
-### 5. Warstwy obrony (Defense in Depth)
+### 6. Warstwy obrony (Defense in Depth)
 
 Bot ma wiele warstw zabezpieczen:
 
@@ -1087,5 +1118,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 22 lutego 2026 (Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
+*Ostatnia aktualizacja: 22 lutego 2026 (ai-executor Nansen relay fix, mapa procesow serwera, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
 *Wygenerowane przez Claude Code*

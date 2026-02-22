@@ -75,6 +75,58 @@ if (multiplier > 2.0)  → MOMENTUM_LONG (bullish)
 
 **Commit:** `b76ad66` — deployed to server, mm-bot restarted
 
+### 23. Fix: ai-executor Nansen Alert Relay — brakujący .env (22.02)
+
+**Problem:** `ai-executor` (PM2 id 5, `src/signals/ai-executor-v2.mjs`) logował `Main loop error: fetch failed` non-stop od ~24 stycznia. Plik `.env.ai-executor` zniknął z katalogu bota — proces nie miał tokena Telegram i nie mógł pollować. **Nansen alerty nie trafiały do kolejki `/tmp/nansen_raw_alert_queue.json` od miesiąca.**
+
+**Odkrycie — 3 procesy AI na serwerze (nie jeden!):**
+
+| # | Proces | Skrypt | PM2? | Rola |
+|---|--------|--------|------|------|
+| 1 | `ai-executor` (id 5) | `src/signals/ai-executor-v2.mjs` | TAK | **KRYTYCZNY** — Nansen alert relay do `/tmp/nansen_raw_alert_queue.json` |
+| 2 | `ai-chat-gemini.mjs` (PID 1474087) | `/home/jerry/ai-risk-agent/ai-chat-gemini.mjs` | NIE | Prosty Gemini chatbot (proxy do Gemini 2.0 Flash) |
+| 3 | `ai-executor.mjs` v4.0 (PID 1474088) | `/home/jerry/ai-risk-agent/ai-executor.mjs` | NIE | "GOD MODE" — /panic, /close, /positions, AI analiza logów |
+
+**3 tokeny Telegram:**
+
+| Token | Bot | Użycie |
+|-------|-----|--------|
+| `8273887131:...` (`@HyperliquidMM_bot`) | ai-executor (PM2) | Nansen relay — **naprawiony** |
+| `8145609459:...` | ai-chat-gemini.mjs | Prosty chatbot |
+| `8220591117:...` | ai-executor.mjs GOD MODE | Interaktywny asystent tradingowy |
+
+**Kanał "serwerbotgemini"** na Telegramie to alerty z procesów #2 i #3 (katalog `/home/jerry/ai-risk-agent/`). Strukturyzowane alerty "AI Risk Agent (Gemini) / Severity: warn / Suggested actions" to odpowiedzi Gemini 2.0 Flash gdy GOD MODE wysyła logi bota do AI i prosi o analizę.
+
+**Fix:** Stworzony `/home/jerry/hyperliquid-mm-bot-complete/.env.ai-executor`:
+```
+GEMINI_API_KEY=AIza...
+TELEGRAM_BOT_TOKEN=8273887131:AAFdp3YFv0WHHrjjWEzcbPHzrKOdD6cR_zM
+TELEGRAM_CHAT_ID=645284026
+NANSEN_ALERT_CHAT_ID=-1003724824266
+TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
+```
+
+**Weryfikacja:** Restart PM2 → zero `fetch failed` po flush logów → `getMe` potwierdza token → PM2 save
+
+### 24. Pełna mapa procesów na serwerze (22.02)
+
+| PM2 id | Nazwa | Skrypt | Status | Rola |
+|--------|-------|--------|--------|------|
+| 5 | `ai-executor` | `src/signals/ai-executor-v2.mjs` | online | Nansen alert relay |
+| 36 | `mm-bot` | główny bot | online | Market making engine |
+| 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
+| 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
+| 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API |
+| 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 |
+| 30 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API |
+| 6 | `sui-price-alert` | - | online | SUI price alerts |
+| 37 | `hourly-report` | - | stopped | - |
+| 38 | `whale-report` | - | stopped | - |
+
+**Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
+- PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot
+- PID 1474088: `ai-executor.mjs` v4.0 GOD MODE — interaktywny asystent
+
 ---
 
 ## Zmiany 21 lutego 2026
@@ -1186,6 +1238,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] VIP Intelligence updated — 25 portfeli, $528M notional, 5.2x SHORT (DONE 21.02)
 - [x] Fix AI Trend Reversal parser — multiplier-based direction zamiast blind MOMENTUM_LONG (DONE 22.02)
 - [x] Remove Selini Capital (5 kont MM) z whale_tracker, SmAutoDetector, hype_monitor, alert parser (DONE 22.02)
+- [x] Fix ai-executor Nansen alert relay — brakujący .env.ai-executor, token Telegram (DONE 22.02)
+- [x] Mapa procesów serwera — 10 PM2 + 2 standalone, 3 tokeny Telegram (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1217,3 +1271,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Abraxas Capital** (`0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36`): tier2, +$37.9M Oct crash, wypłacił $144M na Binance. Obecne: XRP $3.6M + HYPE $3.4M SHORT = $7.2M. Dodany 21.02.
 - **Bitcoin OG pełny cykl**: +$165M na BTC shorts paź 2025 → zlikwidowany -$128M na ETH LONG sty 2026. Konto zamknięte.
 - **VIP Spy (po update 21.02)**: 25 VIPów (tier1=10, tier2=10, fund=5), 25 watched coins (dodano AVAX). Bitcoin OG #2 dodany jako "watching for return". vip-spy zrestartowany.
+- **ai-executor Nansen relay**: `.env.ai-executor` MUSI istnieć w katalogu bota — bez niego alerty Nansen nie trafiają do kolejki. Token: `@HyperliquidMM_bot` (8273887131). `can_read_all_group_messages: false` ale działa (bot jest adminem kanału Nansen).
+- **3 procesy AI na serwerze**: (1) ai-executor PM2 = Nansen relay (KRYTYCZNY), (2) ai-chat-gemini.mjs = prosty chatbot, (3) ai-executor.mjs GOD MODE = /panic, /close, AI analiza. Procesy 2 i 3 poza PM2 (katalog `/home/jerry/ai-risk-agent/`).
+- **Kanał "serwerbotgemini"**: Strukturyzowane alerty "Severity: warn / Summary / Suggested actions" to odpowiedzi Gemini 2.0 Flash z GOD MODE (`ai-executor.mjs`). NIE automatyczne — ktoś musi wysłać pytanie lub logi trafiają do Gemini.
