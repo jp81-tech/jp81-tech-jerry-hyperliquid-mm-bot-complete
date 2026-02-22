@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-21
+- Data: 2026-02-22
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -108,7 +108,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 
 **Weryfikacja:** Restart PM2 → zero `fetch failed` po flush logów → `getMe` potwierdza token → PM2 save
 
-### 24. Pełna mapa procesów na serwerze (22.02)
+### 24. Pełna mapa procesów na serwerze (22.02, updated)
 
 | PM2 id | Nazwa | Skrypt | Status | Rola |
 |--------|-------|--------|--------|------|
@@ -116,16 +116,44 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | 36 | `mm-bot` | główny bot | online | Market making engine |
 | 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
-| 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API |
+| 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
 | 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 |
-| 30 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API |
-| 6 | `sui-price-alert` | - | online | SUI price alerts |
-| 37 | `hourly-report` | - | stopped | - |
-| 38 | `whale-report` | - | stopped | - |
+| 30 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 |
+
+**Usunięte z PM2:**
+- `sui-price-alert` — nierealistyczne targety (SUI $1.85 przy cenie $0.93), usunięty
+- `hourly-report` — przeniesiony do cron `15 * * * *`
+- `whale-report` — przeniesiony do cron `0 8 * * *`
+
+**Cron jobs (na serwerze):**
+- `15 * * * *` — `scripts/hourly-discord-report.ts` → Discord hourly report
+- `0 8 * * *` — `scripts/daily-whale-report.ts` → Discord daily whale report
 
 **Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
 - PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot
 - PID 1474088: `ai-executor.mjs` v4.0 GOD MODE — interaktywny asystent
+
+### 25. Server Health Audit — 5 procesów naprawionych (22.02)
+
+**Problem:** Pełny audit 10 procesów PM2 ujawnił 5 problemów:
+
+| Proces | Problem | Fix |
+|--------|---------|-----|
+| `sui-price-alert` | Nierealistyczne targety (SUI $1.85 = +98%, LIT $2.50 = +67%) | **Usunięty z PM2** |
+| `prediction-api` | Martwy od 27 dni, port 8090 nie nasłuchuje, zero logów | Fix `isMainModule` → `if (true)` |
+| `hourly-report` | One-shot skrypt jako PM2 daemon (stopped) | Przeniesiony do cron `15 * * * *` |
+| `whale-report` | One-shot skrypt jako PM2 daemon (nigdy nie uruchomiony) | Przeniesiony do cron `0 8 * * *` |
+| `sm-short-monitor` | Nansen API 403 Insufficient credits (62% success rate) | Nie naprawialny bez zakupu kredytów, działa częściowo |
+
+**prediction-api root cause:** Check `isMainModule` (`import.meta.url === \`file://${process.argv[1]}\``) failował pod PM2 — PM2 resolvuje ścieżki inaczej. Port 8090 nigdy nie był bindowany. Fix na serwerze: `if (isMainModule)` → `if (true)`.
+
+**hourly-report i whale-report root cause:** One-shot skrypty (run-and-exit) błędnie skonfigurowane jako PM2 daemons. PM2 próbuje restartować je po exit, ale z `--no-autorestart` nie restartuje (albo restartuje i natychmiast się kończą → status "stopped"). Prawidłowe podejście: cron jobs.
+
+**Testy po fixach:**
+- `prediction-api`: port 8090 nasłuchuje, `/health` zwraca `{"status":"ok"}`
+- `hourly-report`: cron test → "Sent to Discord" (raport na Discord)
+- `whale-report`: cron test → "Sent 7 message(s) to Discord"
+- `pm2 save` — zapisano stan 7 procesów
 
 ---
 
@@ -1240,6 +1268,11 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Remove Selini Capital (5 kont MM) z whale_tracker, SmAutoDetector, hype_monitor, alert parser (DONE 22.02)
 - [x] Fix ai-executor Nansen alert relay — brakujący .env.ai-executor, token Telegram (DONE 22.02)
 - [x] Mapa procesów serwera — 10 PM2 + 2 standalone, 3 tokeny Telegram (DONE 22.02)
+- [x] Server health audit — 5 problemów znalezionych, 4 naprawione (DONE 22.02)
+- [x] prediction-api fix — isMainModule → if(true), port 8090 działa (DONE 22.02)
+- [x] sui-price-alert usunięty — nierealistyczne targety (DONE 22.02)
+- [x] hourly-report → cron `15 * * * *` (DONE 22.02)
+- [x] whale-report → cron `0 8 * * *` (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1274,3 +1307,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **ai-executor Nansen relay**: `.env.ai-executor` MUSI istnieć w katalogu bota — bez niego alerty Nansen nie trafiają do kolejki. Token: `@HyperliquidMM_bot` (8273887131). `can_read_all_group_messages: false` ale działa (bot jest adminem kanału Nansen).
 - **3 procesy AI na serwerze**: (1) ai-executor PM2 = Nansen relay (KRYTYCZNY), (2) ai-chat-gemini.mjs = prosty chatbot, (3) ai-executor.mjs GOD MODE = /panic, /close, AI analiza. Procesy 2 i 3 poza PM2 (katalog `/home/jerry/ai-risk-agent/`).
 - **Kanał "serwerbotgemini"**: Strukturyzowane alerty "Severity: warn / Summary / Suggested actions" to odpowiedzi Gemini 2.0 Flash z GOD MODE (`ai-executor.mjs`). NIE automatyczne — ktoś musi wysłać pytanie lub logi trafiają do Gemini.
+- **PM2 vs Cron**: One-shot skrypty (run-and-exit) NIE MOGĄ być PM2 daemons — PM2 restartuje po exit albo pokazuje "stopped". Użyj cron. PM2 = daemons (long-running). Cron = periodic one-shots.
+- **prediction-api isMainModule**: `import.meta.url === \`file://${process.argv[1]}\`` failuje pod PM2 (resolving ścieżek). Fix: `if (true)` na serwerze. Plik: `dist/prediction/dashboard-api.js`.
+- **Porty na serwerze (updated)**: 3000=war-room, 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
+- **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 57 portfeli. Oba potrzebują `DISCORD_WEBHOOK_URL` w `.env`.
+- **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.

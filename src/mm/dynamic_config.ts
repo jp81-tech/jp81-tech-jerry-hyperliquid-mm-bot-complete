@@ -17,7 +17,7 @@ import { ConsoleNotifier } from '../utils/notifier.js'
 import { telegramBot } from '../utils/telegram_bot.js'
 import { HyperliquidMarketData } from './market_data.js'
 import { AlphaSignalAggregator, CombinedAlphaSignal } from '../signals/AlphaSignals.js'
-import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY, isFollowSmToken, shouldHoldForTp, getSmDirection } from './SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, MmMode, updateCacheFromSmData, injectProxyData, PERP_TO_ONCHAIN_PROXY, isFollowSmToken, shouldHoldForTp, getSmDirection, isForcedMmPair } from './SmAutoDetector.js'
 import { readNansenBiasJson, NansenBiasEntry, NansenTradingMode } from './nansen_bias_cache.js'
 import { getNansenProAPI } from '../integrations/nansen_pro.js'
 import { nansenIntegration, shouldBlockBids, shouldBlockAsks, getMMSignalStatus, shouldStartMM, shouldStopMM } from '../signals/nansen_alert_integration.js'
@@ -700,14 +700,15 @@ const EMERGENCY_OVERRIDES: Record<string, EmergencyOverride> = {
     maxInventoryUsd: 5000,   // Increased from 1500 for better capital utilization
     reason: 'SM shorts winning - FOLLOW SM, aggressive short'
   },
-  // LIT: SM has $8.2M short @ $2.62, +$2.6M uPnL - FOLLOW SM aggressively
+  // LIT: SM SHORT dominant — $500/day target, aggressive allocation
+  // Updated 2026-02-04: Increased maxInventory for focus pair strategy
   LIT: {
     bidEnabled: false,
     askEnabled: true,
     bidMultiplier: 0,
-    askMultiplier: 2.5,      // More aggressive asks to build short faster
-    maxInventoryUsd: 2000,   // Doubled from $1000 per user request
-    reason: 'SM $8.2M short +$2.6M uPnL, whale 0xa31211 adding - aggressive short'
+    askMultiplier: 2.0,      // Aggressive asks to build short
+    maxInventoryUsd: 10000,  // $10K max — matches market_vision.ts tuning
+    reason: 'SM SHORT dominant — focus pair, aggressive short'
   },
   // SOL: REMOVED OVERRIDE 2026-01-19 - After fixing whale_tracker signal_weight,
   // SOL is now BULLISH (weighted: $76M LONG vs $51M SHORT = 60% long bias)
@@ -1655,27 +1656,17 @@ export class DynamicConfigManager {
     const isSignalEnginePureMmMode = signalEnginePureMm?.signalEngineOverride && signalEnginePureMm?.mode === MmMode.PURE_MM
     const isFollowSmShort = signalEnginePureMm?.mode === MmMode.FOLLOW_SM_SHORT  // 🦅 Generał może obejść Strażnika
 
-    if (token === 'LIT' && !isSignalEnginePureMmMode && !isFollowSmShort) {
-      // Block LIT shorts - user requested "przestan dokladac shorty do LIT"
-      // BUT: Skip this block if SignalEngine wants PURE_MM or FOLLOW_SM_SHORT (whale override)
-      multState = applyMultiplier(multState, {
-        askMultiplier: 0,      // No new shorts (asks = selling = shorting)
-        askLocked: true,       // Lock asks so no strategy can override
-        priority: StrategyPriority.EMERGENCY,
-        source: 'HARD_BLOCK_LIT',
-        reason: 'LIT shorts blocked - stop adding shorts per user request'
-      })
-      this.notifier.warn(`🛑 [HARD BLOCK] LIT: askLocked=true - NO NEW SHORTS`)
-    } else if (token === 'LIT' && isSignalEnginePureMmMode) {
-      console.log(`🧠 [SIGNAL_ENGINE] LIT: PURE_MM mode → HARD_BLOCK bypassed, both sides enabled`)
-    } else if (token === 'LIT' && isFollowSmShort) {
-      console.log(`🦅 [SIGNAL_ENGINE] LIT: FOLLOW_SM_SHORT → HARD_BLOCK bypassed, Generał rozkazuje shortować!`)
+    // 🔧 2026-02-04: LIT HARD_BLOCK REMOVED — LIT is now a focus pair for SM SHORT following ($500/day target)
+    // Previously blocked shorts per user request, now we actively want shorts when SM is SHORT
+    if (token === 'LIT' && isFollowSmShort) {
+      console.log(`🦅 [SIGNAL_ENGINE] LIT: FOLLOW_SM_SHORT → aggressive shorting enabled (focus pair)`)
     }
 
     // ============================================================
     // APPLY REVERSAL BLOCKS FIRST (REVERSAL priority)
+    // 🔧 Skip for FORCE_MM pairs — they run PURE_MM regardless of SM signals
     // ============================================================
-    if (smReversal.type !== 'NONE') {
+    if (smReversal.type !== 'NONE' && !isForcedMmPair(token)) {
       // Adjust target inventory based on reversal type
       let reversalTargetInventory = targetInventory
       if (smReversal.type === 'SM_CLOSING_SHORTS') {
@@ -1834,7 +1825,7 @@ export class DynamicConfigManager {
       (nansenBoost.alertType === 'SM_DISTRIBUTION' || nansenBoost.alertType === 'WHALE_ACTIVITY')
 
     // ☢️ FOLLOW_SM ma ostatnie słowo - CONTRARIAN nie może overridować
-    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isFollowSmToken(token)) {
+    if ((smConflict.conflictSeverity !== 'NONE' || isContrarianMode || nansenActivatesContrarian) && !alreadyAppliedFollowSm && !tradingModeInfo?.squeezeFailed && !isFollowSmToken(token) && !isForcedMmPair(token)) {
       // Calculate contrarian multipliers with Nansen boost
       // 🔔 Apply Nansen boost to make contrarian more aggressive when we have SM alert confirmation
       const boostFactor = nansenBoost.boostMultiplier

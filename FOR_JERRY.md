@@ -505,6 +505,58 @@ Kazdy uzywal **innego tokena Telegram** i wyglądalo jakby wszystko dzialalo bo 
 
 **Lekcja:** Proces ktory cicho failuje jest gorszy od procesu ktory crashuje. `ai-executor` logowal `fetch failed` co sekundę ale PM2 pokazywal go jako "online" (bo proces nie crashowal — pollowal z pustym tokenem w nieskonczonosc). Gdyby proces sprawdzil token na starcie i zcrashowawl (`if (!TELEGRAM_TOKEN) process.exit(1)`), PM2 pokazalby "errored" i ktos by zareagowal wczesniej. **Fail loud, not quiet.**
 
+### Bug #14: prediction-api martwy od miesiaca — isMainModule pod PM2 (22.02)
+
+`prediction-api` (PM2 id 30, port 8090) nie działał od 27 dni. Zero logów, port nienasłuchujący, ale PM2 pokazywał "online".
+
+**Przyczyna:** Skrypt `dist/prediction/dashboard-api.js` ma na końcu:
+```javascript
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+if (isMainModule) {
+  startPredictionServer();
+}
+```
+
+Pod PM2 ta ścieżka nie matchuje (PM2 resolves paths inaczej niż direct `node` call). Warunek `isMainModule` zwracał `false`. Serwer HTTP **nigdy nie startował**. Proces po prostu kończył setup i czekał na event loop (który był pusty) — PM2 nie crashował go bo technicznie proces żył.
+
+**Fix:** Zamiana `if (isMainModule)` na `if (true)` w pliku na serwerze.
+
+**Lekcja:** Pattern `import.meta.url === \`file://${process.argv[1]}\`` jest **neszczelny** — działa z `node script.js` ale nie z process managerami (PM2, Docker entrypoints), transpilerami (tsx, ts-node), i bundlerami (esbuild). Jeśli plik jest ZAWSZE uruchamiany standalone (jak serwer API), nie potrzebujesz tego checka — po prostu wywołaj `startServer()`. Użyj tego wzorca TYLKO gdy plik jest jednocześnie biblioteką (importowaną) i standalone skryptem.
+
+### Bug #15: One-shot skrypty jako PM2 daemons (22.02)
+
+`hourly-report` i `whale-report` w PM2 — jeden "stopped" (restartował się i kończył), drugi nigdy nie uruchomiony.
+
+**Przyczyna:** Oba skrypty są **one-shot** (run-and-exit): fetchują dane, wysyłają raport na Discord, i kończą się z `process.exit(0)`. PM2 jest zaprojektowany dla **daemons** (procesów które działają w nieskończoność). Gdy one-shot się kończy, PM2 albo:
+- Restartuje go (i znowu się kończy — pętla)
+- Oznacza jako "stopped" jeśli użyto `--no-autorestart`
+
+Ani jedno ani drugie nie jest poprawne — skrypt powinien uruchamiać się **periodycznie** (co godzinę / raz dziennie), nie ciągle.
+
+**Fix:** Usunięcie z PM2, dodanie jako cron jobs:
+```bash
+# Co godzinę o :15
+15 * * * * cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/hourly-discord-report.ts
+
+# Codziennie o 08:00 UTC
+0 8 * * * cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/daily-whale-report.ts
+```
+
+**Lekcja:** Narzędzie musi pasować do zadania:
+- **PM2** = procesy ciągłe (bot, serwer API, websocket listener, dashboard)
+- **Cron** = zadania periodyczne (raporty, backupy, cleanup, health checks)
+- **systemd timer** = jak cron ale z lepszym logowaniem (przyszła alternatywa)
+
+To jak różnica między strażnikiem (PM2 — stoi na posterunku 24/7) a kurierem (cron — przychodzi o ustalonej godzinie, zostawia paczkę, odchodzi). Nie zatrudniaj kuriera jako strażnika.
+
+### Bug #16: sui-price-alert nierealistyczne targety (22.02)
+
+`sui-price-alert` monitorował ceny SUI ($0.93) z targetem $1.85 (+98%) i LIT ($1.50) z targetem $2.50 (+67%). Przy tych targetach alert nigdy by się nie wyzwolił.
+
+**Fix:** Usunięcie z PM2.
+
+**Lekcja:** Skrypty z hardcoded targetami cenowymi wymagają regularnego przeglądu. Ceny krypto zmieniają się szybko — target ustawiony 2 miesiące temu może być absurdalny dzisiaj.
+
 ### Bug #12: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
@@ -580,7 +632,20 @@ Jesli warstwa 1 sie myli, warstwa 2 lapie. Jesli 2 sie myli, 3 lapie. Itd.
 
 W software to odpowiednik: input validation -> business logic -> database constraints -> monitoring -> alerting.
 
-### 6. Audytuj swoje zalozenia
+### 7. Right tool for the job (PM2 vs Cron)
+
+Mielismy 2 skrypty (hourly-report, whale-report) skonfigurowane jako PM2 daemons. Jeden "stopped", drugi nigdy nie uruchomiony. Problem: PM2 jest dla daemons (procesow ktore dzialaja ciagle). Te skrypty to one-shots (run-and-exit).
+
+```
+PM2 (daemon)    = Straznik na posterunku 24/7
+Cron (periodic) = Kurier — przychodzi o 8:00, zostawia paczke, odchodzi
+
+Nie zatrudniaj kuriera jako straznika.
+```
+
+W software to odpowiednik: nie uzywaj bazy danych do cache'owania (uzyj Redis), nie uzywaj queue do prostego cron joba, nie uzywaj Kubernetes do jednego serwera. Kazde narzedzie ma swoj sweet spot.
+
+### 8. Audytuj swoje zalozenia
 
 4 z 14 TIER 1 wielorybow zamknelo konta. Bitcoin OG zostal zlikwidowany. Zalozenie "ci traderzy sa Smart Money" przestalo byc prawdziwe dla tych adresow.
 
@@ -607,15 +672,22 @@ Regularnie sprawdzaj czy twoje zalozenia nadal obowiazuja. W kodzie: czy ten con
 ```
 MacBook (dev) ---- Tailscale VPN ------- hl-mm (Linux server)
                                              |
-                                      PM2 manages:
+                                      PM2 manages (7 daemons):
                                       |-- mm-bot (glowny bot)
-                                      |-- nansen-bridge
-                                      |-- vip-spy
-                                      |-- ai-executor
-                                      |-- sm-short-monitor
-                                      |-- war-room
-                                      |-- prediction-api
-                                      +-- sui-price-alert
+                                      |-- nansen-bridge (port 8080)
+                                      |-- vip-spy (polling 30s)
+                                      |-- ai-executor (Nansen relay)
+                                      |-- sm-short-monitor (Nansen perp API)
+                                      |-- war-room (dashboard port 3000)
+                                      +-- prediction-api (ML API port 8090)
+                                             |
+                                      Cron jobs (periodic):
+                                      |-- hourly-discord-report (:15 co godzine)
+                                      +-- daily-whale-report (08:00 UTC)
+                                             |
+                                      Standalone (poza PM2):
+                                      |-- ai-chat-gemini.mjs (chatbot)
+                                      +-- ai-executor.mjs GOD MODE
 ```
 
 Deploy: `scp` pliku na serwer + `pm2 restart mm-bot`. Proste i skuteczne.
@@ -1118,5 +1190,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 22 lutego 2026 (ai-executor Nansen relay fix, mapa procesow serwera, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
+*Ostatnia aktualizacja: 22 lutego 2026 (server health audit — prediction-api fix, sui-price-alert usuniety, hourly/whale report → cron, ai-executor fix, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli)*
 *Wygenerowane przez Claude Code*
