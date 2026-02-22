@@ -427,15 +427,21 @@ export class NansenAlertParserV2 {
 
   // ═══════════════════════════════════════════════════════════════
   // MM BOT: AI TREND REVERSAL ALERTS
-  // Format: "MM Bot: VIRTUAL AI Trend Reversal" lub podobne
-  // Wykrywa zmianę trendu przez AI - fresh wallets, SM flow, top holders
+  // Format: "MM Bot: FARTCOIN - AI Trend Reversal"
+  //   "Fresh wallets received $97K ... (0.10× the recent average)"
+  //
+  // The multiplier (e.g. 0.10×) tells the REAL story:
+  //   <0.5×  = activity DOWN = BEARISH (fewer new buyers)
+  //   0.5-2× = normal range  = IGNORE (noise)
+  //   >2.0×  = activity UP   = BULLISH (surge of new buyers)
+  //
+  // Old code blindly treated every alert as MOMENTUM_LONG — WRONG.
   // ═══════════════════════════════════════════════════════════════
   private parseMmBotAiTrendReversal(message: string): NansenAlert | null {
-    // Wzorce dla alertów AI Trend Reversal z Nansen
     const patterns = [
-      /MM\s*Bot[:\s]+(\w+)\s*[-–—]?\s*AI\s*(?:Trend\s*)?Reversal/i,  // Handle dash variants
-      /(\w+)\s*[-–—]?\s*AI\s*(?:Trend\s*)?(?:Reversal|Signal)/i,      // Handle dash variants
-      /AI\s*(?:Trend\s*)?Reversal.*?(\w+)/i,                          // AI Trend Reversal ... TOKEN
+      /MM\s*Bot[:\s]+(\w+)\s*[-–—]?\s*AI\s*(?:Trend\s*)?Reversal/i,
+      /(\w+)\s*[-–—]?\s*AI\s*(?:Trend\s*)?(?:Reversal|Signal)/i,
+      /AI\s*(?:Trend\s*)?Reversal.*?(\w+)/i,
       /AI\s*Signal.*?(\w+).*?(fresh.?wallet|sm.?flow|top.?holder)/i,
       /🔵.*?AI.*?(?:Trend|Reversal).*?(\w+)/i,
       /(\w+).*?(?:fresh.?wallet|new.?wallet).*?(?:accumulation|inflow)/i,
@@ -450,31 +456,53 @@ export class NansenAlertParserV2 {
         const thresholds = MM_ALERT_THRESHOLDS[token];
         const chain = thresholds?.chain || this.extractChain(message);
 
-        // Wykryj typy sygnałów AI
+        // Detect signal sub-types
         const signals: string[] = [];
         const lowerMsg = message.toLowerCase();
         if (lowerMsg.includes('fresh') || lowerMsg.includes('new wallet')) signals.push('fresh-wallet');
         if (lowerMsg.includes('sm') || lowerMsg.includes('smart money')) signals.push('sm-flow');
         if (lowerMsg.includes('top holder') || lowerMsg.includes('top-holder')) signals.push('top-holder-changes');
         if (lowerMsg.includes('dex')) signals.push('dex-flow');
-
         if (signals.length === 0) signals.push('ai-signal');
 
-        console.log(`✅ [AlertParser] MM Bot AI Trend Reversal: ${token} on ${chain} - Signals: ${signals.join(', ')}`);
+        // Extract the multiplier (e.g. "0.10×" or "2.5×" or "0.11x")
+        const multMatch = message.match(/\((\d+\.?\d*)\s*[×x]\s*(?:the\s+)?recent\s+average\)/i);
+        const multiplier = multMatch ? parseFloat(multMatch[1]) : null;
 
-        // Update signal state
-        updateSignalState(token, 'AI_TREND_REVERSAL', { signals, chain });
+        // Determine direction from multiplier
+        let alertType: string;
+        let direction: 'inflow' | 'outflow';
+
+        if (multiplier !== null && multiplier < 0.5) {
+          // Activity WAY DOWN — bearish (demand drying up)
+          alertType = 'MOMENTUM_SHORT';
+          direction = 'outflow';
+          console.log(`⚠️ [AlertParser] AI Trend Reversal: ${token} — ${multiplier}× average = BEARISH (activity down ${((1 - multiplier) * 100).toFixed(0)}%)`);
+        } else if (multiplier !== null && multiplier > 2.0) {
+          // Activity WAY UP — bullish (surge of new buyers)
+          alertType = 'MOMENTUM_LONG';
+          direction = 'inflow';
+          console.log(`✅ [AlertParser] AI Trend Reversal: ${token} — ${multiplier}× average = BULLISH (activity up ${((multiplier - 1) * 100).toFixed(0)}%)`);
+        } else {
+          // Normal range (0.5-2.0x) or no multiplier found — ignore as noise
+          const multStr = multiplier !== null ? `${multiplier}×` : 'unknown';
+          console.log(`🔇 [AlertParser] AI Trend Reversal: ${token} — ${multStr} average = NOISE, ignoring`);
+          return null;
+        }
+
+        updateSignalState(token, 'AI_TREND_REVERSAL', { signals, chain, multiplier, direction });
 
         return {
           id: this.generateId(),
-          name: 'MM Bot AI Trend Reversal ' + token,
+          name: `AI Trend Reversal ${token} (${direction === 'inflow' ? 'bullish' : 'bearish'})`,
           token: token.toUpperCase(),
           chain: chain,
           timestamp: new Date(),
-          type: 'MOMENTUM_LONG',  // AI Trend Reversal = bullish momentum
+          type: alertType as any,
           data: {
             signals: signals,
-            direction: 'reversal',
+            direction: direction,
+            multiplier: multiplier,
             source: 'mm-bot-nansen-ai',
             is_significant: true,
             thresholds: thresholds,
