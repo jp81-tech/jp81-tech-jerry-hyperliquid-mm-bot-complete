@@ -118,7 +118,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
 | 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 |
-| 30 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 |
+| 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (SM data fix 22.02) |
 
 **Usunięte z PM2:**
 - `sui-price-alert` — nierealistyczne targety (SUI $1.85 przy cenie $0.93), usunięty
@@ -132,6 +132,45 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 **Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
 - PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot
 - PID 1474088: `ai-executor.mjs` v4.0 GOD MODE — interaktywny asystent
+
+### 26. Fix: prediction-api NansenFeatures data mismatch (22.02)
+
+**Problem:** `prediction-api` miał `smartMoney: 0` dla wszystkich tokenów mimo że `smart_money_data.json` zawierał bogate dane SM (np. FARTCOIN 44:1 SHORT ratio). **40% wagi modelu ML było martwe** od zawsze.
+
+**Root cause — 2 mismatche w `src/prediction/features/NansenFeatures.ts`:**
+
+| Metoda | Kod szukał | Plik miał |
+|--------|-----------|-----------|
+| `getSmartMoneyPositions` | `parsed.tokens[token]` | `parsed.data[token]` |
+| `getSmartMoneyPositions` | `total_long_usd` / `total_short_usd` | `current_longs_usd` / `current_shorts_usd` |
+| `getNansenBias` | `tokenBias.bias` / `tokenBias.confidence` | `tokenBias.boost` + `tokenBias.direction` / `tokenBias.tradingModeConfidence` |
+
+**Fix w `NansenFeatures.ts`:**
+1. `getSmartMoneyPositions`: `parsed.tokens` → `parsed.data`, field names aligned, use `trading_mode_confidence` from whale_tracker
+2. `getNansenBias`: derive bias from `direction` + `boost` (short=-boost, long=+boost), confidence from `tradingModeConfidence`
+3. Re-applied `if (true)` fix w `dashboard-api.js` (zgubiony przy PM2 delete/recreate)
+
+**Wynik — porównanie przed/po:**
+
+| Token | SM (przed) | SM (po) | Confidence (przed) | Confidence (po) |
+|-------|-----------|---------|--------------------|-----------------|
+| HYPE | 0.000 | 0.000 *(NEUTRAL — prawidłowo, longs~shorts)* | 28% | 28% |
+| LIT | 0.000 | **-0.198** *(bearish, ratio -0.28, conviction 58%)* | 24% | **31.5%** |
+| FARTCOIN | 0.000 | **-0.487** *(bearish, 44:1 SHORT, conviction 95%)* | 16% | **36.1%** |
+
+**Deploy:** scp → server, restart PM2, pm2 save
+
+### 27. Fix: ai-executor Nansen channel ID (22.02)
+
+**Problem:** `ai-executor` pollował zły kanał Telegram (`-1003724824266`) zamiast prawidłowego kanału Nansen alerts (`-1003886465029` = "BOT i jego Sygnaly").
+
+**Fix:** `.env.ai-executor` → `NANSEN_ALERT_CHAT_ID=-1003886465029`
+
+**Weryfikacja:**
+- `getChat(-1003886465029)` → SUCCESS: supergroup "BOT i jego Sygnaly"
+- `getChatMember` → bot jest **administratorem** kanału
+- Aktywne pollowanie potwierdzone (409 Conflict = polling works)
+- Brak nowych alertów od Jan 24 → Nansen po prostu nie wysłał nowych (kanał aktywny, bot gotowy)
 
 ### 25. Server Health Audit — 5 procesów naprawionych (22.02)
 
@@ -1273,6 +1312,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] sui-price-alert usunięty — nierealistyczne targety (DONE 22.02)
 - [x] hourly-report → cron `15 * * * *` (DONE 22.02)
 - [x] whale-report → cron `0 8 * * *` (DONE 22.02)
+- [x] prediction-api NansenFeatures fix — SM data mismatch (parsed.tokens→parsed.data, field names), 40% wagi odblokowane (DONE 22.02)
+- [x] ai-executor Nansen channel ID fix — `-1003724824266` → `-1003886465029`, bot jest admin kanału (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
@@ -1308,7 +1349,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **3 procesy AI na serwerze**: (1) ai-executor PM2 = Nansen relay (KRYTYCZNY), (2) ai-chat-gemini.mjs = prosty chatbot, (3) ai-executor.mjs GOD MODE = /panic, /close, AI analiza. Procesy 2 i 3 poza PM2 (katalog `/home/jerry/ai-risk-agent/`).
 - **Kanał "serwerbotgemini"**: Strukturyzowane alerty "Severity: warn / Summary / Suggested actions" to odpowiedzi Gemini 2.0 Flash z GOD MODE (`ai-executor.mjs`). NIE automatyczne — ktoś musi wysłać pytanie lub logi trafiają do Gemini.
 - **PM2 vs Cron**: One-shot skrypty (run-and-exit) NIE MOGĄ być PM2 daemons — PM2 restartuje po exit albo pokazuje "stopped". Użyj cron. PM2 = daemons (long-running). Cron = periodic one-shots.
-- **prediction-api isMainModule**: `import.meta.url === \`file://${process.argv[1]}\`` failuje pod PM2 (resolving ścieżek). Fix: `if (true)` na serwerze. Plik: `dist/prediction/dashboard-api.js`.
+- **prediction-api isMainModule**: `import.meta.url === \`file://${process.argv[1]}\`` failuje pod PM2 (resolving ścieżek). Fix: `if (true)` na serwerze. Plik: `dist/prediction/dashboard-api.js`. **UWAGA:** Ten fix gubi się przy `pm2 delete + pm2 start` — trzeba ponownie edytować plik dist.
+- **prediction-api NansenFeatures**: `src/prediction/features/NansenFeatures.ts` — naprawiony mapping: `parsed.data[token]` (nie `parsed.tokens`), `current_longs_usd` (nie `total_long_usd`), bias z `direction`+`boost`. Bez tego 40% wagi modelu (Smart Money) = zero.
+- **prediction-api endpointy**: `/predict/:token`, `/predict-all`, `/verify/:token`, `/weights`, `/features`, `/health`. Tokeny: HYPE, LIT, FARTCOIN. Wagi: SM 40%, tech 20%, momentum 15%, trend 15%, volume 10%.
+- **Nansen channel ID**: `-1003886465029` = "BOT i jego Sygnaly" (prawidłowy). `-1003724824266` = stary/nieistniejący. Bot `@HyperliquidMM_bot` jest administratorem kanału.
 - **Porty na serwerze (updated)**: 3000=war-room, 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
 - **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 57 portfeli. Oba potrzebują `DISCORD_WEBHOOK_URL` w `.env`.
 - **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.
