@@ -557,6 +557,55 @@ To jak różnica między strażnikiem (PM2 — stoi na posterunku 24/7) a kurier
 
 **Lekcja:** Skrypty z hardcoded targetami cenowymi wymagają regularnego przeglądu. Ceny krypto zmieniają się szybko — target ustawiony 2 miesiące temu może być absurdalny dzisiaj.
 
+### Bug #17: prediction-api Smart Money = zero — data structure mismatch (22.02)
+
+`prediction-api` to serwis ML ktory przewiduje kierunek ceny. Ma 5 komponentow: technical (20%), momentum (15%), trend (15%), volume (10%) i **Smart Money (40%)**. SM to najwazniejszy komponent — to nasz edge.
+
+Problem: SM signal byl **zawsze zero** dla kazdego tokena. Wynik: model opieraral sie tylko na 60% swoich danych (technicals), a 40% (SM) bylo martwe. FARTCOIN z 44:1 SHORT ratio dostal `smartMoney: 0` — jakby wieloryby w ogole nie istnialy.
+
+**Root cause:** `NansenFeatures.ts` szukal danych w zlym miejscu:
+
+```
+Kod szukal:         parsed.tokens["LIT"].total_long_usd
+Plik mial:          parsed.data["LIT"].current_longs_usd
+                          ^^^^            ^^^^^^^^^^^^^^^^
+                          inna sciezka    inne nazwy pol
+```
+
+To klasyczny **integration bug** — dwa komponenty pisane niezaleznie, nigdy nie przetestowane razem. `whale_tracker.py` (Python) generuje plik JSON z jednym formatem, `NansenFeatures.ts` (TypeScript) czyta go z oczekiwaniem innego formatu. Nikt nie zweryfikowal kontraktu miedzy nimi.
+
+Drugi mismatch: `nansen_bias.json` mial pola `boost` (0-2) i `direction` ("short"/"long") ale kod szukal `bias` (-1 do +1) i `confidence` (0-100).
+
+**Fix:**
+- `parsed.tokens` → `parsed.data`
+- `total_long_usd` → `current_longs_usd`
+- `total_short_usd` → `current_shorts_usd`
+- Derive bias from `direction` + `boost`
+- Use `tradingModeConfidence` for confidence
+
+**Wynik:**
+| Token | Przed | Po |
+|-------|-------|----|
+| FARTCOIN | SM=0, conf=16% | **SM=-0.487, conf=36%** (44:1 SHORT!) |
+| LIT | SM=0, conf=24% | **SM=-0.198, conf=31%** |
+| HYPE | SM=0, conf=28% | SM=0, conf=28% (prawidlowo NEUTRAL) |
+
+**Lekcja:** Kiedy dwa systemy komunikuja sie przez plik/API, **napisz test integracyjny**. Nawet prosty skrypt `node -e "read file, check field exists"` zlapalby ten bug w sekundzie. Bez testu — bug przetrwal miesiace niezauwazony, bo model "dzialal" (dawal predykcje) ale z 40% mocy.
+
+To jak samochod z odpieta turbosprezzarka — jedzie, wygrywa przyspieszenie, ale nigdy nie siega pelnej mocy. Dopiero jak sprawdzisz pod maska, widzisz ze turbo jest odlaczone.
+
+### Bug #18: ai-executor zly kanal Nansen (22.02)
+
+`ai-executor` pollowal Telegram kanal `-1003724824266` — ale ten kanal nie istnial! Prawidlowy kanal Nansen alerts to `-1003886465029` ("BOT i jego Sygnaly").
+
+Efekt: alerty SM OUTFLOW/INFLOW nie trafialy do bota od czasu zmiany kanalu. Bot jezdzil na starych danych.
+
+**Fix:** Zmiana `NANSEN_ALERT_CHAT_ID` w `.env.ai-executor`.
+
+**Weryfikacja:** Bot jest administratorem prawidlowego kanalu, aktywnie polluje (409 Conflict potwierdza), czeka na nastepne alerty.
+
+**Lekcja:** Kiedy cos "nie dziala", sprawdz **czesc po czesci**: (1) Czy mam prawidlowy target? (2) Czy mam dostep? (3) Czy dane plyna? Tutaj problem byl w kroku 1 — zly kanal ID. Reszta (token, uprawnienia, kod) byla OK.
+
 ### Bug #12: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
@@ -645,11 +694,35 @@ Nie zatrudniaj kuriera jako straznika.
 
 W software to odpowiednik: nie uzywaj bazy danych do cache'owania (uzyj Redis), nie uzywaj queue do prostego cron joba, nie uzywaj Kubernetes do jednego serwera. Kazde narzedzie ma swoj sweet spot.
 
-### 8. Audytuj swoje zalozenia
+### 8. Integration contracts — testuj granice miedzy systemami
+
+Nasz prediction-api mial 40% wagi martwej przez miesiace bo `NansenFeatures.ts` czytal `parsed.tokens` zamiast `parsed.data`. whale_tracker (Python) pisal jedno, prediction-api (TypeScript) czytalo drugie. Nikt tego nie przetestowal.
+
+To jest **najczestszy typ buga w systemach z wieloma komponentami**: kazdy komponent dziala sam, ale polaczenie miedzy nimi jest zepsute. API endpoint zwraca JSON, ale klient szuka zlego pola. Database ma kolumne `created_at`, ale ORM mapuje na `createdAt`.
+
+**Rozwiazanie:** Integration tests. Nawet prosty:
+```bash
+# Czy prediction-api widzi SM data?
+curl localhost:8090/predict/LIT | jq '.prediction.signals.smartMoney'
+# Jesli 0 — cos jest nie tak
+```
+
+To jak testowanie czy kabel jest podlaczony zanim szukasz problemu w komputerze.
+
+### 9. Audytuj swoje zalozenia
 
 4 z 14 TIER 1 wielorybow zamknelo konta. Bitcoin OG zostal zlikwidowany. Zalozenie "ci traderzy sa Smart Money" przestalo byc prawdziwe dla tych adresow.
 
 Regularnie sprawdzaj czy twoje zalozenia nadal obowiazuja. W kodzie: czy ten config jest aktualny? Czy te hardcoded adresy nadal sa aktywne? Czy ta biblioteka jest nadal utrzymywana?
+
+### 10. PM2 delete gubi server-side edits
+
+Zrobilismy `pm2 delete prediction-api && pm2 start dist/prediction/dashboard-api.js` — i proces sie uruchomil ale port 8090 nie sluchal. Fix `if (true)` w `dashboard-api.js` zrobiony wczesniej na serwerze dzialal, bo PM2 restart laduje ten sam plik. Ale `pm2 delete + start` zresetowal PM2 metadata (nowy id), a plik moglby byc nadpisany przy git pull/build.
+
+**Lekcja:** Server-side hotfixy sa kruche. Jesli musisz je robic:
+1. Zapisz co zmieniasz i gdzie (w CLAUDE.md)
+2. Po kazdym `pm2 delete` lub `git pull` — sprawdz czy fix nadal jest
+3. Najlepiej: commit fix do repo zeby `git pull` go nie nadpisal
 
 ---
 
@@ -1190,5 +1263,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 22 lutego 2026 (server health audit — prediction-api fix, sui-price-alert usuniety, hourly/whale report → cron, ai-executor fix, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli)*
+*Ostatnia aktualizacja: 22 lutego 2026 (prediction-api SM data fix — NansenFeatures mismatch, ai-executor channel ID fix, server health audit, hourly/whale report → cron, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli)*
 *Wygenerowane przez Claude Code*
