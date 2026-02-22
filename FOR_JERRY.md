@@ -19,8 +19,9 @@
 11. [Case Study: Winner d7a678](#case-study-winner-d7a678--anatomia-idealnego-tradea)
 12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026) *(updated: 25 VIPs)*
 13. [BTC SHORT Deep Dive](#btc-short-deep-dive--kto-shortowal-od-topu-i-mogl-cos-wiedziec)
-14. [Sesja 22.02 -- Trzy bugi ktore kradly nam edge](#sesja-2202----trzy-bugi-ktore-kradly-nam-edge) **(NEW)**
-15. [Slowniczek](#slowniczek)
+14. [Sesja 22.02 -- Trzy bugi ktore kradly nam edge](#sesja-2202----trzy-bugi-ktore-kradly-nam-edge)
+15. [Rozdzial X: XGBoost + Rozszerzenie 8 tokenow/5 horyzontow](#rozdzial-x-xgboost--jak-dalismy-botowi-prawdziwy-mozg)
+16. [Slowniczek](#slowniczek)
 
 ---
 
@@ -1589,6 +1590,8 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 A z dzisiejszej sesji dodatkowa lekcja: **dane musza byc swieze, polaczenia nienaruszone, a nowe sygnaly najpierw obserwowane zanim dostaną prawdziwa wladze.**
 
+I jeszcze jedna: **projektuj systemy tak zeby dodawanie nowych rzeczy (tokenow, horyzontow, cech) bylo jednolinijkowe** — nie dziesiecioplikowe. Config-driven > hardcoded.
+
 ---
 
 *Ostatnia aktualizacja: 22 lutego 2026*
@@ -1619,14 +1622,15 @@ Setup: **zbieraj dane → trenuj w Pythonie → wnioskuj w TypeScript → miesza
 │    → Pobiera candle'e, dane SM, funding, OI z Hyperliquid        │
 │    → Oblicza 30 znormalizowanych cech (ta sama matma co TS)      │
 │    → Dopisuje do /tmp/xgboost_dataset_{TOKEN}.jsonl               │
-│    → Wypelnia etykiety wstecz: "co sie stalo 1h/4h/12h pozniej?" │
+│    → Wypelnia etykiety wstecz: "co sie stalo 1h/4h/12h/1w/1m?"  │
 └──────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────────────┐
 │  WARSTWA 2: TRENING (Python, cotygodniowy cron)                  │
 │  scripts/xgboost_train.py                                        │
-│    → Czyta dataset JSONL (potrzebuje 200+ oznaczonych wierszy)   │
-│    → Trenuje 3 modele per token (horyzonty h1, h4, h12)          │
+│    → Czyta dataset JSONL (200+ wierszy h1-h12, 100+ w1, 50+ m1) │
+│    → Trenuje 5 modeli per token (h1, h4, h12, w1, m1)            │
+│    → 8 tokenow: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN    │
 │    → Klasyfikacja: SHORT / NEUTRAL / LONG                        │
 │    → Eksportuje model JSON do /tmp/xgboost_model_{TOKEN}_{h}.json│
 │    → Eksportuje metadane (dokladnosc, waznosc cech)              │
@@ -1719,10 +1723,22 @@ Dla danych czasowych **nigdy** nie mieszamy losowo treningowego/testowego. Zbior
 Modele trenowane na tygodniowych danych moga byc niebezpiecznie bledne jesli rezim rynku sie zmienil. Dlatego retrenujemy co tydzien, a `/xgb-status` pokazuje wiek modelu.
 
 ### 4. Brak Rownoruagi Klas
-Wiekszość czasu zmiany cen sa male → NEUTRAL dominuje. Walczymy z tym poprzez rozsadne progi (0.5% dla 1h, 1.5% dla 4h, 3% dla 12h).
+Wiekszość czasu zmiany cen sa male → NEUTRAL dominuje. Walczymy z tym poprzez rozsadne progi (0.5% dla 1h, 1.5% dla 4h, 3% dla 12h, 8% dla w1, 15% dla m1).
 
-### 5. Brama 200 Probek
-Odmawiamy treningu z <200 oznaczonymi wierszami. Przy 15-minutowych interwałach to ~50 godzin (2+ dni) zbierania. Pierwszy trening po deployu nastapi po pierwszym weekendzie.
+### 5. Brama Probek (per-horyzont)
+Odmawiamy treningu z za mala liczba oznaczonych wierszy — ale progi sa rozne per horyzont:
+- **h1/h4/h12**: 200 probek (~2 dni zbierania)
+- **w1**: 100 probek (~10 dni — etykiety pojawiaja sie dopiero po 7 dniach)
+- **m1**: 50 probek (~35 dni — etykiety pojawiaja sie dopiero po 30 dniach)
+
+To wazny pattern: **dluzsze horyzonty potrzebuja mniej probek ale wiecej czasu zeby sie pojawily.**
+
+### 6. Tlumienie Slope'u dla Dlugich Horyzontow
+Gdy model regul ekstrapoluje cene na h1 (1 godzine), slope (nachylenie ceny z ostatnich 24h) jest mnozony liniowo. Ale gdybysmy uzylic tego samego mnoznika dla m1 (720 godzin), wynik bylby absurdalny — nikt nie wie co bedzie za miesiac na podstawie 24-godzinnego trendu.
+
+Rozwiazanie: **logarytmiczne tlumienie** — `slope * 24 * Math.log2(hours/24 + 1)` zamiast `slope * hours`. Dla h1 to prawie to samo, ale dla m1 slope jest ~80% slabszy niz liniowa ekstrapolacja.
+
+Analogia: prognoza pogody. Na jutro mozesz uzywac dzisiejszego trendu temperatury. Na za miesiac — nie. Trend rozmywa sie logarytmicznie.
 
 ---
 
@@ -1730,9 +1746,15 @@ Odmawiamy treningu z <200 oznaczonymi wierszami. Przy 15-minutowych interwałach
 
 | Endpoint | Co zwraca |
 |----------|-----------|
-| `GET /predict-xgb/:token` | Predykcja tylko XGBoost (wszystkie 3 horyzonty z prawdopodobienstwami) |
+| `GET /predict/:token` | Pelna predykcja hybrydowa (reguly + XGBoost) — 5 horyzontow |
+| `GET /predict-all` | Predykcje dla wszystkich 8 tokenow naraz |
+| `GET /predict-xgb/:token` | Predykcja tylko XGBoost (wszystkie 5 horyzontow z prawdopodobienstwami) |
 | `GET /xgb-status` | Ktore tokeny maja modele, wiek, statystyki dokladnosci |
 | `GET /xgb-features/:token` | Top 10 najwazniejszych cech per horyzont |
+| `GET /verify/:token` | Weryfikacja trafnosci przeszlych predykcji |
+| `GET /weights` | Aktualne wagi modelu |
+| `GET /features` | Waznosc cech (explainability) |
+| `GET /health` | Health check |
 
 Istniejacy `/predict/:token` teraz automatycznie wlacza mieszanie z XGBoost.
 
@@ -1745,9 +1767,9 @@ Istniejacy `/predict/:token` teraz automatycznie wlacza mieszanie z XGBoost.
 | `scripts/xgboost_collect.py` | NOWY | Kolektor danych (cron co 15 min) |
 | `scripts/xgboost_train.py` | NOWY | Skrypt treningowy (cron cotygodniowo) |
 | `src/prediction/models/XGBoostPredictor.ts` | NOWY | Silnik wnioskowania TypeScript |
-| `src/prediction/models/HybridPredictor.ts` | ZMIENIONY | Mieszanie XGBoost w predict() |
-| `src/prediction/dashboard-api.ts` | ZMIENIONY | 3 nowe endpointy |
-| `src/prediction/index.ts` | ZMIENIONY | Eksporty + nowe metody serwisu |
+| `src/prediction/models/HybridPredictor.ts` | ZMIENIONY | Mieszanie XGBoost w predict(), 5 horyzontow |
+| `src/prediction/dashboard-api.ts` | ZMIENIONY | 3 nowe endpointy, 8 tokenow |
+| `src/prediction/index.ts` | ZMIENIONY | Eksporty + nowe metody serwisu, 8 tokenow |
 
 ---
 
@@ -1759,3 +1781,81 @@ Istniejacy `/predict/:token` teraz automatycznie wlacza mieszanie z XGBoost.
 4. **Obserwowalnosc przede wszystkim** — `/xgb-status` i `/xgb-features` pozwalaja zajrzec do srodka. Czarna skrzynka bez monitoringu to bomba zegarowa.
 5. **Trenuj offline, wnioskuj online** — Ciezkie obliczenia (trening) w cotygodniowym cronie. Lekkie (traversal drzew) na kazdym requeście. Niskie opoznienie.
 6. **Dane sa waskim gardlem** — Sam model jest prosty (100 plytkich drzew). Trudna czesc to zebranie wystarczajaco duzyo danych jakosciowych.
+
+---
+
+## Rozszerzenie: 8 Tokenow + Horyzonty Tygodniowy/Miesieczny (22.02.2026)
+
+### Co sie zmienilo?
+
+Poczatkowo prediction-api obslugiwal 3 tokeny (HYPE, LIT, FARTCOIN) na 3 horyzontach (1h, 4h, 12h). To bylo za malo — bot traduje 8 tokenow, a trader chce wiedziec nie tylko "co za godzine" ale tez "jaki jest trend na tydzien/miesiac".
+
+Rozszerzylismy do **8 tokenow** (BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN) i **5 horyzontow** (h1, h4, h12, w1, m1).
+
+### Konfiguracja horyzontow — PREDICTION_HORIZONS
+
+Zamiast hardkodowac kazdy horyzont osobno, stworzyliamy jeden obiekt konfiguracyjny:
+
+```typescript
+export const PREDICTION_HORIZONS = [
+  { key: 'h1',  hours: 1,   multiplier: 0.3, confMax: 80, confBase: 50, confScale: 30 },
+  { key: 'h4',  hours: 4,   multiplier: 0.8, confMax: 70, confBase: 45, confScale: 25 },
+  { key: 'h12', hours: 12,  multiplier: 1.5, confMax: 60, confBase: 40, confScale: 20 },
+  { key: 'w1',  hours: 168, multiplier: 3.0, confMax: 45, confBase: 30, confScale: 15 },
+  { key: 'm1',  hours: 720, multiplier: 5.0, confMax: 30, confBase: 20, confScale: 10 },
+];
+```
+
+**Dlaczego confMax maleje dla dluzszych horyzontow?** Bo im dalej w przyszlosc, tym mniejsza pewnosc. Model moze byc 80% pewny co bedzie za godzine, ale tylko 30% pewny co bedzie za miesiac. To uczciwa komunikacja — lepiej powiedziec "nie wiem" niz udawac pewnosc.
+
+**Dlaczego multiplier nie rosnie liniowo?** Gdyby rosnal liniowo z czasem, m1 (720h) mialby multiplier 720/1 * 0.3 = 216. To absurd. Zamiast tego rosnie subliniowo (0.3 → 0.8 → 1.5 → 3.0 → 5.0) bo dlugie horyzonty maja wiecej mean-reversion — cena moze spasc 5% w tydzien ale raczej nie 500% w miesiac.
+
+### Record<string, ...> zamiast {h1, h4, h12}
+
+Wazna zmiana architektoniczna: typ `predictions` w PredictionResult zmienil sie z:
+
+```typescript
+// STARE (sztywne):
+predictions: {
+  h1: { price: number; change: number; confidence: number };
+  h4: { price: number; change: number; confidence: number };
+  h12: { price: number; change: number; confidence: number };
+};
+
+// NOWE (dynamiczne):
+predictions: Record<string, { price: number; change: number; confidence: number }>;
+```
+
+**Dlaczego to wazne?** Bo nastepnym razem gdy dodamy nowy horyzont (np. h2 albo q1), wystarczy dodac jeden wpis do PREDICTION_HORIZONS. Zero zmian w interfejsach, zero zmian w API, zero zmian w CLI. To jest **rozszerzalnosc** — napisz raz, dodawaj latwo.
+
+Porownaj to z alternatywa — gdyby kazdy horyzont byl hardkodowany, dodanie jednego nowego wymagaloby zmian w ~15 miejscach. Tak robionym kodem cierpia duze zespoly — kazda zmiana dotyka wszystkiego.
+
+### Timeline danych: Kiedy XGBoost zacznie dzialac?
+
+| Horyzont | Etykiety dostepne po | Model trenowalny po | Reguły HybridPredictor |
+|----------|---------------------|---------------------|------------------------|
+| h1 | 1 godzina | ~2 dni (200 probek) | Od razu |
+| h4 | 4 godziny | ~2 dni | Od razu |
+| h12 | 12 godzin | ~2 dni | Od razu |
+| w1 | **7 dni** | **~10 dni** (100 probek) | Od razu (reguly) |
+| m1 | **30 dni** | **~35 dni** (50 probek) | Od razu (reguly) |
+
+Kluczowy insight: **HybridPredictor (system regul) obsluguje w1/m1 od pierwszego dnia** — nie potrzebuje danych treningowych, uzywa formuly. XGBoost dojdzie pozniej gdy zbierze wystarczajaco danych. To jest wzorzec "graceful degradation" — system dziala bez ML, a ML tylko *poprawia* go gdy jest gotowy.
+
+### Commit i deploy
+
+```
+427407f feat: expand prediction-api to 8 tokens + weekly/monthly horizons
+```
+
+Zweryfikowano na serwerze — wszystkie 8 tokenow zwracaja predykcje z 5 horyzontami:
+```
+BTC:      $67,438 — h1, h4, h12, w1, m1 ✅
+ETH:      $1,944  — h1, h4, h12, w1, m1 ✅
+SOL:      $83.26  — h1, h4, h12, w1, m1 ✅
+HYPE:     $21.50  — h1, h4, h12, w1, m1 ✅
+ZEC:      $37.85  — h1, h4, h12, w1, m1 ✅
+XRP:      $2.38   — h1, h4, h12, w1, m1 ✅
+LIT:      $0.77   — h1, h4, h12, w1, m1 ✅
+FARTCOIN: $0.28   — h1, h4, h12, w1, m1 ✅
+```

@@ -43,6 +43,51 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 22 lutego 2026
 
+### 29. Expand prediction-api to 8 tokens + weekly/monthly horizons (22.02)
+
+**Cel:** Rozszerzenie prediction-api z 3 tokenow/3 horyzontow do 8 tokenow/5 horyzontow.
+
+**Przed:** HYPE, LIT, FARTCOIN na h1, h4, h12
+**Po:** BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN na h1, h4, h12, w1, m1
+
+**Zmodyfikowane pliki (6):**
+
+| Plik | Zmiana |
+|------|--------|
+| `src/prediction/models/HybridPredictor.ts` | `PredictionResult.predictions` → `Record<string, ...>`, `PREDICTION_HORIZONS` config, `calculatePredictions()` loop z slope dampening (`Math.log2`), `verifyPredictions()` dynamic, `VERIFY_CONFIG` (w1: 15%, m1: 25% error threshold) |
+| `src/prediction/models/XGBoostPredictor.ts` | `HORIZONS` → `['h1','h4','h12','w1','m1']`, `tokens` → 8 tokenow, `getBestPrediction` preference `['h4','h1','h12','w1','m1']` |
+| `src/prediction/index.ts` | CLI tokens → 8, dynamic predictions display, `verifyPredictions()` dynamic return, `getXGBFeatureImportance()` 5 horyzontow, export `PREDICTION_HORIZONS` |
+| `src/prediction/dashboard-api.ts` | `/predict-all` tokens → 8 |
+| `scripts/xgboost_collect.py` | `TOKENS` → 8, `LABEL_BACKFILL_ROWS=0` (scan all for m1 30-day lookback), `label_w1`/`label_m1` fields, backfill 604800s/2592000s |
+| `scripts/xgboost_train.py` | `TOKENS` → 8, `THRESHOLDS` w1=0.08/m1=0.15, `MIN_SAMPLES` per-horizon dict (h1-h12=200, w1=100, m1=50), all loops 5 horizons |
+
+**PREDICTION_HORIZONS config:**
+```typescript
+{ key: 'h1',  hours: 1,   multiplier: 0.3, confMax: 80 }
+{ key: 'h4',  hours: 4,   multiplier: 0.8, confMax: 70 }
+{ key: 'h12', hours: 12,  multiplier: 1.5, confMax: 60 }
+{ key: 'w1',  hours: 168, multiplier: 3.0, confMax: 45 }
+{ key: 'm1',  hours: 720, multiplier: 5.0, confMax: 30 }
+```
+
+**Slope dampening dla dlugich horyzontow:**
+```typescript
+const effectiveSlope = hz.hours <= 24
+  ? slope * hz.hours
+  : slope * 24 * Math.log2(hz.hours / 24 + 1);
+```
+
+**Data timeline (XGBoost):**
+- w1 labels available after 7 days, model trainable ~10 days
+- m1 labels available after 30 days, model trainable ~35 days
+- HybridPredictor rule-based formula covers w1/m1 from day 1
+
+**Deploy:** scp 4 dist files + 2 Python scripts → server, `if (true)` fix reapplied, PM2 restart prediction-api
+
+**Weryfikacja:** All 8 tokens returning 5 horizons (h1, h4, h12, w1, m1) confirmed via `/predict-all`
+
+**Commit:** `427407f` — pushed to `origin/fix/update-nansen-debug`
+
 ### 21. Fix: AI Trend Reversal parser — multiplier-based direction (22.02)
 
 **Problem:** Parser `parseMmBotAiTrendReversal` traktował każdy alert "AI Trend Reversal" jako `MOMENTUM_LONG` (bullish). Ignorował mnożnik z tekstu alertu (np. "0.10× the recent average"). FARTCOIN dostawał fałszywe sygnały kupna przez miesiąc mimo że 0.10× = aktywność spadła o 90% = BEARISH.
@@ -118,7 +163,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
 | 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 |
-| 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (SM data fix 22.02) |
+| 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (8 tokens, 5 horizons, 22.02) |
 
 **Usunięte z PM2:**
 - `sui-price-alert` — nierealistyczne targety (SUI $1.85 przy cenie $0.93), usunięty
@@ -1197,7 +1242,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-9f24971 fix: trust whale_tracker conviction when SignalEngine WAIT + Oracle divergence logging
+427407f feat: expand prediction-api to 8 tokens + weekly/monthly horizons
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1339,6 +1384,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Fix #3: whale_tracker conviction override when SignalEngine WAIT (DONE 22.02)
 - [x] Fix #5: whale_tracker.py added to crontab */15 min, nansen_bias.json fresh (DONE 22.02)
 - [x] Fix #6: Oracle divergence logging added, non-invasive (DONE 22.02)
+- [x] prediction-api expanded to 8 tokens + 5 horizons (h1,h4,h12,w1,m1), PREDICTION_HORIZONS config, slope dampening, per-horizon MIN_SAMPLES (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` w cronie co 15 min (od 22.02)
@@ -1376,7 +1422,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **PM2 vs Cron**: One-shot skrypty (run-and-exit) NIE MOGĄ być PM2 daemons — PM2 restartuje po exit albo pokazuje "stopped". Użyj cron. PM2 = daemons (long-running). Cron = periodic one-shots.
 - **prediction-api isMainModule**: `import.meta.url === \`file://${process.argv[1]}\`` failuje pod PM2 (resolving ścieżek). Fix: `if (true)` na serwerze. Plik: `dist/prediction/dashboard-api.js`. **UWAGA:** Ten fix gubi się przy `pm2 delete + pm2 start` — trzeba ponownie edytować plik dist.
 - **prediction-api NansenFeatures**: `src/prediction/features/NansenFeatures.ts` — naprawiony mapping: `parsed.data[token]` (nie `parsed.tokens`), `current_longs_usd` (nie `total_long_usd`), bias z `direction`+`boost`. Bez tego 40% wagi modelu (Smart Money) = zero.
-- **prediction-api endpointy**: `/predict/:token`, `/predict-all`, `/verify/:token`, `/weights`, `/features`, `/health`. Tokeny: HYPE, LIT, FARTCOIN. Wagi: SM 40%, tech 20%, momentum 15%, trend 15%, volume 10%.
+- **prediction-api endpointy**: `/predict/:token`, `/predict-all`, `/predict-xgb/:token`, `/verify/:token`, `/weights`, `/features`, `/xgb-status`, `/xgb-features/:token`, `/health`. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN (8). Horyzonty: h1, h4, h12, w1, m1 (5). Wagi: SM 40%, tech 20%, momentum 15%, trend 15%, volume 10%.
+- **prediction-api PREDICTION_HORIZONS**: Config-driven horyzonty w `HybridPredictor.ts`. confMax maleje (80→30) bo dlugi horyzont = mniej pewnosci. Slope dampened logarytmicznie dla w1/m1.
+- **XGBoost data timeline**: w1 etykiety po 7 dniach, m1 po 30 dniach. MIN_SAMPLES: h1-h12=200, w1=100, m1=50. Collector `LABEL_BACKFILL_ROWS=0` (skanuje wszystkie wiersze dla m1 30-day lookback).
 - **Nansen channel ID**: `-1003886465029` = "BOT i jego Sygnaly" (prawidłowy). `-1003724824266` = stary/nieistniejący. Bot `@HyperliquidMM_bot` jest administratorem kanału.
 - **Porty na serwerze (updated)**: 3000=war-room, 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
 - **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 57 portfeli. Oba potrzebują `DISCORD_WEBHOOK_URL` w `.env`.
