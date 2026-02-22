@@ -8048,6 +8048,25 @@ class HyperliquidMMBot {
       }
     }
 
+    // 🔮 Oracle divergence monitoring (logging only — no trading action)
+    try {
+      const oracleBias = this.getOracleGridBias(symbol)
+      if (oracleBias.reason !== 'Oracle: No signal or low confidence') {
+        const smMode = overridesConfig?.followSmMode || permissions.reason || 'PURE_MM'
+        console.log(`🔮 [ORACLE] ${symbol}: ${oracleBias.reason} | SM mode: ${smMode}`)
+        // Flag divergence: Oracle bullish but SM says SHORT, or vice versa
+        const oracleBullish = oracleBias.bidMult > 1
+        const oracleBearish = oracleBias.askMult > 1
+        const smShort = smMode.includes('SHORT')
+        const smLong = smMode.includes('LONG')
+        if ((oracleBullish && smShort) || (oracleBearish && smLong)) {
+          console.log(`⚠️ [ORACLE] ${symbol}: DIVERGENCE — Oracle ${oracleBullish ? 'BULLISH' : 'BEARISH'} vs SM ${smShort ? 'SHORT' : 'LONG'}`)
+        }
+      }
+    } catch (e) {
+      // Oracle logging is non-critical
+    }
+
     // Cancel existing orders
     if (this.trading instanceof LiveTrading) {
       const existingOrders = await this.trading.getOpenOrders(pair)
