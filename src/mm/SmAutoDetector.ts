@@ -700,11 +700,21 @@ export function analyzeTokenSm(
     signalEngineOverride = engineSignal.overrideRegime;
 
     if (engineSignal.action === 'WAIT') {
-      // Not confident enough - go neutral/PURE_MM with BOTH sides enabled
-      engineOverrideMode = 'PURE_MM';
-      engineOverrideConfidence = Math.abs(engineSignal.score);
-      dominantSide = 'NEUTRAL';  // 🔑 KEY: Force NEUTRAL to trigger PURE_MM path
-      console.log(`🧠 [${token}] Engine OVERRIDE: ${engineSignal.score.toFixed(0)} -> PURE_MM (allowLongs=${signalEngineAllowLongs}, allowShorts=${signalEngineAllowShorts})`);
+      // Engine not confident — but whale_tracker may have PnL-based analysis that Engine doesn't see
+      if (whaleTrackerConfidence >= 50 && whaleTrackerMode && !whaleTrackerMode.includes('NEUTRAL')) {
+        // whale_tracker has high conviction from PnL analysis (shorts winning, longs underwater etc.)
+        // SignalEngine only sees ratio which may look "not extreme enough" — trust whale_tracker
+        engineOverrideMode = whaleTrackerMode;
+        engineOverrideConfidence = whaleTrackerConfidence;
+        // Keep dominantSide from whale_tracker (already set at line 649-655)
+        console.log(`🧠 [${token}] Engine WAIT but whale_tracker confident (${whaleTrackerConfidence}%) → KEEP ${whaleTrackerMode} (allowLongs=${signalEngineAllowLongs}, allowShorts=${signalEngineAllowShorts})`);
+      } else {
+        // Low whale_tracker confidence or NEUTRAL — fall back to PURE_MM
+        engineOverrideMode = 'PURE_MM';
+        engineOverrideConfidence = Math.abs(engineSignal.score);
+        dominantSide = 'NEUTRAL';  // 🔑 KEY: Force NEUTRAL to trigger PURE_MM path
+        console.log(`🧠 [${token}] Engine OVERRIDE: ${engineSignal.score.toFixed(0)} -> PURE_MM (allowLongs=${signalEngineAllowLongs}, allowShorts=${signalEngineAllowShorts})`);
+      }
     } else if (engineSignal.action === 'SHORT') {
       engineOverrideMode = 'FOLLOW_SM_SHORT';
       engineOverrideConfidence = Math.abs(engineSignal.score);
