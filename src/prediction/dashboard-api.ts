@@ -35,7 +35,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /predict-all
     if (path === '/predict-all') {
-      const tokens = ['HYPE', 'LIT', 'FARTCOIN'];
+      const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
       const results: Record<string, any> = {};
 
       for (const token of tokens) {

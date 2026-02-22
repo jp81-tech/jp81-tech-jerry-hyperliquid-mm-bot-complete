@@ -16,11 +16,7 @@ import { promises as fsp } from 'fs';
 export interface PredictionResult {
   token: string;
   currentPrice: number;
-  predictions: {
-    h1: { price: number; change: number; confidence: number };
-    h4: { price: number; change: number; confidence: number };
-    h12: { price: number; change: number; confidence: number };
-  };
+  predictions: Record<string, { price: number; change: number; confidence: number }>;
   direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   confidence: number;
   signals: {
@@ -40,6 +36,14 @@ export interface ModelWeights {
   volume: number;
   trend: number;
 }
+
+export const PREDICTION_HORIZONS = [
+  { key: 'h1',  hours: 1,   multiplier: 0.3, confMax: 80, confBase: 50, confScale: 30 },
+  { key: 'h4',  hours: 4,   multiplier: 0.8, confMax: 70, confBase: 45, confScale: 25 },
+  { key: 'h12', hours: 12,  multiplier: 1.5, confMax: 60, confBase: 40, confScale: 20 },
+  { key: 'w1',  hours: 168, multiplier: 3.0, confMax: 45, confBase: 30, confScale: 15 },
+  { key: 'm1',  hours: 720, multiplier: 5.0, confMax: 30, confBase: 20, confScale: 10 },
+];
 
 export class HybridPredictor {
   private technicalIndicators: TechnicalIndicators;
@@ -256,26 +260,20 @@ export class HybridPredictor {
     const recentCloses = ohlcv.slice(-24).map(d => d.close);
     const slope = this.calculateSlope(recentCloses);
 
-    // 1h prediction
-    const h1Change = signal * volatility * 0.3 + slope * 1;
-    const h1Price = currentPrice * (1 + h1Change / 100);
-    const h1Confidence = Math.min(80, 50 + Math.abs(signal) * 30);
+    const predictions: Record<string, { price: number; change: number; confidence: number }> = {};
 
-    // 4h prediction
-    const h4Change = signal * volatility * 0.8 + slope * 4;
-    const h4Price = currentPrice * (1 + h4Change / 100);
-    const h4Confidence = Math.min(70, 45 + Math.abs(signal) * 25);
+    for (const hz of PREDICTION_HORIZONS) {
+      // Dampen slope for long horizons (linear extrapolation meaningless beyond 24h)
+      const effectiveSlope = hz.hours <= 24
+        ? slope * hz.hours
+        : slope * 24 * Math.log2(hz.hours / 24 + 1);
+      const change = signal * volatility * hz.multiplier + effectiveSlope;
+      const price = currentPrice * (1 + change / 100);
+      const confidence = Math.min(hz.confMax, hz.confBase + Math.abs(signal) * hz.confScale);
+      predictions[hz.key] = { price, change, confidence };
+    }
 
-    // 12h prediction
-    const h12Change = signal * volatility * 1.5 + slope * 12;
-    const h12Price = currentPrice * (1 + h12Change / 100);
-    const h12Confidence = Math.min(60, 40 + Math.abs(signal) * 20);
-
-    return {
-      h1: { price: h1Price, change: h1Change, confidence: h1Confidence },
-      h4: { price: h4Price, change: h4Change, confidence: h4Confidence },
-      h12: { price: h12Price, change: h12Change, confidence: h12Confidence },
-    };
+    return predictions;
   }
 
   /**
@@ -373,78 +371,69 @@ export class HybridPredictor {
   /**
    * Verify past predictions and update accuracy
    */
-  async verifyPredictions(token: string, currentPrice: number): Promise<{
-    h1: { accuracy: number; total: number };
-    h4: { accuracy: number; total: number };
-    h12: { accuracy: number; total: number };
-    direction: { accuracy: number; total: number };
-  }> {
+  async verifyPredictions(token: string, currentPrice: number): Promise<Record<string, { accuracy: number; total: number }>> {
     const now = Date.now();
     const HOUR = 3600000;
+
+    const VERIFY_CONFIG: Record<string, { ageHours: number; errorThreshold: number }> = {
+      h1:  { ageHours: 1,   errorThreshold: 2 },
+      h4:  { ageHours: 4,   errorThreshold: 4 },
+      h12: { ageHours: 12,  errorThreshold: 8 },
+      w1:  { ageHours: 168, errorThreshold: 15 },
+      m1:  { ageHours: 720, errorThreshold: 25 },
+    };
+
+    const emptyResult: Record<string, { accuracy: number; total: number }> = { direction: { accuracy: 0, total: 0 } };
+    for (const key of Object.keys(VERIFY_CONFIG)) {
+      emptyResult[key] = { accuracy: 0, total: 0 };
+    }
 
     try {
       const filePath = `/tmp/predictions_${token}.json`;
       const data = await fsp.readFile(filePath, 'utf-8');
-      const predictions: (PredictionResult & { verified?: { h1?: boolean; h4?: boolean; h12?: boolean } })[] = JSON.parse(data);
+      const predictions: (PredictionResult & { verified?: Record<string, boolean> })[] = JSON.parse(data);
 
-      const results = {
-        h1: { hits: 0, total: 0 },
-        h4: { hits: 0, total: 0 },
-        h12: { hits: 0, total: 0 },
-        direction: { hits: 0, total: 0 },
-      };
+      const results: Record<string, { hits: number; total: number }> = { direction: { hits: 0, total: 0 } };
+      for (const key of Object.keys(VERIFY_CONFIG)) {
+        results[key] = { hits: 0, total: 0 };
+      }
 
       for (const pred of predictions) {
         if (!pred.verified) pred.verified = {};
         const age = now - pred.timestamp;
 
-        // Verify 1h prediction
-        if (age >= 0.9 * HOUR && age <= 1.1 * HOUR && !pred.verified.h1) {
-          pred.verified.h1 = true;
-          results.h1.total++;
-          const error = Math.abs(currentPrice - pred.predictions.h1.price) / pred.predictions.h1.price * 100;
-          if (error < 2) results.h1.hits++;
+        for (const [hz, cfg] of Object.entries(VERIFY_CONFIG)) {
+          const predData = pred.predictions[hz];
+          if (!predData) continue;
 
-          // Direction accuracy
-          results.direction.total++;
-          const predictedDir = pred.predictions.h1.change > 0;
-          const actualDir = currentPrice > pred.currentPrice;
-          if (predictedDir === actualDir) results.direction.hits++;
-        }
+          const targetAge = cfg.ageHours * HOUR;
+          if (age >= targetAge * 0.9 && age <= targetAge * 1.1 && !pred.verified[hz]) {
+            pred.verified[hz] = true;
+            results[hz].total++;
+            const error = Math.abs(currentPrice - predData.price) / predData.price * 100;
+            if (error < cfg.errorThreshold) results[hz].hits++;
 
-        // Verify 4h prediction
-        if (age >= 3.9 * HOUR && age <= 4.1 * HOUR && !pred.verified.h4) {
-          pred.verified.h4 = true;
-          results.h4.total++;
-          const error = Math.abs(currentPrice - pred.predictions.h4.price) / pred.predictions.h4.price * 100;
-          if (error < 4) results.h4.hits++;
-        }
-
-        // Verify 12h prediction
-        if (age >= 11.9 * HOUR && age <= 12.1 * HOUR && !pred.verified.h12) {
-          pred.verified.h12 = true;
-          results.h12.total++;
-          const error = Math.abs(currentPrice - pred.predictions.h12.price) / pred.predictions.h12.price * 100;
-          if (error < 8) results.h12.hits++;
+            // Direction accuracy (use first horizon verified)
+            if (hz === 'h1') {
+              results.direction.total++;
+              const predictedDir = predData.change > 0;
+              const actualDir = currentPrice > pred.currentPrice;
+              if (predictedDir === actualDir) results.direction.hits++;
+            }
+          }
         }
       }
 
       // Save updated predictions with verification flags
       await fsp.writeFile(filePath, JSON.stringify(predictions, null, 2));
 
-      return {
-        h1: { accuracy: results.h1.total > 0 ? results.h1.hits / results.h1.total * 100 : 0, total: results.h1.total },
-        h4: { accuracy: results.h4.total > 0 ? results.h4.hits / results.h4.total * 100 : 0, total: results.h4.total },
-        h12: { accuracy: results.h12.total > 0 ? results.h12.hits / results.h12.total * 100 : 0, total: results.h12.total },
-        direction: { accuracy: results.direction.total > 0 ? results.direction.hits / results.direction.total * 100 : 0, total: results.direction.total },
-      };
+      const result: Record<string, { accuracy: number; total: number }> = {};
+      for (const [key, r] of Object.entries(results)) {
+        result[key] = { accuracy: r.total > 0 ? r.hits / r.total * 100 : 0, total: r.total };
+      }
+      return result;
     } catch (error) {
-      return {
-        h1: { accuracy: 0, total: 0 },
-        h4: { accuracy: 0, total: 0 },
-        h12: { accuracy: 0, total: 0 },
-        direction: { accuracy: 0, total: 0 },
-      };
+      return emptyResult;
     }
   }
 

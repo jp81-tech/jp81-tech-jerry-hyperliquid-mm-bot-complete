@@ -34,16 +34,26 @@ except ImportError:
     sys.exit(1)
 
 # --- Configuration ---
-TOKENS = ["LIT", "FARTCOIN", "HYPE"]
+TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
 DATASET_DIR = "/tmp"
 MODEL_DIR = "/tmp"
-MIN_SAMPLES = 200  # Minimum rows with labels to train
+
+# Per-horizon minimum samples (w1/m1 have fewer labeled rows initially)
+MIN_SAMPLES = {
+    "h1":  200,
+    "h4":  200,
+    "h12": 200,
+    "w1":  100,   # Fewer samples available initially
+    "m1":  50,    # Very few samples in first month
+}
 
 # Classification thresholds (price change %)
 THRESHOLDS = {
     "h1":  0.005,   # 0.5%
     "h4":  0.015,   # 1.5%
     "h12": 0.030,   # 3.0%
+    "w1":  0.080,   # 8.0%
+    "m1":  0.150,   # 15.0%
 }
 
 # XGBoost parameters (conservative for small datasets)
@@ -85,8 +95,8 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
         return [], {}
 
     features = []
-    labels = {"h1": [], "h4": [], "h12": []}
-    skipped = {"h1": 0, "h4": 0, "h12": 0}
+    labels = {"h1": [], "h4": [], "h12": [], "w1": [], "m1": []}
+    skipped = {"h1": 0, "h4": 0, "h12": 0, "w1": 0, "m1": 0}
 
     with open(filepath) as f:
         for line in f:
@@ -104,7 +114,7 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
 
             features.append(feat)
 
-            for horizon in ["h1", "h4", "h12"]:
+            for horizon in ["h1", "h4", "h12", "w1", "m1"]:
                 label_key = f"label_{horizon}"
                 val = row.get(label_key)
                 if val is not None:
@@ -114,7 +124,7 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                     skipped[horizon] += 1
 
     print(f"  [{token}] Loaded {len(features)} rows")
-    for h in ["h1", "h4", "h12"]:
+    for h in ["h1", "h4", "h12", "w1", "m1"]:
         labeled = sum(1 for v in labels[h] if v is not None)
         print(f"    {h}: {labeled} labeled, {skipped[h]} unlabeled")
 
@@ -148,8 +158,9 @@ def train_model(
             X.append(X_all[i])
             y.append(classify_label(label, threshold))
 
-    if len(X) < MIN_SAMPLES:
-        print(f"    {horizon}: Only {len(X)} labeled samples (need {MIN_SAMPLES}), skipping")
+    min_samples = MIN_SAMPLES[horizon] if isinstance(MIN_SAMPLES, dict) else MIN_SAMPLES
+    if len(X) < min_samples:
+        print(f"    {horizon}: Only {len(X)} labeled samples (need {min_samples}), skipping")
         return None
 
     X = np.array(X, dtype=np.float32)
@@ -242,7 +253,7 @@ def train_token(token: str) -> dict | None:
         "horizons": {},
     }
 
-    for horizon in ["h1", "h4", "h12"]:
+    for horizon in ["h1", "h4", "h12", "w1", "m1"]:
         result = train_model(features, labels[horizon], horizon, token)
         if result:
             meta["horizons"][horizon] = result
@@ -262,7 +273,7 @@ def train_token(token: str) -> dict | None:
 
 def main():
     print(f"=== XGBoost Training === {datetime.now(timezone.utc).isoformat()}")
-    print(f"  Min samples: {MIN_SAMPLES}")
+    print(f"  Min samples per horizon: {MIN_SAMPLES}")
     print(f"  Tokens: {TOKENS}")
     print(f"  XGBoost version: {xgb.__version__}")
 
@@ -290,7 +301,7 @@ def main():
 
     if not results:
         print("\n  No models trained. Collect more data first.")
-        print(f"  Required: {MIN_SAMPLES}+ labeled rows per token")
+        print(f"  Required min samples per horizon: {MIN_SAMPLES}")
 
     print(f"\n=== Done === {datetime.now(timezone.utc).isoformat()}")
 

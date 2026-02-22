@@ -32,7 +32,7 @@
 export { TechnicalIndicators, TechnicalFeatures, OHLCVData } from './features/TechnicalIndicators.js';
 export { NansenFeatures, NansenFlowData, SmartMoneyPosition } from './features/NansenFeatures.js';
 export { HyperliquidDataLoader, INTERVALS } from './data/HyperliquidDataLoader.js';
-export { HybridPredictor, PredictionResult, ModelWeights } from './models/HybridPredictor.js';
+export { HybridPredictor, PredictionResult, ModelWeights, PREDICTION_HORIZONS } from './models/HybridPredictor.js';
 export { XGBoostPredictor, XGBPrediction, FEATURE_NAMES } from './models/XGBoostPredictor.js';
 
 import { HyperliquidDataLoader } from './data/HyperliquidDataLoader.js';
@@ -118,24 +118,18 @@ export class PricePredictionService {
   /**
    * Verify past predictions
    */
-  async verifyPredictions(token: string): Promise<{
-    h1: { accuracy: number; total: number };
-    h4: { accuracy: number; total: number };
-    h12: { accuracy: number; total: number };
-    direction: { accuracy: number; total: number };
-  }> {
+  async verifyPredictions(token: string): Promise<Record<string, { accuracy: number; total: number }>> {
     const candles = await this.dataLoader.fetchCandles(token, '1h', 24);
     const currentPrice = candles[candles.length - 1]?.close || 0;
 
     if (currentPrice > 0) {
       return this.predictor.verifyPredictions(token, currentPrice);
     }
-    return {
-      h1: { accuracy: 0, total: 0 },
-      h4: { accuracy: 0, total: 0 },
-      h12: { accuracy: 0, total: 0 },
-      direction: { accuracy: 0, total: 0 },
-    };
+    const result: Record<string, { accuracy: number; total: number }> = {};
+    for (const key of ['h1', 'h4', 'h12', 'w1', 'm1', 'direction']) {
+      result[key] = { accuracy: 0, total: 0 };
+    }
+    return result;
   }
 
   /**
@@ -214,11 +208,11 @@ export class PricePredictionService {
    */
   getXGBFeatureImportance(token: string): Record<string, Record<string, number> | null> {
     const xgb = this.predictor.getXGBoost();
-    return {
-      h1: xgb.getFeatureImportance(token, 'h1'),
-      h4: xgb.getFeatureImportance(token, 'h4'),
-      h12: xgb.getFeatureImportance(token, 'h12'),
-    };
+    const result: Record<string, Record<string, number> | null> = {};
+    for (const hz of ['h1', 'h4', 'h12', 'w1', 'm1']) {
+      result[hz] = xgb.getFeatureImportance(token, hz);
+    }
+    return result;
   }
 
   /**
@@ -267,7 +261,7 @@ const isMainModule = import.meta.url === `file://${process.argv[1]}`;
 if (isMainModule) {
   (async () => {
     const svc = getPredictionService();
-    const tokens = ['HYPE', 'LIT', 'FARTCOIN'];
+    const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
 
     console.log('\n🔮 Price Prediction Service - Test Run\n');
 
@@ -284,10 +278,9 @@ if (isMainModule) {
 
         const arrow = pred.direction === 'BULLISH' ? '📈' : pred.direction === 'BEARISH' ? '📉' : '➡️';
 
-        console.log(`  1h:  ${arrow} ${pred.predictions.h1.change >= 0 ? '+' : ''}${pred.predictions.h1.change.toFixed(2)}% → $${pred.predictions.h1.price.toFixed(4)} (conf: ${pred.predictions.h1.confidence.toFixed(0)}%)`);
-        console.log(`  4h:  ${arrow} ${pred.predictions.h4.change >= 0 ? '+' : ''}${pred.predictions.h4.change.toFixed(2)}% → $${pred.predictions.h4.price.toFixed(4)} (conf: ${pred.predictions.h4.confidence.toFixed(0)}%)`);
-        console.log(`  12h: ${arrow} ${pred.predictions.h12.change >= 0 ? '+' : ''}${pred.predictions.h12.change.toFixed(2)}% → $${pred.predictions.h12.price.toFixed(4)} (conf: ${pred.predictions.h12.confidence.toFixed(0)}%)`);
-
+        for (const [hz, p] of Object.entries(pred.predictions)) {
+          console.log(`  ${hz.padEnd(4)}: ${arrow} ${p.change >= 0 ? '+' : ''}${p.change.toFixed(2)}% → $${p.price.toFixed(4)} (conf: ${p.confidence.toFixed(0)}%)`);
+        }
         console.log(`\nSignals:`);
         console.log(`  Technical:   ${(pred.signals.technical * 100).toFixed(0)}%`);
         console.log(`  Momentum:    ${(pred.signals.momentum * 100).toFixed(0)}%`);
