@@ -19,7 +19,8 @@
 11. [Case Study: Winner d7a678](#case-study-winner-d7a678--anatomia-idealnego-tradea)
 12. [VIP Intelligence Report](#vip-intelligence-report--snapshot-21-lutego-2026) *(updated: 25 VIPs)*
 13. [BTC SHORT Deep Dive](#btc-short-deep-dive--kto-shortowal-od-topu-i-mogl-cos-wiedziec)
-14. [Slowniczek](#slowniczek)
+14. [Sesja 22.02 -- Trzy bugi ktore kradly nam edge](#sesja-2202----trzy-bugi-ktore-kradly-nam-edge) **(NEW)**
+15. [Slowniczek](#slowniczek)
 
 ---
 
@@ -1249,6 +1250,331 @@ Nansen ujawnil top 8 traderow ktorzy zarobili lacznie **$355M** w pierwszych 2 t
 
 ---
 
+## Sesja 22.02 -- Trzy bugi ktore kradly nam edge
+
+Dzis naprawilismy trzy bugi. Dwa z nich byly cicho zepsute od tygodni. Jeden nigdy nie dzialal. Kazdy z nich to inna lekcja o tym jak dane plyna przez system i jak latwo je zgubic po drodze.
+
+### Sesja Bug #3: General vs Analityk (Conviction Override)
+
+#### Historia
+
+Wyobraz sobie sztab wojenny. General (whale_tracker.py) od godzin obserwuje pole bitwy. Widzi ze SHORT pozycje zarabiaja +$1.4M a LONG pozycje sa pod woda na -$64K. Mowi: "Shortuj LIT. 57% pewnosci."
+
+W kacie siedzi Analityk (SignalEngine) z kalkulatorem. Bierze surowe dane -- $3.3M shortow vs $2.46M longow -- i liczy ratio: 1.34. Sprawdza tablice: prog "moderate" to 2.0. Ratio jest za male. Wynik: 11 na 50. Analityk mowi: "11 to strefa WAIT. Nie jestem pewien niczego. Grajmy na obie strony."
+
+Bot sluchal Analityka i ignorowal Generala.
+
+#### Co sie dzialo w kodzie
+
+W `src/mm/SmAutoDetector.ts`:
+
+1. `whale_tracker.py` produkuje dane: `trading_mode: "FOLLOW_SM_SHORT"`, `trading_mode_confidence: 57`. Ta pewnosc bierze sie z **glebokiej analizy** -- nie tylko kto ma wieksze pozycje, ale **kto wygrywa** (PnL analysis).
+
+2. Dane ida do `SignalEngine.analyze()` w `src/core/strategy/SignalEngine.ts`. Patrzy na short/long ratio (1.34x dla LIT). Dla LIT, prog `moderateRatio` to 2.0 (linia 248 w `TOKEN_CONFIGS`). 1.34 < 2.0, wiec ratio nawet nie rejestruje sie jako "moderate".
+
+3. SignalEngine liczy `hlPerpsScore` na okolo 11. Score laduje miedzy -25 a +25 -- to strefa **WAIT**. Zwraca `action: 'WAIT'`.
+
+4. Z powrotem w SmAutoDetector, stary kod **zawsze** wymuszal PURE_MM gdy Engine mowil WAIT:
+   ```typescript
+   // STARY KOD (bug):
+   if (engineSignal.action === 'WAIT') {
+     engineOverrideMode = 'PURE_MM';
+     dominantSide = 'NEUTRAL';
+   }
+   ```
+
+5. Bot zaczyna market-making na obie strony. Sklada zlecenia kupna I sprzedazy. Jesli LIT spada (jak oczekuja wieloryby), nasze zlecenia kupna sie realizuja i kupujemy w spadajacy noz. 57% SHORT conviction Generala idzie na marne.
+
+#### Dlaczego General widzi wiecej niz Analityk
+
+To jest kluczowy insight. General i Analityk patrza na **te same dane** ale zadaja **rozne pytania**.
+
+Analityk pyta: "Jak bardzo nierownomierne jest ratio?"
+- $3.3M short vs $2.46M long = 1.34x. Nic specjalnego.
+
+General pyta: "Kto wygrywa?"
+- Shorty zarabiaja +$1.4M niezrealizowanego zysku
+- Longi sa pod woda -$64K
+- Wygrywajaca strona rosnie z czasem
+
+Widzisz roznice? 1.34x ratio nie brzmi ekstremalnie. Ale kiedy dowiadujesz sie ze strona shortowa zarabia $1.4M a longowa tonie, obraz sie zmienia. General uwzglednia PnL, momentum, trend historyczny i squeeze detection. Analityk widzi tylko ratio i flow.
+
+To jest jak roznica miedzy "Dwie armie sa podobnej wielkosci" (Analityk) a "Jedna armia wygrywa na kazdym froncie i ma inicjatywe" (General).
+
+#### Fix
+
+W `src/mm/SmAutoDetector.ts`, linia ~702:
+
+```typescript
+if (engineSignal.action === 'WAIT') {
+  // NOWE: Engine nie pewien -- ale whale_tracker moze miec
+  // analize PnL ktorej Engine nie widzi
+  if (whaleTrackerConfidence >= 50 && whaleTrackerMode &&
+      !whaleTrackerMode.includes('NEUTRAL')) {
+    // whale_tracker ma wysoka pewnosc z analizy PnL
+    // (shorty wygrywaja, longi pod woda itd.)
+    // SignalEngine widzi tylko ratio ktore moze wygladac "niewystarczajaco"
+    // -- zaufaj whale_tracker
+    engineOverrideMode = whaleTrackerMode;
+    engineOverrideConfidence = whaleTrackerConfidence;
+  } else {
+    // Niska pewnosc whale_tracker lub NEUTRAL -- PURE_MM
+    engineOverrideMode = 'PURE_MM';
+    engineOverrideConfidence = Math.abs(engineSignal.score);
+    dominantSide = 'NEUTRAL';
+  }
+}
+```
+
+Tlumaczenie: "Gdy Analityk wzrusza ramionami, sprawdz czy General ma silne przekonanie. Jesli General jest 50%+ pewny z kierunkowym callem, zaufaj Generalowi."
+
+#### Dlaczego akurat 50%?
+
+Ponizej 50%, nawet sam `whale_tracker.py` nie jest pewien. Jego confidence score juz uwzglednia momentum penalty, squeeze detection i PnL divergence. Jesli po calej tej analizie osiaga tylko 43%, sygnal naprawde jest niejednoznaczny i PURE_MM (hedge na obie strony) jest bezpieczniejszy.
+
+#### Plot twist
+
+Po deployu sprawdzilismy LIT. Confidence spadlo do 43% bo wieloryby zmniejszyly SHORT pozycje (General zszedl z $7.4M do $3.3M short na LIT). Wiec LIT i tak zostal w PURE_MM -- ale tym razem poprawnie, bo dane naprawde oslably.
+
+Ale **ZEC** udowodnil ze fix dziala: 70% confidence, CONTRARIAN_SHORT mode. Bez fixa SignalEngine wymuszalby PURE_MM z 11% conviction. Z fixem poprawnie trzyma CONTRARIAN_SHORT na 70%.
+
+#### Lekcja
+
+**Gdy dwa systemy sie nie zgadzaja, zrozum co kazdy z nich widzi.** Analityk robil waski osad (tylko ratio), General mial szersza perspektywe (ratio + PnL + trendy). Fix to nie "zawsze ufaj Generalowi" -- to "gdy Analityk mowi 'nie wiem', oddaj glos temu kto ma wiecej informacji."
+
+---
+
+### Sesja Bug #5: Przeterminowany raport wywiadu
+
+#### Historia
+
+Bot ma model ML ktory przewiduje ceny. Model wazy piec czynnikow, a najwazniejszy -- Smart Money positions (40% wagi) -- pochodzi z pliku `/tmp/nansen_bias.json`. Ten plik powinien byc aktualizowany co 15 minut przez `whale_tracker.py`.
+
+Plik mial **20 dni**. Przez prawie trzy tygodnie model ML robil prognozy na podstawie pozycji wielorybow z 2 lutego, a nie dzisiejszych.
+
+W te 20 dni General zredukowal LIT SHORT z $7.4M do $3.3M. Pulkownik zamknal caly $46M BTC SHORT. Bitcoin OG zostal zlikwidowany na -$128M. Caly krajobraz sie zmienil, a model patrzyl na zdjecie sprzed trzech tygodni.
+
+#### Jak to sie stalo
+
+Dwa pliki zyja w `/tmp`:
+- `smart_money_data.json` -- szczegolowe dane pozycji wielorybow
+- `nansen_bias.json` -- uproszczone wyniki bias dla modelu ML
+
+Oba pisze `whale_tracker.py`. Ale jest haczyk: **inny** proces (`whale_tracker_live`) pisal `smart_money_data.json` periodycznie. NIE pisze `nansen_bias.json`.
+
+Wiec na serwerze:
+```bash
+ls -la /tmp/smart_money_data.json   # Swiezy! Zaktualizowany 10 min temu
+ls -la /tmp/nansen_bias.json         # 2 lutego. Dwadziescia dni temu.
+```
+
+Mozesz zerknac na pierwszy plik, zobaczyc ze swiezy, i zalozyc ze wszystko gra. Ale drugi plik -- ten od ktorego zalezy model ML -- jest antyczny.
+
+Przyczyna? `whale_tracker.py` **nie byl w crontabie**. Kiedys dzialal, ale gdzies po drodze wpis cron zniknal (moze przy migracji serwera). Nikt nie zauwazyl bo `smart_money_data.json` byl swiezy dzieki innemu procesowi.
+
+#### Fix
+
+```bash
+crontab -e
+# Dodane:
+*/15 * * * * cd /home/jerry/hyperliquid-mm-bot-complete && python3 whale_tracker.py
+```
+
+Jedna linijka crona. Najprostszy fix w calej sesji, ale najbardziej impaktowy: 40% wagi predykcji modelu ML bylo martwe.
+
+#### A bylo jeszcze gorzej: NansenFeatures mismatch
+
+Wczesniej w tej sesji odkrylismy ze `src/prediction/features/NansenFeatures.ts` -- kod ktory CZYTA te pliki -- mial rozjazd nazw pol:
+
+| Co kod szukal | Co plik zawieral |
+|---------------|-----------------|
+| `parsed.tokens[token]` | `parsed.data[token]` |
+| `total_long_usd` | `current_longs_usd` |
+| `total_short_usd` | `current_shorts_usd` |
+| `tokenBias.bias` | Wyliczane z `tokenBias.direction` + `tokenBias.boost` |
+| `tokenBias.confidence` | `tokenBias.tradingModeConfidence` |
+
+Wiec nawet GDYBY dane byly swieze, kod nie mogl ich odczytac. Sygnal `smartMoney` w prognozach byl **zawsze zero** dla kazdego tokena. Model ML dzialal z 40% wagi produkujaca nic. Od zawsze.
+
+Po naprawie obu problemow (mapping kodu + cron job):
+
+| Token | SM (przed) | SM (po) |
+|-------|-----------|---------|
+| HYPE | 0.000 | 0.000 (prawidlowo -- longi i shorty zbalansowane) |
+| LIT | 0.000 | **-0.198** (bearish, ratio -0.28, conviction 58%) |
+| FARTCOIN | 0.000 | **-0.487** (bearish, 44:1 SHORT, conviction 95%) |
+
+#### Lekcja: Dwa debugging tipy ktore kazdy powinien znac
+
+**Tip 1: Zawsze sprawdzaj KTO pisze kazdy plik, nie tylko CZY istnieje.**
+
+| Plik | Kto pisze | Kto czyta | Czestotliwosc |
+|------|-----------|-----------|---------------|
+| `smart_money_data.json` | whale_tracker.py + whale_tracker_live | SmAutoDetector.ts | co 15 min |
+| `nansen_bias.json` | **TYLKO** whale_tracker.py | NansenFeatures.ts | co 15 min |
+
+Gdybys mial taka tabelke, od razu zobaczylbys ze `whale_tracker.py` potrzebuje crona.
+
+**Tip 2: `ls -la` to twoj najlepszy przyjaciel.**
+
+Nie sprawdzaj tylko "czy plik istnieje". Sprawdz **kiedy byl ostatnio modyfikowany**:
+```bash
+ls -la /tmp/nansen_bias.json
+# -rw-r--r-- 1 jerry jerry 4096 Feb  2 14:30 nansen_bias.json
+#                                  ^^^^^ 20 DNI TEMU!
+```
+
+To jest trojwarstwowa awaria:
+1. **Writer nie dziala** (brak crona)
+2. **Bledne zalozenie** ("plik jest swiezy" -- tak, ale ZLY plik)
+3. **Reader zepsuty** (rozjazd nazw pol w NansenFeatures.ts)
+
+Kazda z tych warstw wystarczylyby zeby zabic sygnal. Wszystkie trzy byly zepsute jednoczesnie.
+
+---
+
+### Sesja Bug #6: Odlaczony Wyrocznia
+
+#### Historia
+
+Bot ma silnik predykcji cen. Nazywamy go Wyrocznia (Oracle). Bierze swieczki 5-minutowe (OHLCV), odpala analize techniczna (RSI, MACD, Bollinger Bands), laczy z danymi on-chain przez model ML i produkuje prognozy typu: "LIT bedzie po $1.52 za godzine, 65% confidence, BEARISH."
+
+Wyrocznia byla juz zbudowana. Metoda `getOracleGridBias()` istniala w `src/mm_hl.ts` (okolo linii 5492). Bierze symbol coina, szuka sygnalu Wyroczni w cache i zwraca mnozniki bid/ask ktore przesunelby grid w kierunku przewidywanym:
+
+```typescript
+getOracleGridBias(coin: string): { bidMult: number; askMult: number; reason: string } {
+    const signal = this.oracleSignalCache.get(coin)
+    if (!signal || signal.confidence < 30) {
+      return { bidMult: 1.0, askMult: 1.0, reason: 'Oracle: No signal or low confidence' }
+    }
+    // Score > 60: bullish -> wiecej bidow, mniej askow
+    // Score < -60: bearish -> mniej bidow, wiecej askow
+}
+```
+
+Problem? **Nikt nigdy nie wywolal tej metody.** Idealna funkcja siedzaca w codebase, podlaczona do niczego. Wyrocznia mogla widziec przyszlosc (poniekad), ale nikt nie sluchal.
+
+#### Co zrobilismy
+
+Dodalismy wywolanie `getOracleGridBias()` w petli generowania grida (okolo linii 8051 w `mm_hl.ts`):
+
+```typescript
+// Monitoring dywergencji Wyroczni (tylko logowanie -- zero akcji tradingowych)
+try {
+  const oracleBias = this.getOracleGridBias(symbol)
+  if (oracleBias.reason !== 'Oracle: No signal or low confidence') {
+    const smMode = overridesConfig?.followSmMode || permissions.reason || 'PURE_MM'
+    console.log(`[ORACLE] ${symbol}: ${oracleBias.reason} | SM mode: ${smMode}`)
+
+    // Flaguj dywergencje: Wyrocznia bullish ale SM mowi SHORT, lub odwrotnie
+    const oracleBullish = oracleBias.bidMult > 1
+    const smShort = smMode.includes('SHORT')
+    if (oracleBullish && smShort) {
+      console.log(`[ORACLE] ${symbol}: DYWERGENCJA -- Oracle BULLISH vs SM SHORT`)
+    }
+  }
+} catch (e) { /* nie zabij bota przez logowanie */ }
+```
+
+#### Dlaczego TYLKO logowanie? (To jest wazne)
+
+Celowo NIE dodalismy biasu Wyroczni do faktycznych decyzji tradingowych. Dlaczego?
+
+Bot dziala wedlug **Doktryny Wojennej**: sygnaly Smart Money sa najwyzsze. Cala architektura jest zbudowana wokol zalozen ze pozycje wielorybow to sygnal o najwyzszym autorytecie. Jesli Wyrocznia mowi "BULLISH" a wieloryby shortuja -- **idziemy za wielorybami**.
+
+Gdybysmy podlaczyli Wyrocznie do tradingu, stworzyloby to natychmiastowy konflikt:
+
+```
+Wyrocznia mowi:  "LIT wzrosnie o 3% w 1 godzine" (BULLISH)
+Wieloryby mowia: "Mamy $3.3M shorta na LIT" (BEARISH)
+Bot mowi:         ???
+```
+
+Kto wygrywa? Musielibysmy zdefiniowac wagi, priorytety, edge case'y. Co jesli Wyrocznia ma racje w 60% przypadkow ale wieloryby w 75%? Co jesli Wyrocznia ma racje co do KIERUNKU ale nie TIMINGU?
+
+Dodanie jako logging-only to inzynieryjny odpowiednik **posadzenia nowego doradcy przy stole bez dawania mu prawa glosu**. Mozemy obserwowac logi przez kilka tygodni i zobaczyc:
+- Jak czesto Wyrocznia zgadza sie z SM? (wartosc potwierdzenia)
+- Jak czesto sie rozni i kto ma racje? (potencjalny alpha)
+- Czy jest systematycznie bledna dla niektorych tokenow? (kalibracja modelu)
+
+Po zebraniu tych danych mozemy podjac swiadoma decyzje czy promowac Wyrocznia z "obserwatora" na "uczestnika."
+
+#### Analogia: Paper trading
+
+Tak wlasnie dzialaja profesjonalne firmy quantowe. Nazywaja to "paper trading strategii" -- uruchamiasz nowa strategie rownolegle z systemem live, zapisujesz co BY zrobila, a potem porownujesz hipotetyczny P&L z faktycznym. Dopiero gdy paper wyniki konsekwentnie pokazuja poprawe, dajesz strategii prawdziwy kapital.
+
+Nasza Wyrocznia jest teraz w fazie paper trading. Mowi nam co by zrobila (logi), ale nie ma jeszcze prawa wydawac rozkazow.
+
+---
+
+### Jak te trzy bugi sie lacza: Lekcja o pipeline'ach danych
+
+Wszystkie trzy bugi maja wspolny motyw: **przerwane polaczenia w pipeline'ach danych**.
+
+```
+whale_tracker.py                 Smart Money Data
+    |                                 |
+    | (Bug #5: nie dziala)            | (Bug #5: stary plik)
+    v                                 v
+/tmp/nansen_bias.json  --->   NansenFeatures.ts  --->  Model ML
+                              (rozjazd nazw pol)       (40% wagi = 0)
+    |
+    | (tez pisze)
+    v
+/tmp/smart_money_data.json  --->  SmAutoDetector.ts  --->  SignalEngine
+                                       |                        |
+                                       | (Bug #3: Engine        |
+                                       |  nadpisuje tracker)    |
+                                       v                        v
+                                  Decyzje bota  <---  getOracleGridBias()
+                                       ^              (Bug #6: nigdy nie wywolany)
+                                       |
+                                  Wyrocznia (odlaczona)
+```
+
+Architektura jest dobra. Kazdy komponent ma jasna role. Ale polaczenia miedzy nimi byly popsuty w subtelny sposob:
+- Cron job zniknal cicho
+- Nazwy pol rozjechaly sie miedzy pisarzem a czytelnikiem
+- Funkcja zostala zaimplementowana ale nigdy zintegrowana
+- System priorytetow zalozy ze jeden komponent widzi wszystko, a on widzial tylko czesc
+
+#### Co by to wszystko wylapalo?
+
+1. **Sprawdzanie swiezosci**: Przy czytaniu `/tmp/nansen_bias.json` sprawdzaj timestamp. Jesli > 30 min, loguj warning. Jesli > 2h, krzycz.
+
+2. **Alarmy na zerowe wartosci**: Jesli `smartMoney` jest 0.000 dla WSZYSTKICH tokenow jednoczesnie, cos jest zepsute. Zdrowe dane powinny miec wariancje.
+
+3. **Testy pokrycia**: Dla kazdej funkcji ktora powinna byc wolana z main loop, grepuj codebase na wywolania. Jesli count jest zero, to martwy kod (albo Bug #6).
+
+4. **Tabela wlasnosci plikow**: Trzymaj w dokumentacji prosta tabele:
+   | Plik | Kto pisze | Kto czyta | Czestotliwosc |
+   |------|-----------|-----------|---------------|
+   | `nansen_bias.json` | `whale_tracker.py` | `NansenFeatures.ts` | Co 15 min |
+   | `smart_money_data.json` | `whale_tracker.py` + `whale_tracker_live` | `SmAutoDetector.ts` | Co 15 min |
+
+---
+
+### Kluczowe progi do zapamietania
+
+| Parametr | Wartosc | Plik | Dlaczego |
+|----------|---------|------|----------|
+| SignalEngine strefa WAIT | -25 do +25 | `SignalEngine.ts` L822-823 | Score za slaby na kierunkowy zaklad |
+| whale_tracker conviction threshold | 50% | `SmAutoDetector.ts` L704 | Ponizej nawet General nie jest pewien |
+| LIT `moderateRatio` | 2.0x | `SignalEngine.ts` L248 | Short/long ratio musi przekroczyc to dla "moderate" |
+| `extremeRatio` (whale override) | 5.0x | `SignalEngine.ts` L107 | Triggeruje bypass wszytkiego |
+| ML model waga SM | 40% | `HybridPredictor.ts` L52 | Najwiekszy pojedynczy czynnik w prognozach |
+
+---
+
+### Co dalej
+
+- **Obserwuj logi Wyroczni** przez kilka tygodni. Jesli konsekwentnie poprawnie przewiduje gdy sygnaly SM sa niejednoznaczne, rozwaз promowanie z logowania do tiebreakera.
+- **Monitoruj cron whale_tracker** -- weryfikuj ze `/tmp/nansen_bias.json` jest swiezy (sprawdzaj timestampy co dzien).
+- **Waliduj prognozy ML** -- teraz gdy dane SM plyna do modelu (40% wagi przywrocone), dokladnosc progonz powinna sie wyraznie poprawic.
+- **Dodaj freshness guardy** do kazdego file readera: `if (Date.now() - fileTimestamp > 30*60*1000) warn("stale data!")` -- to uniemozliwi powtorzenie Buga #5.
+
+---
+
 ## Podsumowanie
 
 Ten bot to nie jest "kup tanio, sprzedaj drogo". To jest **system wywiadowczy** ktory:
@@ -1261,7 +1587,175 @@ Ten bot to nie jest "kup tanio, sprzedaj drogo". To jest **system wywiadowczy** 
 
 Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od taktyki, dane od opinii, a dyscyplina od sprytu.**
 
+A z dzisiejszej sesji dodatkowa lekcja: **dane musza byc swieze, polaczenia nienaruszone, a nowe sygnaly najpierw obserwowane zanim dostaną prawdziwa wladze.**
+
 ---
 
-*Ostatnia aktualizacja: 22 lutego 2026 (prediction-api SM data fix — NansenFeatures mismatch, ai-executor channel ID fix, server health audit, hourly/whale report → cron, Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli)*
+*Ostatnia aktualizacja: 22 lutego 2026*
 *Wygenerowane przez Claude Code*
+
+---
+
+# Rozdzial X: XGBoost — Jak Dalismy Botowi Prawdziwy Mozg
+
+> "The old way: if RSI < 30 then buy. The new way: let the machine figure out what RSI < 30 *combined with* SM ratio > 5x *combined with* high funding *at 3am UTC* actually means."
+
+## Co Wlasnie Zbudowalismy?
+
+Wczesniej `prediction-api` dzialal jak kucharz ze scislym przepisem — "jezeli RSI < 30, to bullish; jezeli SM ratio > 2, to bullish" — sztywne reguly polaczone stalymi wagami. Dzialalo, ale nie moglo odkryc wzorcow, ktorych czlowiek nie zaprogramowal recznie.
+
+Teraz dodalismy **XGBoost** — model machine learning, ktory *uczy sie* z danych. Pomysl o tym jak o drugim mozgu, ktory ogląda tygodnie historii rynkowej, znajduje wzorce niewidoczne dla ludzi, i szepcze swoja opinie przed kazda predykcja.
+
+Setup: **zbieraj dane → trenuj w Pythonie → wnioskuj w TypeScript → mieszaj z istniejacym HybridPredictor.**
+
+---
+
+## Architektura: Trójwarstwowy Tort
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  WARSTWA 1: ZBIERANIE DANYCH (Python, co 15 min)                │
+│  scripts/xgboost_collect.py                                      │
+│    → Pobiera candle'e, dane SM, funding, OI z Hyperliquid        │
+│    → Oblicza 30 znormalizowanych cech (ta sama matma co TS)      │
+│    → Dopisuje do /tmp/xgboost_dataset_{TOKEN}.jsonl               │
+│    → Wypelnia etykiety wstecz: "co sie stalo 1h/4h/12h pozniej?" │
+└──────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────┐
+│  WARSTWA 2: TRENING (Python, cotygodniowy cron)                  │
+│  scripts/xgboost_train.py                                        │
+│    → Czyta dataset JSONL (potrzebuje 200+ oznaczonych wierszy)   │
+│    → Trenuje 3 modele per token (horyzonty h1, h4, h12)          │
+│    → Klasyfikacja: SHORT / NEUTRAL / LONG                        │
+│    → Eksportuje model JSON do /tmp/xgboost_model_{TOKEN}_{h}.json│
+│    → Eksportuje metadane (dokladnosc, waznosc cech)              │
+└──────────────────────────────────────────────────────────────────┘
+                              ↓
+┌──────────────────────────────────────────────────────────────────┐
+│  WARSTWA 3: WNIOSKOWANIE (TypeScript, kazde zapytanie predict)   │
+│  src/prediction/models/XGBoostPredictor.ts                       │
+│    → Laduje model JSON, przechodzi drzewa decyzyjne              │
+│    → Zero zaleznosci npm — czysty traversal drzew                │
+│    → Softmax na 3 klasy → prawdopodobienstwa                     │
+│    → Mieszane z HybridPredictor wagą 30%                         │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Wektor Cech: Co Model Widzi
+
+Karmimy XGBoost 30 liczbami — kazda to starannie znormalizowany widok rynku:
+
+### Techniczne (11 cech, indeksy 0-10)
+Pochodza z candle'i ceny/wolumenu. Kluczowy insight: uzywamy `tanh()` zeby skompresowaæ nieograniczone wartosci (MACD moze byc dowolna liczba) do [-1, 1], a proste dzielenie dla naturalnie ograniczonych (RSI zawsze 0-100).
+
+### Nansen/SM (11 cech, indeksy 11-21)
+Nasza tajna bron — dane Smart Money, ktorych 99% traderow nie ma. SM ratio, conviction, dollar amounts, signal state, dominacja strony.
+
+### Dodatkowe (8 cech, indeksy 22-29)
+Rzeczy, na ktore stary system regul nigdy nie patrzyl:
+- **Funding rate** — gdy funding jest bardzo pozytywny, longi placa shortom → presja na sprzedaz
+- **Zmiana OI 1h/4h** — rosnace OI = nowe pieniadze wchodzą; spadajace = pozycje zamykane
+- **Cykliczne godzina/dzien** — kodowanie sin/cos pozwala modelowi nauczyc sie "sesja azjatycka jest inna niz amerykanska"
+- **Zmiennosc 24h** — surowe odchylenie standardowe ostatnich zwrotow
+
+**Dlaczego sin/cos dla czasu?** Gdybysmy uzyly surowej godziny (0-23), model myslalby ze 23:00 i 00:00 sa daleko od siebie. Z sin/cos sa sasiadami na okregu — tak jak czas faktycznie dziala.
+
+---
+
+## Jak Dziala XGBoost (wersja 30-sekundowa)
+
+XGBoost buduje 100 "drzew decyzyjnych" — kazde to prosty zestaw regul jezeli/to:
+
+```
+Czy RSI < 0.3?
+  ├── TAK: Czy SM_ratio < -0.5?
+  │   ├── TAK: lisc = -0.15 (bearish)
+  │   └── NIE: lisc = +0.02 (lekko bullish)
+  └── NIE: Czy funding > 0.01?
+      ├── TAK: lisc = -0.08 (bearish)
+      └── NIE: lisc = +0.05 (bullish)
+```
+
+Kazde drzewo jest "slabe" — ledwo lepsze niz zgadywanie. Ale 100 drzew glosujacych razem (to "boosting" w XGBoost) staje sie zaskakujaco dokladne.
+
+Dla klasyfikacji 3-klasowej (SHORT/NEUTRAL/LONG), XGBoost buduje drzewa w grupach po 3 — jedno drzewo na klase na runde. Po 100 rundach = 300 drzew lacznie. Sumujemy wartosci lisci per klasa, stosujemy softmax, i dostajemy prawdopodobienstwa.
+
+**Magia:** XGBoost moze odkryc interakcje jak "gdy RSI jest oversold ORAZ SM akumuluje ORAZ jest sesja US → sygnal LONG jest 3x silniejszy." Reczne reguly nie potrafia uchwycic tych wielowymiarowych wzorcow.
+
+---
+
+## Mieszanie: Jak Dwa Mozgi Wspolpracuja
+
+Nie wyrzucamy starego systemu regul — jest sprawdzony w boju. Zamiast tego *mieszamy*:
+
+```typescript
+// Stary sygnal oparty na regulach: -1 do +1
+let combinedSignal = -0.35;
+
+// XGBoost mowi: SHORT z 72% pewnoscia
+const xgbSignal = -0.8;  // SHORT = -0.8
+const xgbWeight = 0.30;  // 30% wplyw XGBoost
+
+// Wynik po zmieszaniu:
+// -0.35 * 0.70 + (-0.8) * 0.30 * 0.72 = -0.245 + -0.173 = -0.418
+```
+
+**Dlaczego 30%?** Konserwatywny start. XGBoost musi udowodnic swoja wartosc na zywyc danych zanim zaufamy mu bardziej. Jesli konsekwentnie pokonuje reguly, mozemy podniesc do 50% lub wiecej. Jesli jest slaby, 30% nas nie zniszczy.
+
+---
+
+## Lekcje i Pulapki
+
+### 1. Wyrownanie Cech jest Wszystkim
+Kolektor Python i normalizator TypeScript **musza obliczac identyczne cechy**. Jesli Python mowi ze cecha[4] to `tanh(change_1h/10)` ale TypeScript wstawia tam `tanh(change_4h/20)`, model widzi smieci.
+
+### 2. Podzial Chronologiczny, Nie Losowy
+Dla danych czasowych **nigdy** nie mieszamy losowo treningowego/testowego. Zbior testowy musi byc *najnowsze* 20% danych — bo tak dziala swiat rzeczywisty.
+
+### 3. Problem "Przestarzalego Modelu"
+Modele trenowane na tygodniowych danych moga byc niebezpiecznie bledne jesli rezim rynku sie zmienil. Dlatego retrenujemy co tydzien, a `/xgb-status` pokazuje wiek modelu.
+
+### 4. Brak Rownoruagi Klas
+Wiekszość czasu zmiany cen sa male → NEUTRAL dominuje. Walczymy z tym poprzez rozsadne progi (0.5% dla 1h, 1.5% dla 4h, 3% dla 12h).
+
+### 5. Brama 200 Probek
+Odmawiamy treningu z <200 oznaczonymi wierszami. Przy 15-minutowych interwałach to ~50 godzin (2+ dni) zbierania. Pierwszy trening po deployu nastapi po pierwszym weekendzie.
+
+---
+
+## Nowe Endpointy API
+
+| Endpoint | Co zwraca |
+|----------|-----------|
+| `GET /predict-xgb/:token` | Predykcja tylko XGBoost (wszystkie 3 horyzonty z prawdopodobienstwami) |
+| `GET /xgb-status` | Ktore tokeny maja modele, wiek, statystyki dokladnosci |
+| `GET /xgb-features/:token` | Top 10 najwazniejszych cech per horyzont |
+
+Istniejacy `/predict/:token` teraz automatycznie wlacza mieszanie z XGBoost.
+
+---
+
+## Pliki Utworzone/Zmodyfikowane
+
+| Plik | Typ | Co |
+|------|-----|-----|
+| `scripts/xgboost_collect.py` | NOWY | Kolektor danych (cron co 15 min) |
+| `scripts/xgboost_train.py` | NOWY | Skrypt treningowy (cron cotygodniowo) |
+| `src/prediction/models/XGBoostPredictor.ts` | NOWY | Silnik wnioskowania TypeScript |
+| `src/prediction/models/HybridPredictor.ts` | ZMIENIONY | Mieszanie XGBoost w predict() |
+| `src/prediction/dashboard-api.ts` | ZMIENIONY | 3 nowe endpointy |
+| `src/prediction/index.ts` | ZMIENIONY | Eksporty + nowe metody serwisu |
+
+---
+
+## Jak Dobrzy Inzynierowie Mysla o Tym
+
+1. **Zacznij konserwatywnie** — 30% wagi, nie 100%. Udowodnij wartosc zanim zaufasz.
+2. **Graceful degradation** — Brak pliku modelu? Stary system dziala sam. Zly model? 30% wplyw nie zabije.
+3. **Ta sama matma, dwa jezyki** — Python i TypeScript musza sie zgadzac w normalizacji.
+4. **Obserwowalnosc przede wszystkim** — `/xgb-status` i `/xgb-features` pozwalaja zajrzec do srodka. Czarna skrzynka bez monitoringu to bomba zegarowa.
+5. **Trenuj offline, wnioskuj online** — Ciezkie obliczenia (trening) w cotygodniowym cronie. Lekkie (traversal drzew) na kazdym requeście. Niskie opoznienie.
+6. **Dane sa waskim gardlem** — Sam model jest prosty (100 plytkich drzew). Trudna czesc to zebranie wystarczajaco duzyo danych jakosciowych.

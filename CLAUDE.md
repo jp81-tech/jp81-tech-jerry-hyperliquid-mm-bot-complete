@@ -172,6 +172,28 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 - Aktywne pollowanie potwierdzone (409 Conflict = polling works)
 - Brak nowych alertów od Jan 24 → Nansen po prostu nie wysłał nowych (kanał aktywny, bot gotowy)
 
+### 28. Fix: Conviction override + stale bias + Oracle monitoring (22.02)
+
+**3 problems fixed:**
+
+**#3 — Trust whale_tracker when SignalEngine says WAIT:**
+- **Problem:** whale_tracker.py gives 57% FOLLOW_SM_SHORT for LIT based on PnL analysis, but SignalEngine calculates flow-based score ~11 (WAIT zone) and forces PURE_MM 11%, throwing away whale_tracker's conviction.
+- **Root cause:** SignalEngine only sees ratio (1.34 < moderateRatio 2.0), doesn't see PnL data (shorts winning +$1.4M, longs underwater -$64K).
+- **Fix in `src/mm/SmAutoDetector.ts` L702-707:** When Engine returns WAIT but whale_tracker confidence >= 50% with directional mode, keep whale_tracker's mode and confidence instead of forcing PURE_MM.
+- **Result:** ZEC now correctly uses whale_tracker (70% CONTRARIAN_SHORT) instead of PURE_MM. LIT still PURE_MM because fresh data shows confidence dropped to 43% (generals reduced positions).
+
+**#5 — nansen_bias.json stale (20 days):**
+- **Problem:** whale_tracker.py writes both smart_money_data.json and nansen_bias.json, but was NOT in crontab. A different process (whale_tracker_live) wrote smart_money_data.json but not nansen_bias.json.
+- **Fix:** Added `*/15 * * * *` crontab entry for whale_tracker.py, verified manual run updates both files.
+- **Result:** nansen_bias.json updated from Feb 2 to current timestamp.
+
+**#6 — Oracle predictions disconnected (logging only):**
+- **Problem:** `getOracleGridBias()` exists but was never called. Oracle predictions were logging-only.
+- **Fix in `src/mm_hl.ts`:** Added Oracle signal logging in per-pair grid generation, flags divergences between Oracle and SM direction.
+- **No trading action** — logging only, per War Doctrine (SM signals > everything).
+
+**Commit:** `9f24971`
+
 ### 25. Server Health Audit — 5 procesów naprawionych (22.02)
 
 **Problem:** Pełny audit 10 procesów PM2 ujawnił 5 problemów:
@@ -1175,7 +1197,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-b76ad66 fix: remove Selini Capital from all trackers — market maker noise
+9f24971 fix: trust whale_tracker conviction when SignalEngine WAIT + Oracle divergence logging
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1314,9 +1336,12 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] whale-report → cron `0 8 * * *` (DONE 22.02)
 - [x] prediction-api NansenFeatures fix — SM data mismatch (parsed.tokens→parsed.data, field names), 40% wagi odblokowane (DONE 22.02)
 - [x] ai-executor Nansen channel ID fix — `-1003724824266` → `-1003886465029`, bot jest admin kanału (DONE 22.02)
+- [x] Fix #3: whale_tracker conviction override when SignalEngine WAIT (DONE 22.02)
+- [x] Fix #5: whale_tracker.py added to crontab */15 min, nansen_bias.json fresh (DONE 22.02)
+- [x] Fix #6: Oracle divergence logging added, non-invasive (DONE 22.02)
 
 ## Notatki
-- `whale_tracker.py` powinien być w cronie co 15-30 min
+- `whale_tracker.py` w cronie co 15 min (od 22.02)
 - `vip_spy.py` działa jako PM2 process `vip-spy` (polling co 30s)
 - Telemetry działa na porcie 8082 (8080/8081 zajęte przez inne serwisy)
 - gh CLI zainstalowane i zalogowane jako `jp81-tech`
