@@ -1168,46 +1168,6 @@ WHALES = {
         "min_change": 0.50,
         "notes": "IGNORE - Market maker, frequent flips"
     },
-    "0x34fb5ec7d4e939161946340ea2a1f29254b893de": {
-        "name": "Selini Capital MM1",
-        "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker"
-    },
-    "0x621c5551678189b9a6c94d929924c225ff1d63ab": {
-        "name": "Selini Capital MM2",
-        "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker"
-    },
-    "0x39475d17bcd20adc540e647dae6781b153fbf3b1": {
-        "name": "Selini Capital MM3",
-        "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker"
-    },
-    "0xaf9f722a676230cc44045efe26fe9a85801ca4fa": {
-        "name": "Selini Capital MM4",
-        "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker"
-    },
-    "0x4a1b3580f7ac72bc54175f05b76092eeb7a266aa": {
-        "name": "Selini Capital MM5",
-        "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker"
-    },
 
     # ================================================================
     # 📋 LEGACY ADDRESSES (keep for backwards compatibility)
