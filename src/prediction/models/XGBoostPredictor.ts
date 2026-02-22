@@ -21,7 +21,7 @@ export interface XGBPrediction {
   direction: 'LONG' | 'SHORT' | 'NEUTRAL';
   confidence: number;        // 0-100, from max probability
   probabilities: { long: number; short: number; neutral: number };
-  horizon: string;           // 'h1', 'h4', 'h12'
+  horizon: string;           // 'h1', 'h4', 'h12', 'w1', 'm1'
 }
 
 export interface XGBMeta {
@@ -81,7 +81,7 @@ export const FEATURE_NAMES = [
 
 const NUM_FEATURES = 30;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
-const HORIZONS = ['h1', 'h4', 'h12'] as const;
+const HORIZONS = ['h1', 'h4', 'h12', 'w1', 'm1'] as const;
 const MODEL_DIR = '/tmp';
 const RELOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
@@ -202,7 +202,7 @@ export class XGBoostPredictor {
   private models: Map<string, Record<string, XGBModel>> = new Map();  // token -> {h1, h4, h12}
   private meta: Map<string, XGBMeta> = new Map();
   private lastReload: number = 0;
-  private tokens = ['LIT', 'FARTCOIN', 'HYPE'];
+  private tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
 
   constructor() {
     // Initial load (fire and forget)
@@ -320,11 +320,12 @@ export class XGBoostPredictor {
     const preds = this.predict(token, features);
     if (!preds || preds.length === 0) return null;
 
-    // Prefer h4, then h1, then h12
-    const h4 = preds.find(p => p.horizon === 'h4');
-    if (h4) return h4;
-    const h1 = preds.find(p => p.horizon === 'h1');
-    if (h1) return h1;
+    // Prefer h4, then h1, h12, w1, m1
+    const preference = ['h4', 'h1', 'h12', 'w1', 'm1'];
+    for (const hz of preference) {
+      const found = preds.find(p => p.horizon === hz);
+      if (found) return found;
+    }
     return preds[0];
   }
 

@@ -35,7 +35,7 @@ except ImportError:
     sys.exit(1)
 
 # --- Configuration ---
-TOKENS = ["LIT", "FARTCOIN", "HYPE"]
+TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
 HL_API = "https://api.hyperliquid.xyz/info"
 DATASET_DIR = "/tmp"
 SM_DATA_FILE = "/tmp/smart_money_data.json"
@@ -43,7 +43,7 @@ BIAS_FILE = "/tmp/nansen_bias.json"
 SIGNAL_STATE_FILE = "/tmp/nansen_mm_signal_state.json"
 OI_SNAPSHOT_FILE = "/tmp/xgboost_oi_snapshots.json"
 
-LABEL_BACKFILL_ROWS = 100
+LABEL_BACKFILL_ROWS = 0  # 0 = scan all rows (needed for m1 labels — 30 days lookback)
 CANDLE_COUNT = 100  # 100 hourly candles
 
 
@@ -425,8 +425,8 @@ def backfill_labels(filepath: str, current_price: float) -> int:
             if line:
                 lines.append(line)
 
-    # Process last N rows for backfill
-    start_idx = max(0, len(lines) - LABEL_BACKFILL_ROWS)
+    # Process rows for backfill (0 = scan all, needed for m1 30-day lookback)
+    start_idx = max(0, len(lines) - LABEL_BACKFILL_ROWS) if LABEL_BACKFILL_ROWS > 0 else 0
     modified = False
 
     for i in range(start_idx, len(lines)):
@@ -457,6 +457,18 @@ def backfill_labels(filepath: str, current_price: float) -> int:
 
         if age >= 43200 and row.get("label_12h") is None:
             row["label_12h"] = round(change, 6)
+            lines[i] = json.dumps(row)
+            modified = True
+            updated += 1
+
+        if age >= 604800 and row.get("label_w1") is None:   # 7 days
+            row["label_w1"] = round(change, 6)
+            lines[i] = json.dumps(row)
+            modified = True
+            updated += 1
+
+        if age >= 2592000 and row.get("label_m1") is None:  # 30 days
+            row["label_m1"] = round(change, 6)
             lines[i] = json.dumps(row)
             modified = True
             updated += 1
@@ -504,6 +516,8 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
         "label_1h": None,
         "label_4h": None,
         "label_12h": None,
+        "label_w1": None,
+        "label_m1": None,
     }
 
     # Append to JSONL file
