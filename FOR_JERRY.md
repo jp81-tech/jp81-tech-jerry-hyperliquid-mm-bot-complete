@@ -462,7 +462,24 @@ Hyperliquid API `userFillsByTime` zwraca **maksymalnie 2000 fills** na request (
 
 To jak czytanie 200-stronicowej ksiazki i nie zauwazenie ze brakuje stron 201-300. Wydaje sie kompletna, ale nie jest.
 
-### Bug #10: Nansen Kill Switch falszywy alarm (25.01)
+### Bug #10: AI Trend Reversal — slepe bullish sygnaly przez miesiac (22.02)
+
+Alert Nansen "AI Trend Reversal" dla FARTCOIN przychodzil codziennie od miesiaca. Cena nie ruszyla. Dlaczego?
+
+Alert mowil: `"Fresh wallets received $97K of FARTCOIN (0.10× the recent average)"`. Kluczowa informacja to **0.10×** — aktywnosc nowych portfeli spadla o **90%** od sredniej. To jest **bearish**, nie bullish!
+
+Ale parser (`parseMmBotAiTrendReversal`) ignorowal mnoznik i slepo traktowal kazdy "AI Trend Reversal" jako `MOMENTUM_LONG` (bullish). Przez miesiac bot dostawal falszywe sygnaly kupna na tokenie ktory tracil zainteresowanie.
+
+**Fix:** Parser teraz wyciaga mnoznik z tekstu:
+- `<0.5×` → `MOMENTUM_SHORT` (bearish — popyt wyschnal)
+- `0.5-2.0×` → IGNORE (szum, normalny zakres)
+- `>2.0×` → `MOMENTUM_LONG` (bullish — napływ nowych portfeli)
+
+**Lekcja:** Nazwa alertu ("Trend Reversal") to marketing — trzeba czytac dane, nie nazwe. 0.10× to nie "reversal up", to "demand collapse". **Zawsze parsuj numeryczne wartosci z alertow, nie polegaj na etykietach.**
+
+To jak dostac alert "Zmiana pogody!" i zalozyc ze bedzie slonecznie — a potem okazuje sie ze zmiana to huragan.
+
+### Bug #11: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
 
@@ -1060,5 +1077,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 21 lutego 2026 (VIP Intelligence updated to 25 portfeli, Fasanara Capital + Abraxas Capital + Bitcoin OG #2 dodane, October 2025 crash analysis)*
+*Ostatnia aktualizacja: 22 lutego 2026 (fix AI Trend Reversal parser, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
 *Wygenerowane przez Claude Code*

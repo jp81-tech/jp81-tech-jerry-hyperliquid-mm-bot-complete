@@ -41,6 +41,27 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
+## Zmiany 22 lutego 2026
+
+### 21. Fix: AI Trend Reversal parser — multiplier-based direction (22.02)
+
+**Problem:** Parser `parseMmBotAiTrendReversal` traktował każdy alert "AI Trend Reversal" jako `MOMENTUM_LONG` (bullish). Ignorował mnożnik z tekstu alertu (np. "0.10× the recent average"). FARTCOIN dostawał fałszywe sygnały kupna przez miesiąc mimo że 0.10× = aktywność spadła o 90% = BEARISH.
+
+**Fix w `src/signals/nansen_alert_parser_v2.ts`:**
+```typescript
+// Wyciąga mnożnik z tekstu: "(0.10× the recent average)"
+const multMatch = message.match(/\((\d+\.?\d*)\s*[×x]\s*(?:the\s+)?recent\s+average\)/i);
+const multiplier = multMatch ? parseFloat(multMatch[1]) : null;
+
+if (multiplier < 0.5)  → MOMENTUM_SHORT (bearish)
+if (multiplier 0.5-2.0) → return null (noise, ignore)
+if (multiplier > 2.0)  → MOMENTUM_LONG (bullish)
+```
+
+**Commit:** `382203d` — deployed to server, mm-bot restarted
+
+---
+
 ## Zmiany 21 lutego 2026
 
 ### 20. Paginated Fills Utility + Winner d7a678 Analysis (21.02)
@@ -1020,7 +1041,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-23fff3b feat: add Fasanara Capital + Abraxas Capital to VIP spy
+382203d fix: AI Trend Reversal parser — use multiplier to determine direction
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1148,6 +1169,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Abraxas Capital dodany do VIP spy (tier2, $7.2M, +$37.9M Oct crash) (DONE 21.02)
 - [x] Bitcoin OG #2 dodany do VIP spy (tier1, watching for return, +$72.5M Oct crash) (DONE 21.02)
 - [x] VIP Intelligence updated — 25 portfeli, $528M notional, 5.2x SHORT (DONE 21.02)
+- [x] Fix AI Trend Reversal parser — multiplier-based direction zamiast blind MOMENTUM_LONG (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min
