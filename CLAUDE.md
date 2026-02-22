@@ -60,6 +60,21 @@ if (multiplier > 2.0)  → MOMENTUM_LONG (bullish)
 
 **Commit:** `382203d` — deployed to server, mm-bot restarted
 
+### 22. Remove Selini Capital from all trackers (22.02)
+
+**Problem:** Selini Capital (5 kont MM1-MM5) generowało spam alertów o flipach pozycji (Short→Long, Long→Short). Mimo `signal_weight: 0.0` (nie wpływa na sygnały), tracker i tak raportował zmiany pozycji. Market maker — flipuje ciągle, zero wartości informacyjnej.
+
+**Usunięto z 4 plików:**
+
+| Plik | Co usunięto |
+|------|-------------|
+| `whale_tracker.py` | 5 kont (MM1-MM5) z sekcji MARKET_MAKER |
+| `src/mm/SmAutoDetector.ts` | 3 konta z rejestru traderów |
+| `scripts/hype_monitor.ts` | 1 wpis z listy INSTITUTIONS |
+| `src/signals/nansen_alert_parser_v2.ts` | "Selini" z regex `extractLabel()` |
+
+**Commit:** `b76ad66` — deployed to server, mm-bot restarted
+
 ---
 
 ## Zmiany 21 lutego 2026
@@ -1041,7 +1056,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-382203d fix: AI Trend Reversal parser — use multiplier to determine direction
+b76ad66 fix: remove Selini Capital from all trackers — market maker noise
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1170,6 +1185,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Bitcoin OG #2 dodany do VIP spy (tier1, watching for return, +$72.5M Oct crash) (DONE 21.02)
 - [x] VIP Intelligence updated — 25 portfeli, $528M notional, 5.2x SHORT (DONE 21.02)
 - [x] Fix AI Trend Reversal parser — multiplier-based direction zamiast blind MOMENTUM_LONG (DONE 22.02)
+- [x] Remove Selini Capital (5 kont MM) z whale_tracker, SmAutoDetector, hype_monitor, alert parser (DONE 22.02)
 
 ## Notatki
 - `whale_tracker.py` powinien być w cronie co 15-30 min

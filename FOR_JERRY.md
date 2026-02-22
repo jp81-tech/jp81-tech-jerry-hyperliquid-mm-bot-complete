@@ -479,7 +479,17 @@ Ale parser (`parseMmBotAiTrendReversal`) ignorowal mnoznik i slepo traktowal kaz
 
 To jak dostac alert "Zmiana pogody!" i zalozyc ze bedzie slonecznie — a potem okazuje sie ze zmiana to huragan.
 
-### Bug #11: Nansen Kill Switch falszywy alarm (25.01)
+### Bug #11: Market maker spam — Selini Capital (22.02)
+
+Selini Capital (5 kont MM1-MM5) bylo w `whale_tracker.py` jako MARKET_MAKER z `signal_weight: 0.0`. Zero wplywu na sygnaly bota. Ale tracker i tak generowal alerty o kazdym flipie pozycji — a market maker flipuje pozycje **ciagle** (Short→Long, Long→Short, po kilkanascie razy dziennie).
+
+Efekt: skrzynka alertow pelna bezuzytecznych wiadomosci typu "Selini Capital FLIPPED PUMP Short→Long | $19K". Szum zagluszal wazne sygnaly od prawdziwych traderow.
+
+**Fix:** Usuniecie Selini Capital z 4 plikow (whale_tracker.py, SmAutoDetector.ts, hype_monitor.ts, nansen_alert_parser_v2.ts).
+
+**Lekcja:** `signal_weight: 0` nie wystarczy jesli system i tak raportuje zmiany. Jesli cos jest na liscie "ignoruj" — **usun to z listy calkowicie**. "Ignorowany ale monitorowany" to oksymoron ktory generuje spam. Albo sledzisz, albo nie.
+
+### Bug #12: Nansen Kill Switch falszywy alarm (25.01)
 
 `FARTCOIN: token appears dead` — ale FARTCOIN mial $9M+ daily volume! Nansen API po prostu nie mial danych flow dla tego tokena na Solanie.
 
@@ -1077,5 +1087,5 @@ Najwazniejsza lekcja: **w tradingu (i w inzynierii) strategia jest wazniejsza od
 
 ---
 
-*Ostatnia aktualizacja: 22 lutego 2026 (fix AI Trend Reversal parser, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
+*Ostatnia aktualizacja: 22 lutego 2026 (Selini Capital removed, AI Trend Reversal fix, VIP Intelligence 25 portfeli, October 2025 crash analysis)*
 *Wygenerowane przez Claude Code*
