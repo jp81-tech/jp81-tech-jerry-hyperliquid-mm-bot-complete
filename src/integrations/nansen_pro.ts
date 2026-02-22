@@ -134,7 +134,7 @@ export interface TokenFlowSignals {
   liquidity: number       // New: from Token Overview
   fdv: number            // New: from Token Overview
   confidence: number      // 0..1
-  dataSource: 'full' | 'flows_fallback' | 'partial'
+  dataSource: 'full' | 'flows_fallback' | 'holders_fallback' | 'partial'
   dataQuality: 'full' | 'partial' | 'minimal' | 'dead'
   warnings: string[]
 }
