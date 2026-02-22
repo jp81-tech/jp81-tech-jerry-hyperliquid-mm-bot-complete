@@ -109,6 +109,13 @@ export const TOKEN_VOLATILITY_CONFIG: Record<string, TokenVolatilityConfig> = {
     atrMultiplier: 2.5,
     description: 'Memecoin - high volatility'
   },
+  // kPEPE - PURE_MM high volume memecoin
+  'kPEPE': {
+    minStopLossPercent: 4.0,
+    maxLeverage: 5,
+    atrMultiplier: 2.0,
+    description: 'kPEPE - high volume memecoin, deep book, good for MM'
+  },
   'WIF': {
     minStopLossPercent: 4.0,
     maxLeverage: 3,
@@ -152,6 +159,13 @@ export const TOKEN_VOLATILITY_CONFIG: Record<string, TokenVolatilityConfig> = {
     maxLeverage: 3,
     atrMultiplier: 2.5,
     description: 'Memecoin - high volatility (STICKY position)'
+  },
+  // Meme coin - high volatility, PURE_MM
+  'POPCAT': {
+    minStopLossPercent: 1.5,
+    maxLeverage: 3,
+    atrMultiplier: 2.5,
+    description: 'Solana memecoin - high volatility, PURE_MM ultra-aggressive'
   },
   // Default for other tokens
   'DEFAULT': {
@@ -356,27 +370,6 @@ const KNOWN_TRADERS: Record<string, KnownTrader> = {
     label: 'Manifold Trading',
     tier: TraderTier.MARKET_MAKER,
     flipRate: 0.8,
-    signalWeight: 0.0,
-    notes: 'MM - ignore'
-  },
-  '0x34fb5ec7d4e939161946340ea2a1f29254b893de': {
-    label: 'Selini Capital',
-    tier: TraderTier.MARKET_MAKER,
-    flipRate: 1.0,
-    signalWeight: 0.0,
-    notes: 'MM - ignore'
-  },
-  '0x621c5551678189b9a6c94d929924c225ff1d63ab': {
-    label: 'Selini Capital 2',
-    tier: TraderTier.MARKET_MAKER,
-    flipRate: 1.0,
-    signalWeight: 0.0,
-    notes: 'MM - ignore'
-  },
-  '0x39475d17bcd20adc540e647dae6781b153fbf3b1': {
-    label: 'Selini Capital 3',
-    tier: TraderTier.MARKET_MAKER,
-    flipRate: 1.0,
     signalWeight: 0.0,
     notes: 'MM - ignore'
   },

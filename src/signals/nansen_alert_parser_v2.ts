@@ -1059,7 +1059,7 @@ export class NansenAlertParserV2 {
   }
 
   private extractLabel(message: string): string | undefined {
-    const match = message.match(/(Smart\s*(?:HL\s*)?(?:Perps\s*)?Trader|TOP\s*SM|Wintermute|Manifold|Selini|Galaxy)/i);
+    const match = message.match(/(Smart\s*(?:HL\s*)?(?:Perps\s*)?Trader|TOP\s*SM|Wintermute|Manifold|Galaxy)/i);
     return match ? match[0] : undefined;
   }
 
