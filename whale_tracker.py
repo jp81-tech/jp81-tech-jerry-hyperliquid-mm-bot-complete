@@ -886,12 +886,12 @@ WHALES = {
         "notes": "$34.3M BTC SHORT - Nansen verified Smart HL Perps Trader"
     },
     "0xc7290b4b308431a985fa9e3e8a335c2f7650517c": {
-        "name": "SM Active c7290b",
+        "name": "OG Shorter c7290b",
         "emoji": "🔴",
         "tier": "ACTIVE",
         "signal_weight": 0.65,
         "min_change": 0.10,
-        "notes": "$11.2M BTC SHORT, $7.3M ETH SHORT, $183k ZEC SHORT"
+        "notes": "$6.3M equity, shortuje od lis 2025. BTC SHORT $5M (entry $97K, +$2.4M), ETH SHORT $1.4M (entry $3070, +$851K), HYPE SHORT $661K. Closed PnL +$2.48M. Łącznie ~$5.76M profit."
     },
     "0xea6670ebdb4a388a8cfc16f6497bf4f267b061ee": {
         "name": "Porucznik ea66",

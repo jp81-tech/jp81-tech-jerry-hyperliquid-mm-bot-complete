@@ -67,7 +67,7 @@ const WHALES: Record<string, WhaleEntry> = {
   '0xfeec88b13fc0be31695069f02bac18538a154e9c': { name: 'Kapitan feec', tier: 'ACTIVE', weight: 0.80 },
   '0xfce053a5e461683454bf37ad66d20344c0e3f4c0': { name: 'Kapitan fce0', tier: 'ACTIVE', weight: 0.80 },
   '0x99b1098d9d50aa076f78bd26ab22e6abd3710729': { name: 'Kapitan 99b1', tier: 'ACTIVE', weight: 0.80 },
-  '0xc7290b4b308431a985fa9e3e8a335c2f7650517c': { name: 'SM c7290b', tier: 'ACTIVE', weight: 0.65 },
+  '0xc7290b4b308431a985fa9e3e8a335c2f7650517c': { name: 'OG Shorter c7290b', tier: 'ACTIVE', weight: 0.65 },
   '0x570b09e27a87f9acbce49f85056745d29b3ee3c6': { name: 'Kontrarian 570b09 (WATCH)', tier: 'ACTIVE', weight: 0.10 },
   '0x179c17d04be626561b0355a248d6055a80456aa5': { name: 'SM 179c17', tier: 'ACTIVE', weight: 0.60 },
   '0xe4d83945c0322f3d340203a7129b7eb5cacae847': { name: 'SM e4d839', tier: 'ACTIVE', weight: 0.60 },
