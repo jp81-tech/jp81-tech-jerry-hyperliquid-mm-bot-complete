@@ -96,6 +96,52 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 **Commit:** `43ed7c4` (initial), fix pending commit
 
+### 34. Tracker Deep Audit — dead accounts, upgrades, kontrariani (23.02)
+
+**Cel:** Pełny audyt ~53 portfeli w whale_tracker.py i daily-whale-report.ts — usunięcie martwych kont, identyfikacja kontrarianów, upgrade najlepszych traderów.
+
+**Usunięte (14 dead/underwater kont):**
+
+| Kto | Powód |
+|-----|-------|
+| 11 dead accounts ($0) | baae15, 2ed5c4, 689f15, 039405, Hikari, be494a, 95e268, 106943, fuckingbot.eth, c12f6e, 8a0cd1 |
+| ETH Whale (9eec98) | ALL LONG, ALL underwater, -$223K |
+| SM e28236 | ALL LONG, -$4.46M uPnL |
+| SM 0b2396 | ALL LONG, -$656K uPnL, brak czucia rynku |
+
+**Downgraded do WATCH (weight → 0.10):**
+
+| Trader | Powód |
+|--------|-------|
+| Bitcoin OG (b317d2) | Zlikwidowany -$128M, konto puste |
+| Bitcoin OG #2 (2ea18c) | Konto puste, WATCH for return |
+| Winner d7a678 | Wypłacił, konto puste |
+| **Kontrarian 091159** | ALL LONG (BTC $8.7M 20x, ETH $8.5M 20x) vs SM SHORT consensus. Kupił BTC+ETH 23.02, zamknął BTC po kilku godzinach. Weight 0.85→0.10 |
+| **Kontrarian 570b09** | Flipnął SHORT→LONG SOL $2.79M (20x) vs consensus. Closed PnL +$3.13M. Weight 0.60→0.10 |
+
+**Upgraded:**
+
+| Trader | Zmiana | Powód |
+|--------|--------|-------|
+| **Kraken A ⭐** | w: 0.85→0.90 | $4.66M equity, +$13.15M total profit. SOL $7M (+$8.25M!), BTC $2.9M (+$1.9M), HYPE $2.8M (+$1.56M) |
+| **Kraken B ⭐** | notes updated | $6.57M equity, +$3.54M total. Ultra-konserwatywny 0.2x lev, aktywny od cze 2025 (9 mcy) |
+| **OG Shorter c7290b** | renamed | +$5.76M total, shortuje od lis 2025. BTC entry $97K, ETH $3,070 |
+| **donkstrategy.eth** | w: 0.55→0.65 | +$1.2M total, 49 aktywnych dni, shorter od gru 2025 |
+| **Manifold Trading** | MM→ACTIVE, w: 0.00→0.30 | Hybryda MM+trader. 12 SHORT, +$1.33M uPnL. MM-style fills ale directional conviction |
+
+**⭐ Top traderzy (wiedzą więcej):**
+1. Generał + Pułkownik + Major + Wice-Generał — prawdopodobnie jedna grupa, koordynowane pozycje
+2. Galaxy Digital — instytucja z dostępem do flow data
+3. Kapitan feec/fce0/99b1 — trójka BTC shorterów, ogromne pozycje
+4. **Kraken A ⭐** — +$13.15M, SOL entry $172 (+$8.25M unrealized)
+5. **Kraken B ⭐** — +$3.54M, 9 miesięcy aktywności, ultra-konserwatywny
+6. **OG Shorter c7290b** — +$5.76M, złapał szczyty BTC i ETH
+7. **donkstrategy.eth** — +$1.2M, konsekwentny shorter
+
+**Stan po audycie:** ~39 aktywnych portfeli + 5 WATCH
+
+**Commits:** `82c3b3b`, `50a3cc9`, `068195c`, `ec34d83`, `c5568d0`, `94cfe08`, `71904a8`, `11f0350`
+
 ### 30. War Room Dashboard — 8 tokens + w1/m1 horizons (23.02)
 
 **Plik:** `dashboard.mjs` (PM2 `war-room`, port 3000)
@@ -1489,6 +1535,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [ ] Monitorować capital floor (cap×0.80) — czy squeeze analysis nie blokuje focus pairs
 - [ ] Monitorować działanie SM OUTFLOW/INFLOW alertów w produkcji
 - [ ] Rozważyć dodanie więcej tokenów do monitoringu
+- [ ] Obserwować kontrarianów (091159, 570b09) — czy ich LONG play się sprawdzi vs SM SHORT consensus
+- [ ] Kraken A — sprawdzić czy adres `06cecf439eceb9e3c7a8ed23efdf5e3e8c124630` w SmAutoDetector to skrócony czy inny portfel (NANSEN_SM_LABELS ma `0x06cecf` = prawidłowy prefix)
+- [x] Tracker deep audit — 14 dead usunięte, 5 WATCH, 5 upgraded, ⭐ gwiazdki dla top traderów (DONE 23.02)
 - [x] Unify trader names across codebase — 19 traderów renamed from vip_config aliases w 3 plikach (DONE 23.02)
 - [x] kPEPE Toxicity Engine deployed — 8 sygnałów, 10-zone time, hedge triggers (DONE 05.02)
 - [x] LIT+FARTCOIN focus deployed — 5 bottlenecków naprawionych (DONE 04.02)
@@ -1551,7 +1600,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Porty na serwerze**: 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8082=wolny
 - **Paginated fills**: `src/utils/paginated_fills.ts` — ZAWSZE używaj `fetchAllFillsByTime()` zamiast raw `userFillsByTime`. API zwraca max 2000 fills.
 - **Winner d7a678**: `0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed` — konto zamknięte od 31.01.2026 ($0, zero pozycji). W VIP spy tier1 "watching for return". +$5.5M total profit (SOL/BTC/ETH short). 6 powiązanych adresów z Nansen — zero aktywności na HL.
-- **VIP Intelligence (21.02, updated)**: 25 portfeli (po dodaniu Bitcoin OG #2), $528.1M notional, **5.2x SHORT** ($443M S vs $86M L). BTC $153M ALL SHORT, ETH $103M (15x SHORT, Fasanara $50M!), HYPE contested ($64M S vs $40M L). Tylko 3/23 aktywnych portfeli LONG (Laurent Zeimes, ZEC Conviction, Porucznik ea66). 2 puste (Winner, OG#2).
+- **Tracker Audit (23.02)**: ~39 aktywnych + 5 WATCH. Usunięto 14 dead/underwater. Upgrades: Kraken A ⭐ (0.90, +$13.15M), Kraken B ⭐ (0.85, +$3.54M), OG Shorter c7290b (0.65, +$5.76M), donkstrategy.eth (0.65, +$1.2M), Manifold Trading (0.30, MM→ACTIVE). Kontrariani na WATCH: 091159 (zamknął BTC LONG po kilku h), 570b09 (SOL LONG vs consensus).
+- **VIP Intelligence (23.02, updated)**: ~39 aktywnych portfeli + 5 WATCH. SM consensus nadal masywnie SHORT na BTC/ETH/SOL. Dwóch kontrarianów (091159, 570b09) flipnęło na LONG 23.02 ale 091159 się wycofał po kilku godzinach.
 - **BTC SHORT Deep Dive (21.02)**: 10 portfeli shortuje BTC, 0 longuje. Łącznie 1,410 BTC ($96M), uPnL +$32M. Top entries: Kraken A $108K (-1% od ATH), Kapitan BTC $106K (-2.6%), Galaxy Digital $104K (-5%). Dwa klastry wejść: 1 paź (SOL2+fce0 tego samego dnia) i 12-13 paź (feec+Kapitan BTC dzień po dniu). Galaxy Digital jedyny kto redukuje (kupuje 37 BTC w lutym). 58bro.eth BTC SHORT $18.4M na 40x — liquidation $90,658.
 - **5 podwójnie zweryfikowanych (Smart HL + Consistent Winner)**: Major (3 poz, $30.6M), Pułkownik (0 poz, $5.5M cash, 331% ROI), Wice-Generał (45 poz, $30.8M, HYPE $16.6M underwater), 58bro.eth (7 poz, $31.4M, +$17.6M DeFi), Kapitan 99b1 (5 poz, $1.35M, mid-cap shorter)
 - **October 2025 BTC Crash ($126K→$103K, -18% w 11 dni)**: Top 8 traderów zarobiło $355M. Bitcoin OG (+$165M z 2 adresów), Abraxas Capital (+$37.9M), Galaxy Digital (+$31.4M), Fasanara Capital (+$30.8M), Generał (+$30.3M z 2 adresów), Silk Capital/Token Millionaire (+$29.9M), Wintermute (+$29.6M, market maker — pomijamy).
