@@ -1190,14 +1190,6 @@ WHALES = {
         "min_change": 0.15,
         "notes": "Legacy - Fund"
     },
-    "0xe71cbf47fff309813bcea54f3ecf49a5f129264d": {
-        "name": "LIT Long Legacy",
-        "emoji": "🤖",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.20,
-        "notes": "Legacy - $141K LIT long"
-    },
     "0x0b23968e02c549f99ff77b6471be3a78cbfff37b": {
         "name": "SM HL Trader 0b2396",
         "emoji": "🤓",
