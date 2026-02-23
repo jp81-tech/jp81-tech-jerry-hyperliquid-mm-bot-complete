@@ -68,6 +68,7 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x8e096995c3e4a3f0bc5b3ea1cba94de2aa4d70c9': { name: 'Oct Winner 8e0969', tier: 'ACTIVE', weight: 0.65 },
   '0x856c35038594767646266bc7fd68dc26480e910d': { name: 'Oct Winner 856c35', tier: 'ACTIVE', weight: 0.60 },
   '0x4eebd8d39e82efb958e0fa9f694435c910c8518f': { name: 'Oct Winner 4eeb (WATCH)', tier: 'ACTIVE', weight: 0.10 },
+  '0x5b9306593ae710a66832c4101e019e3e96f65d0a': { name: 'SM 5b9306', tier: 'ACTIVE', weight: 0.65 },
 };
 
 // ============================================================

@@ -1109,6 +1109,15 @@ WHALES = {
         "min_change": 0.10,
         "notes": "WATCH: +$5.8M Oct 2025 BTC crash, 13.3% ROI, 1099 trades. Account EMPTY ($0) as of 23.02.2026 — took profits and left. Watching for return."
     },
+    "0x5b9306593ae710a66832c4101e019e3e96f65d0a": {
+        "name": "SM 5b9306",
+        "emoji": "🔴",
+        "tier": "ACTIVE",
+        "signal_weight": 0.65,
+        "nansen_label": "",
+        "min_change": 0.10,
+        "notes": "$9.5M equity. BTC SHORT entry $108,343 (+$1.5M). HYPE SHORT $8.9M, ETH SHORT $3.6M, FARTCOIN SHORT $325K, LIT SHORT $205K. First funder: unknown 0x3ed2ce (Feb 2025)."
+    },
 }
 
 # Coiny do trackowania
