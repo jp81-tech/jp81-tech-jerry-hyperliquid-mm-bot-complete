@@ -21,7 +21,8 @@
 13. [BTC SHORT Deep Dive](#btc-short-deep-dive--kto-shortowal-od-topu-i-mogl-cos-wiedziec)
 14. [Sesja 22.02 -- Trzy bugi ktore kradly nam edge](#sesja-2202----trzy-bugi-ktore-kradly-nam-edge)
 15. [Rozdzial X: XGBoost + Rozszerzenie 8 tokenow/5 horyzontow](#rozdzial-x-xgboost--jak-dalismy-botowi-prawdziwy-mozg)
-16. [Slowniczek](#slowniczek)
+16. [Naming Convention — jeden trader, jedna nazwa](#naming-convention--jeden-trader-jedna-nazwa)
+17. [Slowniczek](#slowniczek)
 
 ---
 
@@ -766,6 +767,57 @@ MacBook (dev) ---- Tailscale VPN ------- hl-mm (Linux server)
 ```
 
 Deploy: `scp` pliku na serwer + `pm2 restart mm-bot`. Proste i skuteczne.
+
+---
+
+## Naming Convention — jeden trader, jedna nazwa
+
+### Problem: "Kto to w ogole jest?"
+
+Wyobraz sobie ze dostajesz trzy alerty:
+
+```
+whale_tracker: "SM Conviction a31211 opened SHORT LIT $3.3M"
+daily-whale-report: "General a31211 — SHORT LIT $3.3M"
+SmAutoDetector: "SM Conviction a31211: FOLLOW_SM_SHORT 57%"
+```
+
+Czy to ten sam trader? Tak! Ale musisz w glowie zrobic mapping `a31211 = General = SM Conviction`. Przy 30+ wielorybach i 3 roznych plikach to sie robi nie do ogarniecia.
+
+### Rozwiazanie: Canonical Source
+
+Stworzylismy `scripts/vip_config.json` jako **jedyne zrodlo prawdy** z memorable aliasami. Nazwy sa po polsku (to bot dla polskiego usera!) i latwe do zapamietania:
+
+| Ranga | Trader | Dlaczego ta nazwa |
+|-------|--------|-------------------|
+| **General** | `a31211` — $15M PnL, LIT/FARTCOIN shorter | Najwyzszy rang w naszej armii wielorybow |
+| **Wice-General** | `45d26f` — $30M PnL, BTC/HYPE mega shorter | Drugi w hierarchii |
+| **Pulkownik** | `5d2f44` — $21M PnL, BTC $46M SHORT | Trzeci — "pulkownik" bo trzyma ogromna pozycje |
+| **Major** | `35d115` — $12M PnL, SOL $65M SHORT | Czwarty — MEGA shorter na SOL |
+| **Kapitan BTC** | `71dfc0` — BTC $25M SHORT | Specjalista BTC |
+| **Kraken A/B** | `06cecf`, `56cd86` — timing entry masters | "Kraken" bo pojawiaja sie z glebokosci jak potwor morski |
+| **Porucznik SOL2/SOL3** | `6bea81`, `936cf4` — SOL shorterzy | Nizsi rang, ale solid SM |
+
+### Lekcja: Single Source of Truth
+
+To klasyczny problem w inzynierii oprogramowania. Masz dane w 3 miejscach i kazde miejsce ma swoja wersje. Rozwiazanie zawsze to samo:
+
+1. **Wyznacz jedno zrodlo prawdy** (`vip_config.json`)
+2. **Zsynchronizuj reszty** z tym zrodlem
+3. **Idealnie**: reszta powinna *czytac* ze zrodla zamiast kopiowac (DRY principle)
+
+My zrobilismy krok 1-2 (reczna synchronizacja). Krok 3 (dynamiczne czytanie z vip_config) to potencjalna przyszla optymalizacja — ale na razie 3 pliki z tymi samymi nazwami to wystarczajaco dobre rozwiazanie. Nie overengineeruj.
+
+### Co zmienilismy
+
+| Plik | Rola | Ile zmian |
+|------|------|-----------|
+| `whale_tracker.py` | Glowne `"name"` pola w WHALES dict | 19 traderow |
+| `scripts/daily-whale-report.ts` | `name` pola w WHALES dict (Discord report) | 16 traderow |
+| `src/mm/SmAutoDetector.ts` | `label` pola w KNOWN_TRADERS dict (bot runtime) | 5 traderow |
+
+**Czego NIE ruszylismy:**
+- `NANSEN_SM_LABELS` w whale_tracker.py — wyglada jak lista nazw, ale to tak naprawde **kategorie Nansen** ("Smart HL Perps Trader", "Fund"). Sa uzywane w `CREDIBILITY_MULTIPLIERS` do obliczania wagi sygnalu. Zmiana "Smart HL Perps Trader" na "General" by zlamala lookup i trader dostalby wage 0.20 (Unknown) zamiast 1.0. **Zawsze czytaj kod zanim zmienisz** — nazwy moga byc kluczami w innym dicu.
 
 ---
 

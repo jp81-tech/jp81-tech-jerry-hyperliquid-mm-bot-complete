@@ -43,6 +43,53 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 23 lutego 2026
 
+### 33. Unify Trader Names Across Codebase (23.02)
+
+**Problem:** Ten sam trader miał różne nazwy w różnych plikach. Np. `0xa31211...` = "SM Conviction a31211" (whale_tracker), "General a31211" (daily-whale-report), "SM Conviction a31211" (SmAutoDetector). Alerty i raporty były niespójne — trudno było skojarzyć, że to ten sam trader.
+
+**Canonical source:** `scripts/vip_config.json` (25 named VIPs z memorable aliasami)
+
+**Zmodyfikowane pliki (3):**
+
+| Plik | Ile zmian | Przykłady |
+|------|-----------|-----------|
+| `whale_tracker.py` | 19 name fields | "SM Conviction a31211" → "Generał", "SM Trader 35d115" → "Major" |
+| `scripts/daily-whale-report.ts` | 16 name fields | "General a31211" → "Generał", "SM 71dfc0" → "Kapitan BTC" |
+| `src/mm/SmAutoDetector.ts` | 5 label fields | "SM Conviction a31211" → "Generał", "SM Conviction 06cecf" → "Kraken A" |
+
+**Pełna mapa zmian nazw (19 traderów):**
+
+| Addr prefix | Stara nazwa | Nowa nazwa (z vip_config) |
+|-------------|-------------|---------------------------|
+| `a31211` | SM Conviction a31211 | **Generał** |
+| `45d26f` | SM Conviction 45d26f | **Wice-Generał** |
+| `5d2f44` | SM Conviction 5d2f44 | **Pułkownik** |
+| `35d115` | SM Trader 35d115 | **Major** |
+| `71dfc0` | SM Conviction 71dfc0 | **Kapitan BTC** |
+| `06cecf` | SM Trader 06cecf | **Kraken A** |
+| `99b109` | SM Active 99b109 | **Kapitan 99b1** |
+| `feec88` | SM Active feec88 | **Kapitan feec** |
+| `fce053` | SM Active fce053 | **Kapitan fce0** |
+| `ea6670` | SM HL Trader ea6670 | **Porucznik ea66** |
+| `6bea81` | SM Trader 6bea81 | **Porucznik SOL2** |
+| `936cf4` | SM Trader 936cf4 | **Porucznik SOL3** |
+| `56cd86` | Token Millionaire 56cd86 | **Kraken B** |
+| `d7a678` | Consistent Winner d7a678 | **Winner d7a678** |
+| `92e977` | SM HL Trader 92e977 | **ETH Whale** |
+| `3c363e` | SM HL Trader 3c363e | **BTC/LIT Trader** |
+| `8a0cd1` | SM HL Trader 8a0cd1 | **ZEC Conviction** |
+| `0c4926` | SM DOGE Trader Legacy | **DOGE Legacy** |
+| `e71cbf` | SM LIT Long 141K Legacy | **LIT Long Legacy** |
+
+**NIE zmienione:**
+- `NANSEN_SM_LABELS` dict w whale_tracker.py — to Nansen category labels używane do credibility multiplier lookup, NIE nazwy traderów. Zmiana by złamała `CREDIBILITY_MULTIPLIERS`.
+- Fundy (Galaxy Digital, Laurent Zeimes, etc.) — już miały prawidłowe nazwy
+- Traderzy bez wpisu w vip_config (SM Active xxx) — brak aliasu, zachowane jak były
+
+**Deploy:** SCP 3 pliki → server, `pm2 restart mm-bot`, whale_tracker.py w cron */15, daily-whale-report w cron 0 8
+
+**Commit:** `43ed7c4`
+
 ### 30. War Room Dashboard — 8 tokens + w1/m1 horizons (23.02)
 
 **Plik:** `dashboard.mjs` (PM2 `war-room`, port 3000)
@@ -1325,7 +1372,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 fix/update-nansen-debug
 
 # Ostatni commit
-427407f feat: expand prediction-api to 8 tokens + weekly/monthly horizons
+43ed7c4 refactor: unify trader names across codebase from vip_config aliases
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1436,6 +1483,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [ ] Monitorować capital floor (cap×0.80) — czy squeeze analysis nie blokuje focus pairs
 - [ ] Monitorować działanie SM OUTFLOW/INFLOW alertów w produkcji
 - [ ] Rozważyć dodanie więcej tokenów do monitoringu
+- [x] Unify trader names across codebase — 19 traderów renamed from vip_config aliases w 3 plikach (DONE 23.02)
 - [x] kPEPE Toxicity Engine deployed — 8 sygnałów, 10-zone time, hedge triggers (DONE 05.02)
 - [x] LIT+FARTCOIN focus deployed — 5 bottlenecków naprawionych (DONE 04.02)
 - [x] POPCAT PURE_MM deployed (DONE 04.02, zastąpiony przez LIT+FARTCOIN)
