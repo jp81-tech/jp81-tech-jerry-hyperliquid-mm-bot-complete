@@ -912,12 +912,12 @@ WHALES = {
         "notes": "Nansen Smart HL Perps Trader - BTC/LIT trader"
     },
     "0x570b09e27a87f9acbce49f85056745d29b3ee3c6": {
-        "name": "SM Active 570b09",
-        "emoji": "🔴",
+        "name": "Kontrarian 570b09",
+        "emoji": "🔍",
         "tier": "ACTIVE",
-        "signal_weight": 0.6,
+        "signal_weight": 0.10,
         "min_change": 0.10,
-        "notes": "$2.6M SOL SHORT, $2.6M BTC SHORT, $1.2M ETH SHORT"
+        "notes": "WATCH: $1M equity, flipnął SHORT→LONG. SOL LONG $2.79M (20x) otwarty 23.02. Closed PnL +$3.13M (SOL $2.17M, ETH $493K, BTC $464K). Był shorterem sty-luty, dziś kontrarian vs SM SHORT consensus."
     },
     "0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a": {
         "name": "Kraken B",
