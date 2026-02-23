@@ -874,7 +874,7 @@ WHALES = {
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - BEST ENTRY!), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified."
+        "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - najnizsze wejscie z Kapitanow), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified."
     },
     "0x99b1098d9d50aa076f78bd26ab22e6abd3710729": {
         "name": "Kapitan 99b1 ⭐",
