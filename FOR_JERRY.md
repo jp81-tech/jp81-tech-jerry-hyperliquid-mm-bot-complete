@@ -1859,3 +1859,179 @@ XRP:      $2.38   — h1, h4, h12, w1, m1 ✅
 LIT:      $0.77   — h1, h4, h12, w1, m1 ✅
 FARTCOIN: $0.28   — h1, h4, h12, w1, m1 ✅
 ```
+
+---
+
+## War Room Dashboard — Od 3 Paneli do Centrum Dowodzenia (23.02.2026)
+
+### Kontekst: Dlaczego Dashboard jest wazny
+
+Wyobraz sobie, ze jestes dowodca w bunkrze. Masz 8 jednostek na polu walki (8 tokenow), kazda z wlasnymi danymi wywiadowczymi (predykcje ML), pozycjami i PnL. Do tej pory widziales tylko 3 z nich na jednym ekranie. Reszta? Musiales sprawdzac recznie, po jednym.
+
+Dzis zmienilismy to. War Room teraz pokazuje wszystkie 8 tokenow jednoczesnie, na jednym ekranie, z 5 horyzontami predykcji kazdym. Jedno spojrzenie — caly obraz sytuacji.
+
+### Co sie zmienilo
+
+**Plik:** `dashboard.mjs` — pojedynczy plik Node.js ktory serwuje caly dashboard jako HTML.
+
+**Przed (3 panele, 3 horyzonty):**
+```
+┌───────────┬───────────┬───────────┐
+│    LIT    │ FARTCOIN  │   HYPE    │
+│  h1,h4,h12│  h1,h4,h12│  h1,h4,h12│
+└───────────┴───────────┴───────────┘
+```
+
+**Po (8 paneli, 5 horyzontow):**
+```
+┌─────────┬─────────┬─────────┬─────────┐
+│   BTC   │   ETH   │   SOL   │  HYPE   │
+│ h1→m1   │ h1→m1   │ h1→m1   │ h1→m1   │
+├─────────┼─────────┼─────────┼─────────┤
+│   ZEC   │   XRP   │   LIT   │FARTCOIN │
+│ h1→m1   │ h1→m1   │ h1→m1   │ h1→m1   │
+└─────────┴─────────┴─────────┴─────────┘
+```
+
+### Zmiany techniczne — co i dlaczego
+
+#### 1. CSS Grid: `repeat(3, 1fr)` → `repeat(4, 1fr)` + `repeat(2, 1fr)` rows
+
+Stary grid mial 3 kolumny. Nowy ma 4 kolumny i 2 wiersze. CSS Grid robi tu ciezka robote — `grid-template-columns: repeat(4, 1fr)` znaczy "4 kolumny, kazda rowna szerokosc".
+
+**Borderki miedzy panelami** — to klasyczny problem w gridach. Stary kod mial `.panel:last-child { border-right: none }` (ostatni panel bez prawej krawedzi). W siatce 4x2 to nie dziala — musisz usunac prawy border na *kazdym 4. panelu* i dolny border na *drugim wierszu*:
+
+```css
+.panel:nth-child(4n) { border-right: none; }   /* 4., 8. panel */
+.panel:nth-child(n+5) { border-bottom: none; }  /* panele 5-8 (dolny wiersz) */
+```
+
+**Lekcja:** `nth-child` to potezny selektor CSS. `4n` = co 4. element. `n+5` = od 5. elementu wzwyz. Jesli kiedykolwiek robisz siatkowe layouty, `nth-child` jest twoim najlepszym przyjacielem.
+
+#### 2. Zmniejszenie elementow UI
+
+Panele sa teraz ~50% mniejsze (bo 8 zamiast 3). Musielismy zmniejszyc prawie wszystko:
+
+| Element | Bylo | Jest | Dlaczego |
+|---------|------|------|----------|
+| Chart min-height | 200px | 100px | Mniejszy panel = mniejszy wykres |
+| Factors box | max 40px | max 25px | Mniej miejsca na tekst |
+| Font sizes | 9px | 8px | Gestsza informacja |
+| Padding | 5px | 3-4px | Kazdy piksel sie liczy |
+
+**Lekcja o kompromisach:** Gdy zmniejszasz UI, zawsze jest tradeoff miedzy *iloscia informacji* a *czytelnoscia*. 8px font na monitorze 1080p jest czytelny, ale na 768p juz nie. Dashboard jest projektowany na duzy monitor w "war room" — to nie jest mobilna appka.
+
+#### 3. Nowe horyzonty predykcji: w1 (tygodniowy) i m1 (miesieczny)
+
+W HTML kazdego panelu dodalismy 2 nowe wiersze:
+```javascript
+'<div class="pred-row"><span>1w:</span><span id="predw1-' + coin + '">---</span></div>'
+'<div class="pred-row"><span>1m:</span><span id="predm1-' + coin + '">---</span></div>'
+```
+
+W JavaScript musielismy zaktualizowac **4 miejsca** ktore czytaja/wyswietlaja predykcje:
+1. `updatePredictionUI()` — odczyt `pred.predictions.w1` i `pred.predictions.m1`
+2. No-data fallback — czyszczenie elementow `predw1-` i `predm1-` na "---"
+3. `fallbackPrediction()` — kalkulacja w1 (168h) i m1 (720h) z regresji liniowej
+4. `drawChart()` — linie predykcji na wykresie (fioletowa=w1, cyan=m1)
+
+**Lekcja o spojnosci:** Gdy dodajesz nowe pole danych, musisz zaktualizowac *kazde miejsce* ktore to pole czyta, wyswietla, inicjalizuje albo resetuje. W tym przypadku bylo 4 takich miejsc. Latwo zapomnic o fallbacku (punkt 3) albo o czyszczeniu danych (punkt 2) — a wtedy masz "ghost data" z poprzedniego tokenu.
+
+#### 4. Kolory na wykresie — semiotyka
+
+Kazdy horyzont predykcji ma swoj kolor:
+```javascript
+{ key: "h1",  color: "#3fb950" },   // zielony — krotkoterminowy
+{ key: "h4",  color: "#d29922" },   // zolty — sredni
+{ key: "h12", color: "#f85149" },   // czerwony — dluzszy
+{ key: "w1",  color: "#a371f7" },   // fioletowy — tygodniowy
+{ key: "m1",  color: "#39c5cf" }    // cyan — miesieczny
+```
+
+Nie wybralismy kolorow losowo. Zielony → zolty → czerwony to naturalny gradient "blisko → daleko" (jak swiatla drogowe). Fioletowy i cyan to kolory juz uzywane w dashboard (`.purple` i `.cyan` klasy CSS) — spojnosc wizualna.
+
+### Architektura dashboard — dlaczego jeden plik?
+
+`dashboard.mjs` to **520 linii** w jednym pliku. Caly HTML, CSS i JavaScript jest w template literal:
+
+```javascript
+const HTML = `<!DOCTYPE html>
+<html>
+  <style>/* 65 linii CSS */</style>
+  <script>/* 400 linii JS */</script>
+</html>`;
+
+const server = http.createServer((req, res) => {
+    res.end(HTML);
+});
+```
+
+**Dlaczego nie React/Vue/Next.js?**
+
+1. **Zero build step** — plik `.mjs` uruchamiasz bezposrednio `node dashboard.mjs`. Zero webpack, zero npm install, zero bundlerów.
+2. **Zero zaleznosci** — jedyne importy to `http` i `fs` z Node.js stdlib. Nic nie moze sie zepsuc przez `npm update`.
+3. **Natychmiastowy deploy** — `scp dashboard.mjs server:` + `pm2 restart war-room`. 2 komendy, 5 sekund.
+4. **Czytelnosc** — caly dashboard w jednym pliku. Ctrl+F i masz wszystko.
+
+**Kiedy to NIE jest dobre podejscie?** Gdy dashboard rosnie powyzej ~1000 linii, gdy potrzebujesz komponentow wielokrotnego uzytku, gdy wielu devow pracuje rownoczesnie, lub gdy potrzebujesz state managementu. Ale dla dashboardu ktory wyswietla dane z API — inline HTML jest idealny.
+
+**Analogia:** To jak notatnik w kuchni vs system ERP. Jesli musisz zapisac liste zakupow, notatnik jest idealny. Jesli musisz zarzadzac lancuchem dostaw — potrzebujesz ERP. Nasz dashboard to lista zakupow.
+
+### Dane — skad plyna
+
+Dashboard pobiera dane z 3 zrodel, client-side (w przegladarce usera):
+
+```
+Przegladarka usera
+     │
+     ├──→ api.hyperliquid.xyz/info
+     │    (ceny, pozycje, candle'y)
+     │    ← allMids, clearinghouseState, candleSnapshot
+     │
+     ├──→ 100.71.211.15:8090/predict/{token}
+     │    (predykcje ML z prediction-api)
+     │    ← direction, predictions{h1..m1}, signals, keyFactors
+     │
+     └──→ 100.71.211.15:3000/sm-data
+          (Smart Money data — serwowane przez sam dashboard!)
+          ← dane z /tmp/smart_money_data.json
+```
+
+**Ciekawy trik:** Dashboard serwuje *sam siebie* jako backend! Endpoint `/sm-data` w tym samym serwerze HTTP czyta `/tmp/smart_money_data.json` i zwraca JSON. Dashboard to jednoczesnie frontend i micro-backend.
+
+**Fallback ML:** Gdy prediction-api nie odpowiada, dashboard odpala wlasna regresje liniowa na ostatnich 24h candle'y:
+
+```javascript
+// Nachylenie prostej (slope) na danych cenowych
+const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+const slopePct = (slope / currentPrice) * 100;
+
+// Ekstrapolacja: w1 = 168 godzin, m1 = 720 godzin
+w1: { price: currentPrice * (1 + slopePct * 168 / 100), change: slopePct * 168 }
+m1: { price: currentPrice * (1 + slopePct * 720 / 100), change: slopePct * 720 }
+```
+
+To nie jest dobra predykcja (regresja liniowa na 24h ekstrapolowana na miesiac?), ale lepsze niz "No data". **Lekcja: graceful degradation** — lepiej pokazac przyblizone dane z nota "Fallback: Linear Regression (ML offline)" niz puste miejsce.
+
+### Deploy — jak szybko mozna wrzucic zmiane na produkcje
+
+```bash
+# 1. Edytuj plik lokalnie
+# 2. Wyslij na serwer
+scp dashboard.mjs hl-mm:~/hyperliquid-mm-bot-complete/
+
+# 3. Restart procesu
+ssh hl-mm 'pm2 restart war-room'
+
+# 4. Weryfikacja
+curl -s http://100.71.211.15:3000 | grep 'const COINS'
+# → const COINS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
+```
+
+Caly deploy trwa **10 sekund**. Zero build step, zero CI/CD, zero Docker. To jest moc prostych rozwiazan.
+
+### Commit
+
+```
+7840af1 feat: War Room dashboard — 8 tokens + w1/m1 horizons, 4x2 grid
+```
