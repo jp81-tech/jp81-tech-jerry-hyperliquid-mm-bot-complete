@@ -64,9 +64,9 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x418aa6bf98a2b2bc93779f810330d88cde488888': { name: '58bro.eth', tier: 'FUND', weight: 0.8 },
 
   // === TIER 3: ACTIVE TRADERS ===
-  '0xfeec88b13fc0be31695069f02bac18538a154e9c': { name: 'Kapitan feec', tier: 'ACTIVE', weight: 0.80 },
-  '0xfce053a5e461683454bf37ad66d20344c0e3f4c0': { name: 'Kapitan fce0', tier: 'ACTIVE', weight: 0.80 },
-  '0x99b1098d9d50aa076f78bd26ab22e6abd3710729': { name: 'Kapitan 99b1', tier: 'ACTIVE', weight: 0.80 },
+  '0xfeec88b13fc0be31695069f02bac18538a154e9c': { name: 'Kapitan feec ⭐', tier: 'ACTIVE', weight: 0.80 },
+  '0xfce053a5e461683454bf37ad66d20344c0e3f4c0': { name: 'Kapitan fce0 ⭐', tier: 'ACTIVE', weight: 0.80 },
+  '0x99b1098d9d50aa076f78bd26ab22e6abd3710729': { name: 'Kapitan 99b1 ⭐', tier: 'ACTIVE', weight: 0.80 },
   '0xc7290b4b308431a985fa9e3e8a335c2f7650517c': { name: 'OG Shorter c7290b', tier: 'ACTIVE', weight: 0.65 },
   '0x570b09e27a87f9acbce49f85056745d29b3ee3c6': { name: 'Kontrarian 570b09 (WATCH)', tier: 'ACTIVE', weight: 0.10 },
   '0x179c17d04be626561b0355a248d6055a80456aa5': { name: 'SM 179c17', tier: 'ACTIVE', weight: 0.60 },
