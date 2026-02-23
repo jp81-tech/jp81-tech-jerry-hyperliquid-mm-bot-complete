@@ -75,20 +75,26 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 | `936cf4` | SM Trader 936cf4 | **Porucznik SOL3** |
 | `56cd86` | Token Millionaire 56cd86 | **Kraken B** |
 | `d7a678` | Consistent Winner d7a678 | **Winner d7a678** |
-| `92e977` | SM HL Trader 92e977 | **ETH Whale** |
-| `3c363e` | SM HL Trader 3c363e | **BTC/LIT Trader** |
-| `8a0cd1` | SM HL Trader 8a0cd1 | **ZEC Conviction** |
+| `9eec98` | SM Active 9eec98 | **ETH Whale** |
+| `519c72` | SM Conviction 519c72 | **ZEC Conviction** |
+| `92e977` | SM HL Trader 92e977 | **BTC/LIT Trader** |
 | `0c4926` | SM DOGE Trader Legacy | **DOGE Legacy** |
 | `e71cbf` | SM LIT Long 141K Legacy | **LIT Long Legacy** |
+
+**Reverted (not in vip_config):**
+- `3c363e` — kept as "SM HL Trader 3c363e" / "SM 3c363e" (no vip_config entry)
+- `8a0cd1` — kept as "SM HL Trader 8a0cd1" / "SM 8a0cd1" (no vip_config entry)
 
 **NIE zmienione:**
 - `NANSEN_SM_LABELS` dict w whale_tracker.py — to Nansen category labels używane do credibility multiplier lookup, NIE nazwy traderów. Zmiana by złamała `CREDIBILITY_MULTIPLIERS`.
 - Fundy (Galaxy Digital, Laurent Zeimes, etc.) — już miały prawidłowe nazwy
 - Traderzy bez wpisu w vip_config (SM Active xxx) — brak aliasu, zachowane jak były
 
+**Address swap fix (23.02):** Original plan had 3 wrong address→name mappings. Fixed: `92e977`→"BTC/LIT Trader" (was "ETH Whale"), `9eec98`→"ETH Whale" (was missed), `519c72`→"ZEC Conviction" (was missed), `3c363e` and `8a0cd1` reverted (not in vip_config).
+
 **Deploy:** SCP 3 pliki → server, `pm2 restart mm-bot`, whale_tracker.py w cron */15, daily-whale-report w cron 0 8
 
-**Commit:** `43ed7c4`
+**Commit:** `43ed7c4` (initial), fix pending commit
 
 ### 30. War Room Dashboard — 8 tokens + w1/m1 horizons (23.02)
 
