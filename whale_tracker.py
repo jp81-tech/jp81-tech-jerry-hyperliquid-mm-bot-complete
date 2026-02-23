@@ -75,27 +75,27 @@ NANSEN_SM_LABELS = {
     "0x2ea18c": "Smart HL Perps Trader",  # Bitcoin OG #2 - same entity as OG #1
     "0xd7a678": "Smart HL Perps Trader",  # Winner d7a678 - Consistent Perps Winner
 
-    "0xa31211": "Smart HL Perps Trader",  # $7.4M LIT SHORT, $2M DOGE SHORT
-    "0x35d115": "Smart HL Perps Trader",  # $64.4M SOL SHORT - MEGA SHORTER!
-    "0x45d26f": "Smart HL Perps Trader",  # $40.5M BTC SHORT, $28.9M ETH SHORT
-    "0x5d2f44": "Smart HL Perps Trader",  # $46.3M BTC SHORT
-    "0x71dfc0": "Smart HL Perps Trader",  # $25.4M BTC SHORT
-    "0x06cecf": "Smart HL Perps Trader",  # $11.8M SOL SHORT
-    "0x6bea81": "Smart HL Perps Trader",  # $8.1M SOL SHORT
-    "0x936cf4": "Smart HL Perps Trader",  # $6.6M SOL SHORT
-    "0x56cd86": "Smart HL Perps Trader",  # $3.9M SOL SHORT - Token Millionaire
+    "0xa31211": "Smart HL Perps Trader",  # General - LIT $3.3M, ASTER $2.4M, PUMP $1.7M SHORT
+    "0x35d115": "Smart HL Perps Trader",  # Major - SOL $15.1M SHORT (zredukowany z $64M)
+    "0x45d26f": "Smart HL Perps Trader",  # Wice-General - BTC $9.9M, ETH $2.9M SHORT (zredukowany)
+    "0x5d2f44": "Smart HL Perps Trader",  # Pulkownik - puste konto $5.5M cash (zamknal BTC $46M SHORT)
+    "0x71dfc0": "Smart HL Perps Trader",  # Kapitan BTC - BTC $29.2M SHORT
+    "0x06cecf": "Smart HL Perps Trader",  # Kraken A ⭐ - SOL $15.2M, BTC $2.9M, HYPE $2.8M SHORT
+    "0x6bea81": "Smart HL Perps Trader",  # Porucznik SOL2 - SOL shorter
+    "0x936cf4": "Smart HL Perps Trader",  # Porucznik SOL3 - SOL flipnal na LONG, BTC/ETH SHORT
+    "0x56cd86": "Smart HL Perps Trader",  # Kraken B ⭐ - HYPE $3.4M, SOL $1.9M, XRP $1.3M SHORT
 
-    "0x519c72": "Smart HL Perps Trader",  # $6.2M ZEC LONG
+    "0x519c72": "Smart HL Perps Trader",  # ZEC Conviction - ZEC LONG
 
     # === ACTIVE SM TRADERS ===
-    "0xfeec88": "Smart HL Perps Trader",  # $22.6M BTC SHORT
-    "0xfce053": "Smart HL Perps Trader",  # $21.7M BTC SHORT
-    "0x99b109": "Smart HL Perps Trader",  # $34.3M BTC SHORT
-    "0xea6670": "Smart HL Perps Trader",  # $9.1M BTC SHORT
-    "0x3c363e": "Smart HL Perps Trader",  # $1.9M ETH SHORT
-    "0x92e977": "Smart HL Perps Trader",  # BTC/LIT trader
+    "0xfeec88": "Smart HL Perps Trader",  # Kapitan feec ⭐ - BTC $14M SHORT (entry $101,600)
+    "0xfce053": "Smart HL Perps Trader",  # Kapitan fce0 ⭐ - BTC $8.5M, ETH $3.47M SHORT
+    "0x99b109": "Smart HL Perps Trader",  # Kapitan 99b1 ⭐ - mid-cap shorter (BCH/LTC/HYPE/BNB)
+    "0xea6670": "Smart HL Perps Trader",  # Porucznik ea66 - BTC shorter
+    "0x3c363e": "Smart HL Perps Trader",  # SM 3c363e - ETH SHORT
+    "0x92e977": "Smart HL Perps Trader",  # BTC/LIT Trader
     "0x1e771e": "Smart HL Perps Trader",  # DOGE/ETH shorter
-    "0x091159": "Smart HL Perps Trader",  # Kontrarian 091159 (WATCH)
+    "0x091159": "Smart HL Perps Trader",  # Kontrarian 091159 (WATCH) - flipnal LONG 23.02
 
     # === FUNDS ===
     "0xcac196": "Fund",  # Galaxy Digital
