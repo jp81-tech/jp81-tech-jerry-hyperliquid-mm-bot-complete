@@ -1013,9 +1013,9 @@ WHALES = {
         "name": "donkstrategy.eth",
         "emoji": "🔴",
         "tier": "ACTIVE",
-        "signal_weight": 0.55,
+        "signal_weight": 0.65,
         "min_change": 0.15,
-        "notes": "$2.4M BTC SHORT"
+        "notes": "$600K equity, shorter od gru 2025. BTC SHORT $1M (entry $88.6K, +$354K), ETH SHORT $133K (+$107K), HYPE SHORT $53K (+$9K). Closed PnL +$736K, total ~$1.2M profit. Konserwatywny 2x lev, 49 aktywnych dni."
     },
     "0xe82bc65677e46b6626a8e779ac263221db039c2d": {
         "name": "SM Active e82bc6",
