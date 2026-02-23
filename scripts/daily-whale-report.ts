@@ -101,7 +101,6 @@ const WHALES: Record<string, WhaleEntry> = {
   '0xc12f6e6f7a11604871786db86abf33fdf36fb0ad': { name: 'SM c12f6e', tier: 'ACTIVE', weight: 0.50 },
   '0x61f2bb695d81ac9fce0b1d01fd45cc6b2925a571': { name: 'SM 61f2bb', tier: 'ACTIVE', weight: 0.50 },
   '0xdbcc96bcada067864902aad14e029fe7c422f147': { name: 'SM dbcc96', tier: 'ACTIVE', weight: 0.50 },
-  '0xe71cbf47fff309813bcea54f3ecf49a5f129264d': { name: 'LIT Long Legacy', tier: 'ACTIVE', weight: 0.50 },
 };
 
 // ============================================================
