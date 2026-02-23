@@ -698,7 +698,7 @@ WHALES = {
         "signal_weight": 0.10,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "WATCH: Liquidated -$128M on ETH LONG 31.01.2026. +$165M Oct 2025 BTC shorts. Account empty — watching for return. CLUSTER BITCOIN_OG: 3 portfele — main (b317d2), OG #2 (2ea18c, same entity 1KAt6STt), + 0x4f9a37bc (received 192.6M USDC from main). All empty."
+        "notes": "WATCH: Liquidated -$128M on ETH LONG 31.01.2026. +$165M Oct 2025 BTC shorts. Account empty — watching for return. CLUSTER BITCOIN_OG: 3 portfele — main (b317d2), OG #2 (2ea18c, same entity 1KAt6STt), + 0x4f9a37bc (received 192.6M USDC from main). All empty. 🔴 OCT_CRASH: INSIDER_95% — ROI 4331%, zamknął konto, anonimowy, portfel stworzony specjalnie na ten trade."
     },
     "0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed": {
         "name": "Winner d7a678",
@@ -738,7 +738,7 @@ WHALES = {
         "signal_weight": 1.0,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED - profitable LIT/DOGE shorter
         "min_change": 0.05,
-        "notes": "Main LIT/DOGE shorter. $7.4M LIT SHORT (+$3.4M), $2M DOGE SHORT (+$291k)"
+        "notes": "Main LIT/DOGE shorter. $7.4M LIT SHORT (+$3.4M), $2M DOGE SHORT (+$291k). 🔴 OCT_CRASH: INSIDER_85% — +$48.8M PnL, First Funder Plasma: MEV Bot (0xcd4053), First Funder ETH: FTX. Wysłał 78.2M USDC na Binance przed crashem. Gnosis Safe + Kwenta margin accounts."
     },
     "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1": {
         "name": "Major",
@@ -756,7 +756,7 @@ WHALES = {
         "signal_weight": 0.95,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED - mega BTC winner
         "min_change": 0.05,
-        "notes": "$46.3M BTC SHORT (+$19.4M uPnL!) - MEGA winner on BTC"
+        "notes": "$46.3M BTC SHORT (+$19.4M uPnL!) - MEGA winner on BTC. 🟡 OCT_CRASH: INSIDER_70% — ROI 7379%, wysłał 38.9M USDC na Binance, otrzymał 15.7M BTCB. CLUSTER TOKEN_MILLIONAIRE (0xc613bd). Używa Binance/Bybit/OKX."
     },
     "0x45d26f28196d226497130c4bac709d808fed4029": {
         "name": "Wice-Generał",
@@ -801,7 +801,7 @@ WHALES = {
         "signal_weight": 0.9,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "$25.4M BTC SHORT (+$4.9M), $19.8M ETH SHORT, $2.1M ZEC SHORT (+$861k). First Funder: Binance Hot Wallet. Anonymous — no other known relationships. DeFi: $31.1M net."
+        "notes": "$25.4M BTC SHORT (+$4.9M), $19.8M ETH SHORT, $2.1M ZEC SHORT (+$861k). First Funder: Binance Hot Wallet. Anonymous — no other known relationships. DeFi: $31.1M net. 🟡 OCT_CRASH: INSIDER_75% — entry BTC $106,677 (2 dni przed ATH $126K!), nadal trzyma short, ROI 1334%, anonimowy."
     },
     "0x519c721de735f7c9e6146d167852e60d60496a47": {
         "name": "ZEC Conviction",
@@ -824,7 +824,7 @@ WHALES = {
         "signal_weight": 0.85,
         "nansen_label": "Fund",  # Institutional fund
         "min_change": 0.05,
-        "notes": "$34.5M BTC SHORT (+$5.9M), $20.9M ETH SHORT (+$6.5M), $534k SOL SHORT. First Funder: Galaxy Global Markets: OTC (0x33566c9d8be6cf0b23795e0d380e112be9d75836). Confirmed institutional fund. DeFi: $40.1M net."
+        "notes": "$34.5M BTC SHORT (+$5.9M), $20.9M ETH SHORT (+$6.5M), $534k SOL SHORT. First Funder: Galaxy Global Markets: OTC (0x33566c9d8be6cf0b23795e0d380e112be9d75836). Confirmed institutional fund. DeFi: $40.1M net. 🟢 OCT_CRASH: LEGIT_EDGE_25% — Mike Novogratz fund, publiczna firma, legalny dostęp do flow + OTC info."
     },
     "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae": {
         "name": "Laurent Zeimes",
@@ -852,6 +852,33 @@ WHALES = {
         "nansen_label": "Smart HL Perps Trader",  # Verified trader
         "min_change": 0.05,
         "notes": "$10.2M BTC SHORT, $16.4M ETH SHORT"
+    },
+    "0x7fdafde5cfb5465924316eced2d3715494c517d1": {
+        "name": "Fasanara Capital",
+        "emoji": "🏦",
+        "tier": "FUND",
+        "signal_weight": 0.85,
+        "nansen_label": "Fund",  # Fasanara Capital: Aave Arc Whitelisted
+        "min_change": 0.05,
+        "notes": "$30.6M equity, $94.5M notional. ETH SHORT $50.2M, BTC SHORT $24M, HYPE SHORT $14M, AVAX SHORT $4.9M, FARTCOIN SHORT $1.3M. London hedge fund. First Funder: Fasanara Capital Aave Arc (0x177876). DeFi: $43.2M. 🟢 OCT_CRASH: LEGIT_EDGE_20% — fundusz instytucjonalny, shortuje cały rynek (70+ pozycji), macro hedge."
+    },
+    "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36": {
+        "name": "Abraxas Capital",
+        "emoji": "🏦",
+        "tier": "FUND",
+        "signal_weight": 0.70,
+        "nansen_label": "Fund",  # Confirmed fund entity
+        "min_change": 0.08,
+        "notes": "$9.8M equity (main wallet). HYPE SHORT $4.3M, FARTCOIN SHORT $1.1M, XRP SHORT $598K. First Funder: Abraxas Capital (0xed0c60). DeFi: $12.8M. CLUSTER ABRAXAS: 2 trading wallets (b83de0 + 5b5d51) + funder (ed0c60). Wypłacił $144M na Binance. 🟢 OCT_CRASH: LEGIT_EDGE_30% — potwierdzony fundusz instytucjonalny."
+    },
+    "0x5b5d51203a0f9079f8aeb098a6523a13f298c060": {
+        "name": "Abraxas #2",
+        "emoji": "🏦",
+        "tier": "FUND",
+        "signal_weight": 0.70,
+        "nansen_label": "Fund",  # Same entity as Abraxas main
+        "min_change": 0.08,
+        "notes": "$9.8M equity (second wallet). HYPE SHORT $4.3M, FARTCOIN SHORT $1.1M, BTC LONG $1.3M. +$81.1M PnL historycznie. CLUSTER ABRAXAS: see b83de0."
     },
 
     # ================================================================
@@ -1117,6 +1144,24 @@ WHALES = {
         "nansen_label": "",
         "min_change": 0.10,
         "notes": "$9.5M equity. BTC SHORT entry $108,343 (+$1.5M). HYPE SHORT $8.9M, ETH SHORT $3.6M, FARTCOIN SHORT $325K, LIT SHORT $205K. First funder: unknown 0x3ed2ce (Feb 2025). Related: sent 4.4M USDC to High Balance 0x089d69ce9f2dbca64a1fb6ac81e0057b40d7e9a3. Sent 615.1K HYPE to Kinetiq (staking)."
+    },
+    "0x880ac484a1743862989a441d6d867238c7aa311c": {
+        "name": "Silk Capital",
+        "emoji": "🔴",
+        "tier": "ACTIVE",
+        "signal_weight": 0.60,
+        "nansen_label": "",
+        "min_change": 0.08,
+        "notes": "$5.7M equity, 23 pozycji. XMR SHORT $10.1M (+$2.9M), HYPE SHORT $9.3M (+$1.1M). Trading bot. +$33.8M Oct 2025 PnL. 🟡 OCT_CRASH: INSIDER_60% — algorytm wykrył sygnały przed crashem, mega short XMR (privacy coin)."
+    },
+    "0x4f7634c03ec4e87e14725c84913ade523c6fad5a": {
+        "name": "Former SM 4f7634 (WATCH)",
+        "emoji": "🔍",
+        "tier": "ACTIVE",
+        "signal_weight": 0.10,
+        "nansen_label": "Former Smart Trader",
+        "min_change": 0.10,
+        "notes": "WATCH: +$38.3M Oct 2025 BTC crash. Account EMPTY ($0). 🔴 OCT_CRASH: INSIDER_90% — otrzymał 11M USDC z Binance Hot Wallet 1-6 paź (przed crashem!), wysłał na HL Bridge, zshortował, zamknął konto. Timing perfekcyjny, first funder Binance Hot Wallet. Watching for return."
     },
 }
 

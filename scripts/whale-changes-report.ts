@@ -69,6 +69,13 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x856c35038594767646266bc7fd68dc26480e910d': { name: 'Oct Winner 856c35', tier: 'ACTIVE', weight: 0.60 },
   '0x4eebd8d39e82efb958e0fa9f694435c910c8518f': { name: 'Oct Winner 4eeb (WATCH)', tier: 'ACTIVE', weight: 0.10 },
   '0x5b9306593ae710a66832c4101e019e3e96f65d0a': { name: 'SM 5b9306', tier: 'ACTIVE', weight: 0.65 },
+  // Institutional funds (added 24.02.2026)
+  '0x7fdafde5cfb5465924316eced2d3715494c517d1': { name: 'Fasanara Capital', tier: 'FUND', weight: 0.85 },
+  '0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36': { name: 'Abraxas Capital', tier: 'FUND', weight: 0.70 },
+  '0x5b5d51203a0f9079f8aeb098a6523a13f298c060': { name: 'Abraxas #2', tier: 'FUND', weight: 0.70 },
+  // October 2025 BTC crash — insider suspects + active traders
+  '0x880ac484a1743862989a441d6d867238c7aa311c': { name: 'Silk Capital', tier: 'ACTIVE', weight: 0.60 },
+  '0x4f7634c03ec4e87e14725c84913ade523c6fad5a': { name: 'Former SM 4f7634 (WATCH)', tier: 'ACTIVE', weight: 0.10 },
 };
 
 // ============================================================
