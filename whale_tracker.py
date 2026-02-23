@@ -859,31 +859,31 @@ WHALES = {
     # ================================================================
 
     "0xfeec88b13fc0be31695069f02bac18538a154e9c": {
-        "name": "Kapitan feec",
+        "name": "Kapitan feec ⭐",
         "emoji": "🔴",
         "tier": "ACTIVE",
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$22.6M BTC SHORT (+$4M) - Nansen verified Smart HL Perps Trader"
+        "notes": "$1.53M equity, +$10.8M total. BTC SHORT $14M (entry $101,600, +$7.8M uPnL). HYPE SHORT $26K, FARTCOIN LONG $74K. Closed PnL +$3.04M. BTC short opened sty 2026. Nansen verified."
     },
     "0xfce053a5e461683454bf37ad66d20344c0e3f4c0": {
-        "name": "Kapitan fce0",
+        "name": "Kapitan fce0 ⭐",
         "emoji": "🔴",
         "tier": "ACTIVE",
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$21.7M BTC SHORT - Nansen verified Smart HL Perps Trader"
+        "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - BEST ENTRY!), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified."
     },
     "0x99b1098d9d50aa076f78bd26ab22e6abd3710729": {
-        "name": "Kapitan 99b1",
+        "name": "Kapitan 99b1 ⭐",
         "emoji": "🔴",
         "tier": "ACTIVE",
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$34.3M BTC SHORT - Nansen verified Smart HL Perps Trader"
+        "notes": "$435K equity, +$981K total. Mid-cap shorter: BCH $404K, LTC $378K, HYPE $317K, BNB $144K, ETH $12K. Zrealizowal $700K w 3 dni (5-8 lut). Nansen verified."
     },
     "0xc7290b4b308431a985fa9e3e8a335c2f7650517c": {
         "name": "OG Shorter c7290b",
