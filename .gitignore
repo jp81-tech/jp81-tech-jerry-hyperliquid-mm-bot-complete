@@ -40,3 +40,7 @@ secrets/
 *.key
 *.pem
 .env1
+.env.remote
+
+# SSH
+.ssh/

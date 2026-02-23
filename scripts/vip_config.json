@@ -1,0 +1,160 @@
+{
+  "watched_coins": ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "XMR", "MON", "kPEPE", "BCH", "PAXG", "AVAX"],
+  "poll_intervals": {
+    "tier1": 30,
+    "tier2": 120,
+    "fund": 300
+  },
+  "vips": {
+    "0xa312114b5795dff9b8db50474dd57701aa78ad1e": {
+      "name": "Genera\u0142",
+      "emoji": "\ud83c\udf96\ufe0f",
+      "tier": "tier1",
+      "notes": "PnL +$15M, HYPE/LIT/FARTCOIN shorter"
+    },
+    "0x45d26f28196d226497130c4bac709d808fed4029": {
+      "name": "Wice-Genera\u0142",
+      "emoji": "\ud83c\udf96\ufe0f",
+      "tier": "tier1",
+      "notes": "PnL +$30.6M, BTC/HYPE mega shorter"
+    },
+    "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7": {
+      "name": "Pu\u0142kownik",
+      "emoji": "\ud83c\udf96\ufe0f",
+      "tier": "tier1",
+      "notes": "PnL +$21.1M, MEGA SHORT BTC $44.6M"
+    },
+    "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1": {
+      "name": "Major",
+      "emoji": "\ud83c\udf96\ufe0f",
+      "tier": "tier1",
+      "notes": "PnL +$12.8M, MEGA SHORT SOL $65M, BTC $5.6M, ETH $5.4M"
+    },
+    "0x71dfc07de32c2ebf1c4801f4b1c9e40b76d4a23d": {
+      "name": "Kapitan BTC",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "BTC $25.4M SHORT"
+    },
+    "0x99b1098d9d50aa076f78bd26ab22e6abd3710729": {
+      "name": "Kapitan 99b1",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "BTC $34.3M SHORT"
+    },
+    "0xfeec88b13fc0be31695069f02bac18538a154e9c": {
+      "name": "Kapitan feec",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "BTC $22.6M SHORT"
+    },
+    "0xfce053a5e461683454bf37ad66d20344c0e3f4c0": {
+      "name": "Kapitan fce0",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "BTC $21.7M SHORT"
+    },
+    "0x9eec98d048d06d9cd75318fffa3f3960e081daab": {
+      "name": "ETH Whale",
+      "emoji": "\ud83d\udc33",
+      "tier": "tier2",
+      "notes": "ETH $182.8M LONG"
+    },
+    "0xea6670ebdb4a388a8cfc16f6497bf4f267b061ee": {
+      "name": "Porucznik ea66",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "BTC $9.1M SHORT"
+    },
+    "0x06cecfbac34101ae41c88ebc2450f8602b3d164b": {
+      "name": "Kraken A",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier1",
+      "notes": "BTC short @$87K (Nov 25), SOL short @$133 (Jan 8), +$11M uPnl"
+    },
+    "0x6bea81d7a0c5939a5ce5552e125ab57216cc597f": {
+      "name": "Porucznik SOL2",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "SOL $8.1M SHORT"
+    },
+    "0x936cf4fb95c30ce83f658b5bbb247e4bb381bb0f": {
+      "name": "Porucznik SOL3",
+      "emoji": "\u2694\ufe0f",
+      "tier": "tier2",
+      "notes": "SOL $6.6M SHORT"
+    },
+    "0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a": {
+      "name": "Kraken B",
+      "emoji": "\ud83d\udcb0",
+      "tier": "tier1",
+      "notes": "SOL short @$193 (Oct 28), XRP short @$2.60 — best timing of all"
+    },
+    "0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed": {
+      "name": "Winner d7a678",
+      "emoji": "\ud83c\udfc6",
+      "tier": "tier1",
+      "notes": "+$4.6M net, BTC short @$125K top, SOL @$230, cashed out Jan 31 — watching for return"
+    },
+    "0x880ac484a1743862989a441d6d867238c7aa311c": {
+      "name": "Token Millionaire",
+      "emoji": "\ud83d\udcb0",
+      "tier": "tier1",
+      "notes": "XMR $10M + HYPE $9M shorts (Feb 7) — $20M+ in one evening"
+    },
+    "0x418aa6bf98a2b2bc93779f810330d88cde488888": {
+      "name": "58bro.eth",
+      "emoji": "\ud83d\udc8e",
+      "tier": "tier2",
+      "notes": "BTC $10.2M, ETH $16.4M SHORT"
+    },
+    "0xcac19662ec88d23fa1c81ac0e8570b0cf2ff26b3": {
+      "name": "Galaxy Digital",
+      "emoji": "\ud83c\udfe6",
+      "tier": "fund",
+      "notes": "Fund"
+    },
+    "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae": {
+      "name": "Laurent Zeimes",
+      "emoji": "\ud83c\udfe6",
+      "tier": "fund",
+      "notes": "Fund"
+    },
+    "0xa2acb1c1d689fd3785696277537a504fcea8d1d0": {
+      "name": "Hikari",
+      "emoji": "\ud83c\udfe6",
+      "tier": "fund",
+      "notes": "Fund"
+    },
+    "0x519c721de735f7c9e6146d167852e60d60496a47": {
+      "name": "ZEC Conviction",
+      "emoji": "\ud83c\udfe6",
+      "tier": "fund",
+      "notes": "Fund - ZEC focused"
+    },
+    "0x92e9773ad2b4ba6e2e57e7fc1f9305aef80ab6c2": {
+      "name": "BTC/LIT Trader",
+      "emoji": "\ud83c\udfe6",
+      "tier": "fund",
+      "notes": "Fund - BTC + LIT"
+    },
+    "0x7fdafde5cfb5465924316eced2d3715494c517d1": {
+      "name": "Fasanara Capital",
+      "emoji": "\ud83c\udfe6",
+      "tier": "tier1",
+      "notes": "+$30.8M Oct 2025 BTC short, $94.5M notional, ETH SHORT $49M, BTC SHORT $25M, HYPE SHORT $14.6M — London hedge fund"
+    },
+    "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36": {
+      "name": "Abraxas Capital",
+      "emoji": "\ud83c\udfe6",
+      "tier": "tier2",
+      "notes": "+$37.9M Oct 2025, withdrew $144M to Binance, now XRP $3.6M + HYPE $3.4M SHORT"
+    },
+    "0x2ea18c23f72a4b6172c55b411823cdc5335923f4": {
+      "name": "Bitcoin OG #2",
+      "emoji": "\ud83d\udc0b",
+      "tier": "tier1",
+      "notes": "+$72.5M Oct 2025 BTC short (ROI 381%), same entity as OG #1 (1KAt6STt), cashed out — watching for return"
+    }
+  }
+}

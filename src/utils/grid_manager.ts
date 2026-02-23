@@ -73,7 +73,8 @@ export class GridManager {
     inventorySkew: number = 0, // Combined Skew (Position + Vision)
     permissions: { allowLongs: boolean, allowShorts: boolean, reason?: string } = { allowLongs: true, allowShorts: true },
     actualSkew: number = 0, // Real Inventory Skew (without Vision)
-    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 }
+    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 },
+    _sizeMultipliers?: { bid: number, ask: number } // Size multipliers from dynamic config (reserved for future use)
   ): GridOrder[] {
     if (!this.config.enableMultiLayer) {
       return [] // Fallback to legacy single-layer
@@ -164,6 +165,102 @@ export class GridManager {
             sizeUsd: orderSizeUsd,
             units: units
           })
+          }
+        }
+      }
+    }
+
+    return orders
+  }
+
+  /**
+   * Generate grid orders with CUSTOM layer config (per-token override).
+   * Same logic as generateGridOrders but uses provided customLayers instead of this.layers.
+   * Also applies sizeMultipliers to order sizes (bid/ask scaling for inventory rebalancing).
+   */
+  generateGridOrdersCustom(
+    symbol: string,
+    midPrice: number,
+    capitalPerPair: number,
+    customLayers: GridLayer[],
+    minOrderSize: number = 0.001,
+    inventorySkew: number = 0,
+    permissions: { allowLongs: boolean, allowShorts: boolean, reason?: string } = { allowLongs: true, allowShorts: true },
+    actualSkew: number = 0,
+    spreadMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 },
+    sizeMultipliers: { bid: number, ask: number } = { bid: 1.0, ask: 1.0 }
+  ): GridOrder[] {
+    if (!this.config.enableMultiLayer) {
+      return []
+    }
+
+    const orders: GridOrder[] = []
+
+    for (const layer of customLayers) {
+      if (!layer.isActive) {
+        continue
+      }
+
+      const layerCapital = (capitalPerPair * layer.capitalPct) / 100
+      const orderSizeUsdBase = layerCapital / (layer.ordersPerSide * 2)
+
+      let bidOffsetBps = (layer.offsetBps * spreadMultipliers.bid) + this.getInventoryAdjustment(inventorySkew, 'bid')
+      let askOffsetBps = (layer.offsetBps * spreadMultipliers.ask) + this.getInventoryAdjustment(inventorySkew, 'ask')
+
+      bidOffsetBps = Math.max(2, bidOffsetBps)
+      askOffsetBps = Math.max(2, askOffsetBps)
+
+      // BIAS LOCK & REGIME GATING (same logic as generateGridOrders)
+      let skewSkipBids = inventorySkew > 0.15 && actualSkew > -0.05
+      let skewSkipAsks = inventorySkew < -0.15 && actualSkew < 0.05
+
+      if (permissions.reason && permissions.reason.includes('override')) {
+        if (permissions.allowLongs) skewSkipBids = false
+        if (permissions.allowShorts) skewSkipAsks = false
+      }
+
+      const permissionSkipBids = !permissions.allowLongs && actualSkew > -0.05
+      const permissionSkipAsks = !permissions.allowShorts && actualSkew < 0.05
+
+      const skipBids = skewSkipBids || permissionSkipBids
+      const skipAsks = skewSkipAsks || permissionSkipAsks
+
+      // Generate bid orders with sizeMultiplier applied
+      if (!skipBids) {
+        const bidOrderSize = orderSizeUsdBase * sizeMultipliers.bid
+        for (let i = 0; i < layer.ordersPerSide; i++) {
+          const staggerBps = i * 2
+          const bidPrice = midPrice * (1 - (bidOffsetBps + staggerBps) / 10000)
+          const units = bidOrderSize / bidPrice
+
+          if (units * bidPrice >= minOrderSize) {
+            orders.push({
+              layer: layer.level,
+              side: 'bid',
+              price: bidPrice,
+              sizeUsd: bidOrderSize,
+              units: units
+            })
+          }
+        }
+      }
+
+      // Generate ask orders with sizeMultiplier applied
+      if (!skipAsks) {
+        const askOrderSize = orderSizeUsdBase * sizeMultipliers.ask
+        for (let i = 0; i < layer.ordersPerSide; i++) {
+          const staggerBps = i * 2
+          const askPrice = midPrice * (1 + (askOffsetBps + staggerBps) / 10000)
+          const units = askOrderSize / askPrice
+
+          if (units * askPrice >= minOrderSize) {
+            orders.push({
+              layer: layer.level,
+              side: 'ask',
+              price: askPrice,
+              sizeUsd: askOrderSize,
+              units: units
+            })
           }
         }
       }

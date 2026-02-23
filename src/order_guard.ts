@@ -60,7 +60,7 @@ async function maybeFixMarketReduceOnly(orderItem: any): Promise<any> {
   const meta = await getMeta()
   const coin = nameFor(meta, orderItem)
   if (!coin || !infoClient) return orderItem
-  const mid = await infoClient.mid({ coin })
+  const mid = await (infoClient as any).mid({ coin })
   const a = typeof orderItem.a === "number" ? orderItem.a : meta.universe.findIndex((u: any) => u.name === coin)
   const tick = tickForIdx(meta, a)
   const isBuy = !!orderItem.b
