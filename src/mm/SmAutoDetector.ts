@@ -279,35 +279,35 @@ const KNOWN_TRADERS: Record<string, KnownTrader> = {
     notes: '$717M ETH LONG, $92M BTC LONG'
   },
   '0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1': {
-    label: 'SM Conviction 35d115',
+    label: 'Major',
     tier: TraderTier.CONVICTION,
     flipRate: 0.0,
     signalWeight: 0.95,
     notes: '$64.5M SOL SHORT'
   },
   '0xa312114b5795dff9b8db50474dd57701aa78ad1e': {
-    label: 'SM Conviction a31211',
+    label: 'Generał',
     tier: TraderTier.CONVICTION,
     flipRate: 0.0,
     signalWeight: 0.95,
     notes: 'LIT short specialist'
   },
   '0x45d26f28196d226497130c4bac709d808fed4029': {
-    label: 'SM Conviction 45d26f',
+    label: 'Wice-Generał',
     tier: TraderTier.CONVICTION,
     flipRate: 0.1,
     signalWeight: 0.90,
     notes: 'BTC short specialist'
   },
   '0x06cecf0ec7c16ffff8a78c7b9b262c4619ef3ad5': {
-    label: 'SM Conviction 06cecf',
+    label: 'Kraken A',
     tier: TraderTier.CONVICTION,
     flipRate: 0.05,
     signalWeight: 0.90,
     notes: '$11.8M SOL SHORT'
   },
   '0x6bea818ff7d502c96b9d44f81de4fc7bb5a26c57': {
-    label: 'SM Conviction 6bea81',
+    label: 'Porucznik SOL2',
     tier: TraderTier.CONVICTION,
     flipRate: 0.05,
     signalWeight: 0.88,
