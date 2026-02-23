@@ -56,7 +56,6 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a': { name: 'Kraken B', tier: 'CONVICTION', weight: 0.85 },
   '0x1e771e1b95c86491299d6e2a5c3b3842d03b552e': { name: 'SM 1e771e', tier: 'CONVICTION', weight: 0.75 },
   '0x091159a8106b077c13e89bc09701117e8b5f129a': { name: 'SM 091159', tier: 'CONVICTION', weight: 0.85 },
-  '0x0b23968e02c549f99ff77b6471be3a78cbfff37b': { name: 'SM 0b2396 (WATCH)', tier: 'ACTIVE', weight: 0.40 },
 
   // === TIER 2: INSTITUTIONAL / FUNDS ===
   '0xcac19662ec88d23fa1c81ac0e8570b0cf2ff26b3': { name: 'Galaxy Digital', tier: 'FUND', weight: 0.85 },
@@ -65,13 +64,11 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x418aa6bf98a2b2bc93779f810330d88cde488888': { name: '58bro.eth', tier: 'FUND', weight: 0.8 },
 
   // === TIER 3: ACTIVE TRADERS ===
-  '0x9eec98d048d06d9cd75318fffa3f3960e081daab': { name: 'ETH Whale', tier: 'ACTIVE', weight: 0.85 },
   '0xfeec88b13fc0be31695069f02bac18538a154e9c': { name: 'Kapitan feec', tier: 'ACTIVE', weight: 0.80 },
   '0xfce053a5e461683454bf37ad66d20344c0e3f4c0': { name: 'Kapitan fce0', tier: 'ACTIVE', weight: 0.80 },
   '0x99b1098d9d50aa076f78bd26ab22e6abd3710729': { name: 'Kapitan 99b1', tier: 'ACTIVE', weight: 0.80 },
   '0xc7290b4b308431a985fa9e3e8a335c2f7650517c': { name: 'SM c7290b', tier: 'ACTIVE', weight: 0.65 },
   '0x570b09e27a87f9acbce49f85056745d29b3ee3c6': { name: 'SM 570b09', tier: 'ACTIVE', weight: 0.60 },
-  '0xe2823659be02e0f48a4660e4da008b5e1abfdf29': { name: 'SM e28236', tier: 'ACTIVE', weight: 0.60 },
   '0x179c17d04be626561b0355a248d6055a80456aa5': { name: 'SM 179c17', tier: 'ACTIVE', weight: 0.60 },
   '0xe4d83945c0322f3d340203a7129b7eb5cacae847': { name: 'SM e4d839', tier: 'ACTIVE', weight: 0.60 },
   '0xb1694de2324433778487999bd86b1acb3335ebc4': { name: 'SM b1694d', tier: 'ACTIVE', weight: 0.55 },
