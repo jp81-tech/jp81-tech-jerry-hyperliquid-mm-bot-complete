@@ -95,7 +95,7 @@ NANSEN_SM_LABELS = {
     "0x3c363e": "Smart HL Perps Trader",  # $1.9M ETH SHORT
     "0x92e977": "Smart HL Perps Trader",  # BTC/LIT trader
     "0x1e771e": "Smart HL Perps Trader",  # DOGE/ETH shorter
-    "0x091159": "Smart HL Perps Trader",  # LIT trader
+    "0x091159": "Smart HL Perps Trader",  # Kontrarian 091159 (WATCH)
 
     # === FUNDS ===
     "0xcac196": "Fund",  # Galaxy Digital
@@ -1069,13 +1069,13 @@ WHALES = {
     # ================================================================
 
     "0x091159a8106b077c13e89bc09701117e8b5f129a": {
-        "name": "SM HL Trader 091159",
-        "emoji": "🤓",
+        "name": "Kontrarian 091159",
+        "emoji": "🔍",
         "tier": "CONVICTION",
-        "signal_weight": 0.85,
+        "signal_weight": 0.10,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
         "min_change": 0.10,
-        "notes": "$7.9M account, +$14.7M closed PnL. ETH LONG $8.6M, LIT LONG $4.5M, MON LONG $1.9M"
+        "notes": "WATCH: $7.8M equity, kontrarian — ALL LONG (BTC $8.7M 20x, ETH $8.5M 20x, LIT $4.4M) vs SM SHORT consensus. Kupił BTC+ETH 23.02, LIT+IP 05.02. Raw USD -$20M (wyciągnął zyski wcześniej)"
     },
 }
 
