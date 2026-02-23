@@ -23,11 +23,11 @@ interface WhaleEntry {
 
 const VIP_WALLETS: Record<string, { name: string; note: string }> = {
   '0x06cecfbac34101ae41c88ebc2450f8602b3d164b': {
-    name: 'Kraken A',
+    name: 'Kraken A ⭐',
     note: 'BTC short @$87K (Nov 25), SOL short @$133 (Jan 8)',
   },
   '0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a': {
-    name: 'Kraken B',
+    name: 'Kraken B ⭐',
     note: 'SOL short @$193 (Oct 28), XRP short @$2.60 (Oct 28) — best timing',
   },
   '0x880ac484a1743862989a441d6d867238c7aa311c': {
@@ -46,14 +46,14 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1': { name: 'Major', tier: 'CONVICTION', weight: 0.95 },
   '0x5d2f4460ac3514ada79f5d9838916e508ab39bb7': { name: 'Pułkownik', tier: 'CONVICTION', weight: 0.95 },
   '0x45d26f28196d226497130c4bac709d808fed4029': { name: 'Wice-Generał', tier: 'CONVICTION', weight: 0.9 },
-  '0x06cecfbac34101ae41c88ebc2450f8602b3d164b': { name: 'Kraken A', tier: 'CONVICTION', weight: 0.85 },
+  '0x06cecfbac34101ae41c88ebc2450f8602b3d164b': { name: 'Kraken A ⭐', tier: 'CONVICTION', weight: 0.90 },
   '0x6bea81d7a0c5939a5ce5552e125ab57216cc597f': { name: 'Porucznik SOL2', tier: 'CONVICTION', weight: 0.80 },
   '0x936cf4fb95c30ce83f658b5bbb247e4bb381bb0f': { name: 'Porucznik SOL3', tier: 'CONVICTION', weight: 0.75 },
   '0x71dfc07de32c2ebf1c4801f4b1c9e40b76d4a23d': { name: 'Kapitan BTC', tier: 'CONVICTION', weight: 0.9 },
   '0x519c721de735f7c9e6146d167852e60d60496a47': { name: 'ZEC Conviction', tier: 'CONVICTION', weight: 0.85 },
   '0xea6670ebdb4a388a8cfc16f6497bf4f267b061ee': { name: 'Porucznik ea66', tier: 'CONVICTION', weight: 0.85 },
   '0x92e9773ad2b4ba6e2e57e7fc1f9305aef80ab6c2': { name: 'BTC/LIT Trader', tier: 'CONVICTION', weight: 0.80 },
-  '0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a': { name: 'Kraken B', tier: 'CONVICTION', weight: 0.85 },
+  '0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a': { name: 'Kraken B ⭐', tier: 'CONVICTION', weight: 0.85 },
   '0x1e771e1b95c86491299d6e2a5c3b3842d03b552e': { name: 'SM 1e771e', tier: 'CONVICTION', weight: 0.75 },
   '0x091159a8106b077c13e89bc09701117e8b5f129a': { name: 'Kontrarian 091159 (WATCH)', tier: 'CONVICTION', weight: 0.10 },
 

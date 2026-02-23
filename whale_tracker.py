@@ -768,13 +768,13 @@ WHALES = {
         "notes": "$40.5M BTC SHORT (+$6.4M), $28.9M ETH SHORT, $514k SUI SHORT (+$864k)"
     },
     "0x06cecfbac34101ae41c88ebc2450f8602b3d164b": {
-        "name": "Kraken A",
+        "name": "Kraken A ⭐",
         "emoji": "🤓",
         "tier": "CONVICTION",
-        "signal_weight": 0.85,
+        "signal_weight": 0.90,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.05,
-        "notes": "$11.8M SOL SHORT (+$3.5M uPnL) - Nansen verified Smart HL Perps Trader"
+        "notes": "$4.66M equity, ~$13.15M total profit. SOL SHORT $7M (entry $172, +$8.25M!), BTC SHORT $2.9M (+$1.9M), HYPE SHORT $2.8M (+$1.56M), FARTCOIN SHORT $373K (+$656K). Multi-asset shorter od paź 2025."
     },
     "0x6bea81d7a0c5939a5ce5552e125ab57216cc597f": {
         "name": "Porucznik SOL2",
@@ -920,13 +920,13 @@ WHALES = {
         "notes": "WATCH: $1M equity, flipnął SHORT→LONG. SOL LONG $2.79M (20x) otwarty 23.02. Closed PnL +$3.13M (SOL $2.17M, ETH $493K, BTC $464K). Był shorterem sty-luty, dziś kontrarian vs SM SHORT consensus."
     },
     "0x56cd86d6ef24a3f51ce6992b7f1db751b0a0276a": {
-        "name": "Kraken B",
+        "name": "Kraken B ⭐",
         "emoji": "🤓",
         "tier": "CONVICTION",
         "signal_weight": 0.85,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19! Token Millionaire, Smart HL Perps Trader
         "min_change": 0.08,
-        "notes": "$3.9M SOL SHORT (+$618k uPnL) - Nansen verified!"
+        "notes": "$6.57M equity, ~$3.54M total profit. HYPE SHORT $842K (entry $40.60, +$456K), SOL SHORT $412K (entry $154.60, +$396K), XRP SHORT $195K (+$165K). Ultra-konserwatywny 0.2x lev, aktywny od cze 2025 (9 mcy). Zrealizował $1.85M w 2 dni (5-6 lut)."
     },
     "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e": {
         "name": "SM HL Trader 1e771e",
