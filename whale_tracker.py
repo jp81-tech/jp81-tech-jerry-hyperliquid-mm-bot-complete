@@ -1150,7 +1150,7 @@ WHALES = {
         "emoji": "🔴",
         "tier": "ACTIVE",
         "signal_weight": 0.60,
-        "nansen_label": "",
+        "nansen_label": "Token Millionaire",  # Nansen category label; entity name = Silk Capital
         "min_change": 0.08,
         "notes": "$5.7M equity, 23 pozycji. XMR SHORT $10.1M (+$2.9M), HYPE SHORT $9.3M (+$1.1M). Trading bot. +$33.8M Oct 2025 PnL. 🟡 OCT_CRASH: INSIDER_60% — algorytm wykrył sygnały przed crashem, mega short XMR (privacy coin)."
     },

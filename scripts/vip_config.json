@@ -97,10 +97,10 @@
       "notes": "+$4.6M net, BTC short @$125K top, SOL @$230, cashed out Jan 31 — watching for return"
     },
     "0x880ac484a1743862989a441d6d867238c7aa311c": {
-      "name": "Token Millionaire",
+      "name": "Silk Capital",
       "emoji": "\ud83d\udcb0",
       "tier": "tier1",
-      "notes": "XMR $10M + HYPE $9M shorts (Feb 7) — $20M+ in one evening"
+      "notes": "Nansen label: Token Millionaire. Trading bot. XMR SHORT $10M, HYPE SHORT $9M. +$33.8M Oct 2025. 🟡 OCT_CRASH: INSIDER_60%"
     },
     "0x418aa6bf98a2b2bc93779f810330d88cde488888": {
       "name": "58bro.eth",
@@ -149,6 +149,12 @@
       "emoji": "\ud83c\udfe6",
       "tier": "tier2",
       "notes": "+$37.9M Oct 2025, withdrew $144M to Binance, now XRP $3.6M + HYPE $3.4M SHORT"
+    },
+    "0x5b5d51203a0f9079f8aeb098a6523a13f298c060": {
+      "name": "Abraxas #2",
+      "emoji": "\ud83c\udfe6",
+      "tier": "tier2",
+      "notes": "Cluster z Abraxas main (b83de0). $9.8M equity. HYPE SHORT $4.3M, FARTCOIN SHORT $1.1M. +$81.1M PnL historycznie."
     },
     "0x2ea18c23f72a4b6172c55b411823cdc5335923f4": {
       "name": "Bitcoin OG #2",
