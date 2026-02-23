@@ -71,8 +71,10 @@ CREDIBILITY_MULTIPLIERS = {
 # ============================================================
 NANSEN_SM_LABELS = {
     # === MEGA WHALES / CONVICTION ===
-    "0xb317d2": "Smart HL Perps Trader",  # Bitcoin OG - $717M ETH, $92M BTC LONG
-    "0xbaae15": "Smart HL Perps Trader",  # $4.7M FARTCOIN SHORT
+    "0xb317d2": "Smart HL Perps Trader",  # Bitcoin OG - liquidated 31.01.2026
+    "0x2ea18c": "Smart HL Perps Trader",  # Bitcoin OG #2 - same entity as OG #1
+    "0xd7a678": "Smart HL Perps Trader",  # Winner d7a678 - Consistent Perps Winner
+
     "0xa31211": "Smart HL Perps Trader",  # $7.4M LIT SHORT, $2M DOGE SHORT
     "0x35d115": "Smart HL Perps Trader",  # $64.4M SOL SHORT - MEGA SHORTER!
     "0x45d26f": "Smart HL Perps Trader",  # $40.5M BTC SHORT, $28.9M ETH SHORT
@@ -82,7 +84,7 @@ NANSEN_SM_LABELS = {
     "0x6bea81": "Smart HL Perps Trader",  # $8.1M SOL SHORT
     "0x936cf4": "Smart HL Perps Trader",  # $6.6M SOL SHORT
     "0x56cd86": "Smart HL Perps Trader",  # $3.9M SOL SHORT - Token Millionaire
-    "0xd7a678": "Smart HL Perps Trader",  # $3.7M SOL SHORT - Consistent Perps Winner
+
     "0x519c72": "Smart HL Perps Trader",  # $6.2M ZEC LONG
 
     # === ACTIVE SM TRADERS ===
@@ -92,12 +94,8 @@ NANSEN_SM_LABELS = {
     "0x99b109": "Smart HL Perps Trader",  # $34.3M BTC SHORT
     "0xea6670": "Smart HL Perps Trader",  # $9.1M BTC SHORT
     "0x3c363e": "Smart HL Perps Trader",  # $1.9M ETH SHORT
-    "0x2ed5c4": "Smart HL Perps Trader",  # ASTER trader
-    "0x689f15": "Smart HL Perps Trader",  # BTC trader
     "0x92e977": "Smart HL Perps Trader",  # BTC/LIT trader
     "0x1e771e": "Smart HL Perps Trader",  # DOGE/ETH shorter
-    "0xa2acb1": "Smart HL Perps Trader",  # Hikari - $5.6M BTC LONG
-    "0x8a0cd1": "Smart HL Perps Trader",  # $1.6M BTC SHORT
     "0x091159": "Smart HL Perps Trader",  # LIT trader
     "0x0b2396": "Smart HL Perps Trader",  # DOGE trader
 
@@ -697,42 +695,33 @@ WHALES = {
     # === MEGA WHALE - LONG BIAS (NANSEN VERIFIED) ===
     "0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae": {
         "name": "Bitcoin OG",
-        "emoji": "🐋",
+        "emoji": "🔍",
         "tier": "CONVICTION",
-        "signal_weight": 1.0,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED - full credibility
+        "signal_weight": 0.10,
+        "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "$717M ETH LONG, $92M BTC LONG, $68M SOL LONG. +$4.5M uPnL on ETH"
+        "notes": "WATCH: Liquidated -$128M on ETH LONG 31.01.2026. +$165M Oct 2025 BTC shorts. Account empty — watching for return."
+    },
+    "0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed": {
+        "name": "Winner d7a678",
+        "emoji": "🔍",
+        "tier": "CONVICTION",
+        "signal_weight": 0.10,
+        "nansen_label": "Smart HL Perps Trader",  # VERIFIED - Consistent Perps Winner
+        "min_change": 0.08,
+        "notes": "WATCH: +$4.09M profit (SOL/BTC/ETH shorts). Cashed out 31.01.2026, account empty — watching for return."
+    },
+    "0x2ea18c23f72a4b6172c55b411823cdc5335923f4": {
+        "name": "Bitcoin OG #2",
+        "emoji": "🔍",
+        "tier": "CONVICTION",
+        "signal_weight": 0.10,
+        "nansen_label": "Smart HL Perps Trader",  # VERIFIED - same entity as OG #1
+        "min_change": 0.05,
+        "notes": "WATCH: +$72.5M Oct 2025 BTC short (ROI 381%), same entity as OG #1 (1KAt6STt). Account empty — watching for return."
     },
 
     # === NANSEN VERIFIED Smart HL Perps Traders (2026-01-19) ===
-    "0xbaae15f6ffe2aa6e0e9ffde6f1888c8092f4b22a": {
-        "name": "SM HL Trader baae15",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.95,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED
-        "min_change": 0.05,
-        "notes": "Nansen Smart HL Perps Trader - BTC/PUMP LONG, FARTCOIN SHORT, $9M+ trades"
-    },
-    "0x2ed5c47a79c27c75188af495a8093c22ada4f6e7": {
-        "name": "SM HL Trader 2ed5c4",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.85,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED
-        "min_change": 0.08,
-        "notes": "Nansen Smart HL Perps Trader - ASTER LONG $3.8M"
-    },
-    "0x689f15c9047f73c974e08c70f12a5d6a19f45c15": {
-        "name": "SM HL Trader 689f15",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.85,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED
-        "min_change": 0.08,
-        "notes": "Nansen Smart HL Perps Trader - BTC LONG $3.2M"
-    },
     "0x3c363e96d22c056d748f199fb728fc80d70e461a": {
         "name": "SM HL Trader 3c363e",
         "emoji": "🤓",
@@ -950,15 +939,6 @@ WHALES = {
         "min_change": 0.08,
         "notes": "$3.9M SOL SHORT (+$618k uPnL) - Nansen verified!"
     },
-    "0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed": {
-        "name": "Winner d7a678",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.85,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19! Smart HL Perps Trader, Consistent Perps Winner
-        "min_change": 0.08,
-        "notes": "$3.7M SOL SHORT (+$1.1M uPnL), closest to liq $176.70 - Nansen verified!"
-    },
     "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e": {
         "name": "SM HL Trader 1e771e",
         "emoji": "🤓",
@@ -976,23 +956,6 @@ WHALES = {
         "min_change": 0.15,
         "notes": "$1.1M ZEC LONG (+$79k), $1.6M ETH LONG"
     },
-    "0x039405fa4636364e6023df1e06b085a462b9cdc9": {
-        "name": "SM Active 039405",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.65,
-        "min_change": 0.15,
-        "notes": "$293k LIT SHORT (+$118k)"
-    },
-    "0xa2acb1c1d689fd3785696277537a504fcea8d1d0": {
-        "name": "Hikari",
-        "emoji": "🟢",
-        "tier": "CONVICTION",
-        "signal_weight": 0.75,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
-        "min_change": 0.10,
-        "notes": "$5.6M BTC LONG - Nansen Smart HL Perps Trader"
-    },
     "0x179c17d04be626561b0355a248d6055a80456aa5": {
         "name": "SM Active 179c17",
         "emoji": "🔴",
@@ -1000,14 +963,6 @@ WHALES = {
         "signal_weight": 0.6,
         "min_change": 0.10,
         "notes": "$3.1M SOL SHORT"
-    },
-    "0xbe494a5e3a719a78a45a47ab453b7b0199d9d101": {
-        "name": "SM Active be494a",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.6,
-        "min_change": 0.10,
-        "notes": "$2.8M SOL SHORT"
     },
     "0xe4d83945c0322f3d340203a7129b7eb5cacae847": {
         "name": "SM Active e4d839",
@@ -1033,14 +988,6 @@ WHALES = {
         "min_change": 0.15,
         "notes": "$1.4M SOL SHORT"
     },
-    "0x95e2687b07f0dec34462fdab6bbebcc0b3ab49c6": {
-        "name": "SM Active 95e268",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.15,
-        "notes": "$924k SOL SHORT"
-    },
     "0x6a7a17046df7d3e746ce97d67dc1c6c55e27ce75": {
         "name": "SM Active 6a7a17",
         "emoji": "🔴",
@@ -1056,14 +1003,6 @@ WHALES = {
         "signal_weight": 0.5,
         "min_change": 0.15,
         "notes": "$709k SOL SHORT"
-    },
-    "0x106943709714fb0e5e62b82f5013ebc762591ae1": {
-        "name": "SM Active 106943",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.15,
-        "notes": "$622k SOL SHORT"
     },
     "0x0980b34ade9476dba81bcdb0f865a333793ad1c2": {
         "name": "SM Active 0980b3",
@@ -1105,14 +1044,6 @@ WHALES = {
         "min_change": 0.15,
         "notes": "$2.4M BTC SHORT"
     },
-    "0xb12f7415705d9d1cee194e73ca0f8aaffb8b77cd": {
-        "name": "fuckingbot.eth",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.15,
-        "notes": "$2M BTC SHORT"
-    },
     "0x84abc08c0ea62e687c370154de1f38ea462f4d37": {
         "name": "SM Active 84abc0",
         "emoji": "🔴",
@@ -1120,14 +1051,6 @@ WHALES = {
         "signal_weight": 0.5,
         "min_change": 0.15,
         "notes": "$4.3M ETH SHORT"
-    },
-    "0xc12f6e6f7a11604871786db86abf33fdf36fb0ad": {
-        "name": "SM Active c12f6e",
-        "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.15,
-        "notes": "$2.5M ETH SHORT"
     },
     "0x61f2bb695d81ac9fce0b1d01fd45cc6b2925a571": {
         "name": "SM Active 61f2bb",
@@ -1144,15 +1067,6 @@ WHALES = {
         "signal_weight": 0.5,
         "min_change": 0.20,
         "notes": "$428k SOL LONG"
-    },
-    "0x8a0cd16a004e21e04936a0a01c6f5a49ff937914": {
-        "name": "SM HL Trader 8a0cd1",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.75,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
-        "min_change": 0.10,
-        "notes": "$1.6M BTC SHORT - Nansen Smart HL Perps Trader"
     },
 
     # ================================================================
