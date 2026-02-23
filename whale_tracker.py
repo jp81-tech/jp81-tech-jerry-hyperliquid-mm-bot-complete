@@ -1177,27 +1177,19 @@ WHALES = {
         "name": "SM HL Trader 091159",
         "emoji": "🤓",
         "tier": "CONVICTION",
-        "signal_weight": 0.75,
+        "signal_weight": 0.85,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
         "min_change": 0.10,
-        "notes": "Nansen Smart HL Perps Trader - LIT trader"
-    },
-    "0x6f9bb7e454f5b3eb2310343f0e99269dc2bb8a1d": {
-        "name": "Arrington XRP Legacy",
-        "emoji": "💼",
-        "tier": "FUND",
-        "signal_weight": 0.6,
-        "min_change": 0.15,
-        "notes": "Legacy - Fund"
+        "notes": "$7.9M account, +$14.7M closed PnL. ETH LONG $8.6M, LIT LONG $4.5M, MON LONG $1.9M"
     },
     "0x0b23968e02c549f99ff77b6471be3a78cbfff37b": {
         "name": "SM HL Trader 0b2396",
-        "emoji": "🤓",
-        "tier": "CONVICTION",
-        "signal_weight": 0.70,
+        "emoji": "🔍",
+        "tier": "ACTIVE",
+        "signal_weight": 0.40,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
         "min_change": 0.10,
-        "notes": "Nansen Smart HL Perps Trader - DOGE trader"
+        "notes": "WATCH: All LONG since 2025-10-11, DCA'd down. ETH $1.2M(-$338K), HYPE $493K, XRP $324K, LINK $280K, DOGE $187K. $319K equity vs -$628K uPnL. Verified SM but currently underwater."
     },
 }
 

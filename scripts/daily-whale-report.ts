@@ -63,15 +63,14 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x1e771e1b95c86491299d6e2a5c3b3842d03b552e': { name: 'SM 1e771e', tier: 'CONVICTION', weight: 0.75 },
   '0xa2acb1c1d689fd3785696277537a504fcea8d1d0': { name: 'Hikari', tier: 'CONVICTION', weight: 0.75 },
   '0x8a0cd16a004e21e04936a0a01c6f5a49ff937914': { name: 'SM 8a0cd1', tier: 'CONVICTION', weight: 0.75 },
-  '0x091159a8106b077c13e89bc09701117e8b5f129a': { name: 'SM 091159 (Legacy)', tier: 'CONVICTION', weight: 0.75 },
-  '0x0b23968e02c549f99ff77b6471be3a78cbfff37b': { name: 'SM 0b2396 (Legacy)', tier: 'CONVICTION', weight: 0.70 },
+  '0x091159a8106b077c13e89bc09701117e8b5f129a': { name: 'SM 091159', tier: 'CONVICTION', weight: 0.85 },
+  '0x0b23968e02c549f99ff77b6471be3a78cbfff37b': { name: 'SM 0b2396 (WATCH)', tier: 'ACTIVE', weight: 0.40 },
 
   // === TIER 2: INSTITUTIONAL / FUNDS ===
   '0xcac19662ec88d23fa1c81ac0e8570b0cf2ff26b3': { name: 'Galaxy Digital', tier: 'FUND', weight: 0.85 },
   '0x8def9f50456c6c4e37fa5d3d57f108ed23992dae': { name: 'Laurent Zeimes', tier: 'FUND', weight: 0.8 },
   '0xc4241dc9bfeb5126c0766df35a87ed3fbd630c78': { name: 'Arrington XRP', tier: 'FUND', weight: 0.7 },
   '0x418aa6bf98a2b2bc93779f810330d88cde488888': { name: '58bro.eth', tier: 'FUND', weight: 0.8 },
-  '0x6f9bb7e454f5b3eb2310343f0e99269dc2bb8a1d': { name: 'Arrington Legacy', tier: 'FUND', weight: 0.6 },
 
   // === TIER 3: ACTIVE TRADERS ===
   '0x9eec98d048d06d9cd75318fffa3f3960e081daab': { name: 'ETH Whale', tier: 'ACTIVE', weight: 0.85 },
