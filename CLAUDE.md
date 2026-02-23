@@ -43,6 +43,45 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 23 lutego 2026
 
+### 35. Whale Changes Report — 3x daily na Discord (23.02)
+
+**Nowy plik:** `scripts/whale-changes-report.ts`
+
+**Cel:** Zbiorczy raport zmian pozycji wielorybów co ~6h na Discord (06:00, 12:00, 18:00 UTC). Uzupełnia daily report (snapshot) o **delta view** — co się zmieniło od ostatniego runu.
+
+**Architektura:**
+```
+1. Czytaj PREVIOUS snapshot z /tmp/whale_changes_snapshot.json
+2. Fetchuj CURRENT pozycje (batch 5, 200ms delay)
+3. Porównaj: NEW / CLOSED / FLIPPED / INCREASED / REDUCED
+4. Formatuj raport → Discord webhook (chunked per 1950 chars)
+5. Zapisz CURRENT jako nowy snapshot
+```
+
+**Progi:**
+- Min position value: $10K (niższy niż daily $100K — więcej widocznych zmian)
+- Min change %: 10% (INCREASED/REDUCED)
+
+**Pierwszy run:** Zapisuje baseline, brak raportu (zapobiega "41 NEW POSITIONS" spam)
+
+**Change detection (ported z whale_tracker.py `detect_changes()`):**
+
+| Typ | Kiedy |
+|-----|-------|
+| NEW | Pozycja >$10K w current, brak w previous |
+| CLOSED | Pozycja >$10K w previous, brak/mała w current |
+| FLIPPED | Ten sam coin, inna strona (LONG↔SHORT) |
+| INCREASED | Wartość wzrosła >10% |
+| REDUCED | Wartość spadła >10% |
+
+**Reuse z daily-whale-report.ts:** WHALES dict (41 adresów), batch fetch, `Promise.allSettled()`, Discord chunking, `fmtUsd()`/`fmtUsdNoSign()`, `--dry-run` flag
+
+**Cron:** `0 6,12,18 * * * cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/whale-changes-report.ts >> runtime/whale_changes_report.log 2>&1`
+
+**Deploy:** SCP → server, test `--dry-run`, crontab added. Snapshot file: `/tmp/whale_changes_snapshot.json`
+
+**Uwaga:** Używa `npx tsx` (nie `ts-node --transpile-only`) — ts-node failuje z ESM na serwerze (`ERR_UNKNOWN_FILE_EXTENSION`)
+
 ### 33. Unify Trader Names Across Codebase (23.02)
 
 **Problem:** Ten sam trader miał różne nazwy w różnych plikach. Np. `0xa31211...` = "SM Conviction a31211" (whale_tracker), "General a31211" (daily-whale-report), "SM Conviction a31211" (SmAutoDetector). Alerty i raporty były niespójne — trudno było skojarzyć, że to ten sam trader.
@@ -355,6 +394,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 **Cron jobs (na serwerze):**
 - `15 * * * *` — `scripts/hourly-discord-report.ts` → Discord hourly report
 - `0 8 * * *` — `scripts/daily-whale-report.ts` → Discord daily whale report
+- `0 6,12,18 * * *` — `scripts/whale-changes-report.ts` → Discord whale changes report (3x daily)
 
 **Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
 - PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot (token `8145609459`)
@@ -1620,5 +1660,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **XGBoost data timeline**: w1 etykiety po 7 dniach, m1 po 30 dniach. MIN_SAMPLES: h1-h12=200, w1=100, m1=50. Collector `LABEL_BACKFILL_ROWS=0` (skanuje wszystkie wiersze dla m1 30-day lookback).
 - **Nansen channel ID**: `-1003886465029` = "BOT i jego Sygnaly" (prawidłowy). `-1003724824266` = stary/nieistniejący. Bot `@HyperliquidMM_bot` jest administratorem kanału.
 - **Porty na serwerze (updated)**: 3000=war-room (8 tokens, 4x2 grid), 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
-- **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 57 portfeli. Oba potrzebują `DISCORD_WEBHOOK_URL` w `.env`.
+- **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 41 portfeli, whale changes 3x daily (06/12/18 UTC) = delta zmian pozycji. Wszystkie potrzebują `DISCORD_WEBHOOK_URL` w `.env`. Snapshot zmian: `/tmp/whale_changes_snapshot.json`.
 - **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.
