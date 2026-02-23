@@ -1058,10 +1058,10 @@ WHALES = {
     "0x091144e651b334341eabdbbbfed644ad0100023e": {
         "name": "Manifold Trading",
         "emoji": "📊",
-        "tier": "MARKET_MAKER",
-        "signal_weight": 0.0,
-        "min_change": 0.50,
-        "notes": "IGNORE - Market maker, frequent flips"
+        "tier": "ACTIVE",
+        "signal_weight": 0.30,
+        "min_change": 0.10,
+        "notes": "$3.1M equity, hybryda MM+trader. 12 SHORT vs 3 LONG, +$1.33M uPnL. Top: LIT $1.57M, HYPE $1.35M, ZRO $1.26M, XMR $707K. MM-style fills (2000+/d, median $315) ale directional conviction."
     },
 
     # ================================================================
