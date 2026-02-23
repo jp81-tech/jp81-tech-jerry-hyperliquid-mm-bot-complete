@@ -88,7 +88,6 @@ NANSEN_SM_LABELS = {
     "0x519c72": "Smart HL Perps Trader",  # $6.2M ZEC LONG
 
     # === ACTIVE SM TRADERS ===
-    "0x9eec98": "Smart HL Perps Trader",  # $182.8M ETH LONG
     "0xfeec88": "Smart HL Perps Trader",  # $22.6M BTC SHORT
     "0xfce053": "Smart HL Perps Trader",  # $21.7M BTC SHORT
     "0x99b109": "Smart HL Perps Trader",  # $34.3M BTC SHORT
@@ -97,7 +96,6 @@ NANSEN_SM_LABELS = {
     "0x92e977": "Smart HL Perps Trader",  # BTC/LIT trader
     "0x1e771e": "Smart HL Perps Trader",  # DOGE/ETH shorter
     "0x091159": "Smart HL Perps Trader",  # LIT trader
-    "0x0b2396": "Smart HL Perps Trader",  # DOGE trader
 
     # === FUNDS ===
     "0xcac196": "Fund",  # Galaxy Digital
@@ -860,15 +858,6 @@ WHALES = {
     # 🟡 TIER 3: ACTIVE TRADERS (signal_weight: 0.5-0.7)
     # ================================================================
 
-    "0x9eec98d048d06d9cd75318fffa3f3960e081daab": {
-        "name": "ETH Whale",
-        "emoji": "🟢",
-        "tier": "ACTIVE",
-        "signal_weight": 0.85,  # UPGRADED - $182.8M ETH LONG is massive
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
-        "min_change": 0.08,
-        "notes": "$182.8M ETH LONG - Nansen verified Smart HL Perps Trader"
-    },
     "0xfeec88b13fc0be31695069f02bac18538a154e9c": {
         "name": "Kapitan feec",
         "emoji": "🔴",
@@ -947,14 +936,6 @@ WHALES = {
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
         "min_change": 0.10,
         "notes": "Nansen Smart HL Perps Trader - DOGE/ETH shorter"
-    },
-    "0xe2823659be02e0f48a4660e4da008b5e1abfdf29": {
-        "name": "SM Active e28236",
-        "emoji": "🟢",
-        "tier": "ACTIVE",
-        "signal_weight": 0.6,
-        "min_change": 0.15,
-        "notes": "$1.1M ZEC LONG (+$79k), $1.6M ETH LONG"
     },
     "0x179c17d04be626561b0355a248d6055a80456aa5": {
         "name": "SM Active 179c17",
@@ -1095,15 +1076,6 @@ WHALES = {
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
         "min_change": 0.10,
         "notes": "$7.9M account, +$14.7M closed PnL. ETH LONG $8.6M, LIT LONG $4.5M, MON LONG $1.9M"
-    },
-    "0x0b23968e02c549f99ff77b6471be3a78cbfff37b": {
-        "name": "SM HL Trader 0b2396",
-        "emoji": "🔍",
-        "tier": "ACTIVE",
-        "signal_weight": 0.40,
-        "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen
-        "min_change": 0.10,
-        "notes": "WATCH: All LONG since 2025-10-11, DCA'd down. ETH $1.2M(-$338K), HYPE $493K, XRP $324K, LINK $280K, DOGE $187K. $319K equity vs -$628K uPnL. Verified SM but currently underwater."
     },
 }
 
