@@ -1077,6 +1077,38 @@ WHALES = {
         "min_change": 0.10,
         "notes": "WATCH: $7.8M equity, kontrarian — ALL LONG (BTC $8.7M 20x, ETH $8.5M 20x, LIT $4.4M) vs SM SHORT consensus. Kupił BTC+ETH 23.02, LIT+IP 05.02. Raw USD -$20M (wyciągnął zyski wcześniej)"
     },
+
+    # ================================================================
+    # 🆕 OCTOBER 2025 BTC CRASH WINNERS (added 23.02.2026)
+    # ================================================================
+
+    "0x8e096995c3e4a3f0bc5b3ea1cba94de2aa4d70c9": {
+        "name": "Oct Winner 8e0969",
+        "emoji": "🔴",
+        "tier": "ACTIVE",
+        "signal_weight": 0.65,
+        "nansen_label": "",
+        "min_change": 0.10,
+        "notes": "+$14.9M Oct 2025 BTC crash. Still SHORT BTC $5.5M. Unknown label but massive PnL."
+    },
+    "0x856c35038594767646266bc7fd68dc26480e910d": {
+        "name": "Oct Winner 856c35",
+        "emoji": "🔴",
+        "tier": "ACTIVE",
+        "signal_weight": 0.60,
+        "nansen_label": "Whale",
+        "min_change": 0.10,
+        "notes": "+$9.1M Oct 2025 BTC crash. Still SHORT BTC $10.4M. Nansen label: Whale."
+    },
+    "0x4eebd8d39e82efb958e0fa9f694435c910c8518f": {
+        "name": "Oct Winner 4eeb (WATCH)",
+        "emoji": "🔍",
+        "tier": "ACTIVE",
+        "signal_weight": 0.10,
+        "nansen_label": "",
+        "min_change": 0.10,
+        "notes": "WATCH: +$5.8M Oct 2025 BTC crash, 13.3% ROI, 1099 trades. Account EMPTY ($0) as of 23.02.2026 — took profits and left. Watching for return."
+    },
 }
 
 # Coiny do trackowania

@@ -64,6 +64,10 @@ const WHALES: Record<string, WhaleEntry> = {
   '0x84abc08c0ea62e687c370154de1f38ea462f4d37': { name: 'SM 84abc0', tier: 'ACTIVE', weight: 0.50 },
   '0x61f2bb695d81ac9fce0b1d01fd45cc6b2925a571': { name: 'SM 61f2bb', tier: 'ACTIVE', weight: 0.50 },
   '0xdbcc96bcada067864902aad14e029fe7c422f147': { name: 'SM dbcc96', tier: 'ACTIVE', weight: 0.50 },
+  // October 2025 BTC crash winners (added 23.02.2026)
+  '0x8e096995c3e4a3f0bc5b3ea1cba94de2aa4d70c9': { name: 'Oct Winner 8e0969', tier: 'ACTIVE', weight: 0.65 },
+  '0x856c35038594767646266bc7fd68dc26480e910d': { name: 'Oct Winner 856c35', tier: 'ACTIVE', weight: 0.60 },
+  '0x4eebd8d39e82efb958e0fa9f694435c910c8518f': { name: 'Oct Winner 4eeb (WATCH)', tier: 'ACTIVE', weight: 0.10 },
 };
 
 // ============================================================
