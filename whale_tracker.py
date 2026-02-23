@@ -1182,14 +1182,6 @@ WHALES = {
         "min_change": 0.10,
         "notes": "Nansen Smart HL Perps Trader - LIT trader"
     },
-    "0x0c4926daf1250b8da7b9fc339f304d923b94d346": {
-        "name": "DOGE Legacy",
-        "emoji": "🤖",
-        "tier": "ACTIVE",
-        "signal_weight": 0.5,
-        "min_change": 0.20,
-        "notes": "Legacy - DOGE trader"
-    },
     "0x6f9bb7e454f5b3eb2310343f0e99269dc2bb8a1d": {
         "name": "Arrington XRP Legacy",
         "emoji": "💼",
