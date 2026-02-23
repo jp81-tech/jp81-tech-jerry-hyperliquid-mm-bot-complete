@@ -734,7 +734,7 @@ WHALES = {
         "notes": "Nansen Smart HL Perps Trader - BTC LONG $3.2M"
     },
     "0x3c363e96d22c056d748f199fb728fc80d70e461a": {
-        "name": "BTC/LIT Trader",
+        "name": "SM HL Trader 3c363e",
         "emoji": "🤓",
         "tier": "CONVICTION",
         "signal_weight": 0.80,
@@ -817,7 +817,7 @@ WHALES = {
         "notes": "$25.4M BTC SHORT (+$4.9M), $19.8M ETH SHORT, $2.1M ZEC SHORT (+$861k)"
     },
     "0x519c721de735f7c9e6146d167852e60d60496a47": {
-        "name": "SM Conviction 519c72",
+        "name": "ZEC Conviction",
         "emoji": "🟢",
         "tier": "CONVICTION",
         "signal_weight": 0.85,
@@ -872,7 +872,7 @@ WHALES = {
     # ================================================================
 
     "0x9eec98d048d06d9cd75318fffa3f3960e081daab": {
-        "name": "SM Active 9eec98",
+        "name": "ETH Whale",
         "emoji": "🟢",
         "tier": "ACTIVE",
         "signal_weight": 0.85,  # UPGRADED - $182.8M ETH LONG is massive
@@ -925,7 +925,7 @@ WHALES = {
         "notes": "$9.1M BTC SHORT - Nansen verified Smart HL Perps Trader"
     },
     "0x92e9773ad2b4ba6e2e57e7fc1f9305aef80ab6c2": {
-        "name": "ETH Whale",
+        "name": "BTC/LIT Trader",
         "emoji": "🤓",
         "tier": "CONVICTION",
         "signal_weight": 0.80,
@@ -1146,7 +1146,7 @@ WHALES = {
         "notes": "$428k SOL LONG"
     },
     "0x8a0cd16a004e21e04936a0a01c6f5a49ff937914": {
-        "name": "ZEC Conviction",
+        "name": "SM HL Trader 8a0cd1",
         "emoji": "🤓",
         "tier": "CONVICTION",
         "signal_weight": 0.75,
