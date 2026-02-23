@@ -698,7 +698,7 @@ WHALES = {
         "signal_weight": 0.10,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "WATCH: Liquidated -$128M on ETH LONG 31.01.2026. +$165M Oct 2025 BTC shorts. Account empty — watching for return."
+        "notes": "WATCH: Liquidated -$128M on ETH LONG 31.01.2026. +$165M Oct 2025 BTC shorts. Account empty — watching for return. CLUSTER BITCOIN_OG: 3 portfele — main (b317d2), OG #2 (2ea18c, same entity 1KAt6STt), + 0x4f9a37bc (received 192.6M USDC from main). All empty."
     },
     "0xd7a678fcf72c1b602850ef2f3e2d668ec41fa0ed": {
         "name": "Winner d7a678",
@@ -716,7 +716,7 @@ WHALES = {
         "signal_weight": 0.10,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED - same entity as OG #1
         "min_change": 0.05,
-        "notes": "WATCH: +$72.5M Oct 2025 BTC short (ROI 381%), same entity as OG #1 (1KAt6STt). Account empty — watching for return."
+        "notes": "WATCH: +$72.5M Oct 2025 BTC short (ROI 381%), same entity as OG #1 (1KAt6STt). Account empty — watching for return. CLUSTER BITCOIN_OG: see b317d2."
     },
 
     # === NANSEN VERIFIED Smart HL Perps Traders (2026-01-19) ===
@@ -747,7 +747,7 @@ WHALES = {
         "signal_weight": 0.95,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.05,
-        "notes": "$64.3M SOL SHORT (+$8.7M uPnL) - Nansen verified Smart HL Perps Trader"
+        "notes": "$64.3M SOL SHORT (+$8.7M uPnL) - Nansen verified Smart HL Perps Trader. First Funder: Coinbase Hot Wallet. CLUSTER TOKEN_MILLIONAIRE: sent 32.6M USDC to Token Millionaire 0x0df8e1. Powiązany z Kraken A (06cecf) przez Token Millionaire entity."
     },
     "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7": {
         "name": "Pułkownik",
@@ -765,7 +765,7 @@ WHALES = {
         "signal_weight": 0.9,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "$40.5M BTC SHORT (+$6.4M), $28.9M ETH SHORT, $514k SUI SHORT (+$864k)"
+        "notes": "$40.5M BTC SHORT (+$6.4M), $28.9M ETH SHORT, $514k SUI SHORT (+$864k). CLUSTER YIELD_FARMER: sent 43M USDC to Yield Farmer 0x1419e75330c71ce463102e6a1eb62fe80b412d5f. DeFi: $48.6M net."
     },
     "0x06cecfbac34101ae41c88ebc2450f8602b3d164b": {
         "name": "Kraken A ⭐",
@@ -774,7 +774,7 @@ WHALES = {
         "signal_weight": 0.90,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.05,
-        "notes": "$4.66M equity, ~$13.15M total profit. SOL SHORT $7M (entry $172, +$8.25M!), BTC SHORT $2.9M (+$1.9M), HYPE SHORT $2.8M (+$1.56M), FARTCOIN SHORT $373K (+$656K). Multi-asset shorter od paź 2025."
+        "notes": "$4.66M equity, ~$13.15M total profit. SOL SHORT $7M (entry $172, +$8.25M!), BTC SHORT $2.9M (+$1.9M), HYPE SHORT $2.8M (+$1.56M), FARTCOIN SHORT $373K (+$656K). Multi-asset shorter od paź 2025. First Funder on Plasma: Token Millionaire 0xc5b2359fe6b4a7118b67b116069ca2e7cf3ccc27. Sent 5M USDC to Token Millionaire 0xc5b235 (Oct 2025). Deployed Convex Finance Reward Stash. CLUSTER TOKEN_MILLIONAIRE: powiązany z Major (35d115) przez Token Millionaire entity. DeFi: $19.5M net (PT-KHYPE $6.8M, borrowed WHYPE $4M via Hyperlend)."
     },
     "0x6bea81d7a0c5939a5ce5552e125ab57216cc597f": {
         "name": "Porucznik SOL2",
@@ -801,7 +801,7 @@ WHALES = {
         "signal_weight": 0.9,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED
         "min_change": 0.05,
-        "notes": "$25.4M BTC SHORT (+$4.9M), $19.8M ETH SHORT, $2.1M ZEC SHORT (+$861k)"
+        "notes": "$25.4M BTC SHORT (+$4.9M), $19.8M ETH SHORT, $2.1M ZEC SHORT (+$861k). First Funder: Binance Hot Wallet. Anonymous — no other known relationships. DeFi: $31.1M net."
     },
     "0x519c721de735f7c9e6146d167852e60d60496a47": {
         "name": "ZEC Conviction",
@@ -824,7 +824,7 @@ WHALES = {
         "signal_weight": 0.85,
         "nansen_label": "Fund",  # Institutional fund
         "min_change": 0.05,
-        "notes": "$34.5M BTC SHORT (+$5.9M), $20.9M ETH SHORT (+$6.5M), $534k SOL SHORT"
+        "notes": "$34.5M BTC SHORT (+$5.9M), $20.9M ETH SHORT (+$6.5M), $534k SOL SHORT. First Funder: Galaxy Global Markets: OTC (0x33566c9d8be6cf0b23795e0d380e112be9d75836). Confirmed institutional fund. DeFi: $40.1M net."
     },
     "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae": {
         "name": "Laurent Zeimes",
@@ -865,7 +865,7 @@ WHALES = {
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$1.53M equity, +$10.8M total. BTC SHORT $14M (entry $101,600, +$7.8M uPnL). HYPE SHORT $26K, FARTCOIN LONG $74K. Closed PnL +$3.04M. BTC short opened sty 2026. Nansen verified."
+        "notes": "$1.53M equity, +$10.8M total. BTC SHORT $14M (entry $101,600, +$7.8M uPnL). HYPE SHORT $26K, FARTCOIN LONG $74K. Closed PnL +$3.04M. BTC short opened sty 2026. Nansen verified. First Funder: OKX Wallet (Oct 2, 2025). Receives funds from MEV Capital USDC, uses Coinbase/Bybit. DeFi: $9.1M net."
     },
     "0xfce053a5e461683454bf37ad66d20344c0e3f4c0": {
         "name": "Kapitan fce0 ⭐",
@@ -874,7 +874,7 @@ WHALES = {
         "signal_weight": 0.80,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
-        "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - najnizsze wejscie z Kapitanow), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified."
+        "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - najnizsze wejscie z Kapitanow), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified. DeFi: sent 1.4M USDC to Aave, 400K to Pendle Finance. Received 1.8M USDC from Hyperithm USDC. Sophisticated DeFi trader."
     },
     "0x99b1098d9d50aa076f78bd26ab22e6abd3710729": {
         "name": "Kapitan 99b1 ⭐",
@@ -926,7 +926,7 @@ WHALES = {
         "signal_weight": 0.85,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19! Token Millionaire, Smart HL Perps Trader
         "min_change": 0.08,
-        "notes": "$6.57M equity, ~$3.54M total profit. HYPE SHORT $842K (entry $40.60, +$456K), SOL SHORT $412K (entry $154.60, +$396K), XRP SHORT $195K (+$165K). Ultra-konserwatywny 0.2x lev, aktywny od cze 2025 (9 mcy). Zrealizował $1.85M w 2 dni (5-6 lut)."
+        "notes": "$6.57M equity, ~$3.54M total profit. HYPE SHORT $842K (entry $40.60, +$456K), SOL SHORT $412K (entry $154.60, +$396K), XRP SHORT $195K (+$165K). Ultra-konserwatywny 0.2x lev, aktywny od cze 2025 (9 mcy). Zrealizował $1.85M w 2 dni (5-6 lut). Nansen label: Token Millionaire — possible CLUSTER TOKEN_MILLIONAIRE connection with Kraken A (06cecf) and Major (35d115)."
     },
     "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e": {
         "name": "SM HL Trader 1e771e",
@@ -1116,7 +1116,7 @@ WHALES = {
         "signal_weight": 0.65,
         "nansen_label": "",
         "min_change": 0.10,
-        "notes": "$9.5M equity. BTC SHORT entry $108,343 (+$1.5M). HYPE SHORT $8.9M, ETH SHORT $3.6M, FARTCOIN SHORT $325K, LIT SHORT $205K. First funder: unknown 0x3ed2ce (Feb 2025)."
+        "notes": "$9.5M equity. BTC SHORT entry $108,343 (+$1.5M). HYPE SHORT $8.9M, ETH SHORT $3.6M, FARTCOIN SHORT $325K, LIT SHORT $205K. First funder: unknown 0x3ed2ce (Feb 2025). Related: sent 4.4M USDC to High Balance 0x089d69ce9f2dbca64a1fb6ac81e0057b40d7e9a3. Sent 615.1K HYPE to Kinetiq (staking)."
     },
 }
 
