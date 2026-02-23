@@ -66,6 +66,62 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 **Deploy:** scp → server, `pm2 restart war-room`, verified via curl (8 coins + w1/m1 confirmed)
 
+### 31. Fix: ai-executor v1 systemd conflict — Telegram 409 (23.02)
+
+**Problem:** Nansen Telegram alerty nie dochodziły do bota od 24 stycznia (miesiąc!). `ai-executor` (PM2, v2) logował tylko startup messages, zero alertów przetworzonych.
+
+**Root cause — 3 problemy:**
+
+| # | Problem | Symptom |
+|---|---------|---------|
+| 1 | **Stary ai-executor v1** (`/home/jerry/ai-risk-agent/ai-executor.mjs`) zarządzany przez **systemd** (`ai-executor.service`, `Restart=always`) używał tego samego bot tokena `@HyperliquidMM_bot` | Telegram API → `409 Conflict: terminated by other getUpdates request` |
+| 2 | **mm-bot PM2 recreate** bez `TS_NODE_TRANSPILE_ONLY=1` | ts-node kompilował z type-checking → `error TS18048` w `mm_alert_bot.ts` → crash loop |
+| 3 | **processNansenAlertQueue()** nigdy nie wywoływane | Kombinacja #1 + #2 |
+
+**Diagnostyka:**
+```
+# 409 Conflict = dwa procesy pollują ten sam bot token
+curl "https://api.telegram.org/bot${TOKEN}/getUpdates" → 409
+
+# Znaleziono 2 procesy:
+PID 1474088: /home/jerry/ai-risk-agent/ai-executor.mjs (systemd, od Feb 4)
+PID 3320092: src/signals/ai-executor-v2.mjs (PM2, od Feb 22)
+
+# Systemd service z Restart=always:
+/etc/systemd/system/ai-executor.service → WorkingDirectory=/home/jerry/ai-risk-agent
+```
+
+**Fix #1 — Disable stary ai-executor v1:**
+- Nie można `sudo systemctl stop` (brak hasła sudo)
+- Zastąpiono skrypt stubem: `mv ai-executor.mjs ai-executor.mjs.DISABLED` + nowy `ai-executor.mjs` = `console.log("DISABLED"); process.exit(0);`
+- Systemd respawnuje ale stub od razu wychodzi → zero kolizji
+
+**Fix #2 — mm-bot z TS_NODE_TRANSPILE_ONLY:**
+- `pm2 delete mm-bot` + `pm2 start` z `TS_NODE_TRANSPILE_ONLY=1 TS_NODE_IGNORE=false`
+- Bez tego env var → ts-node kompiluje z type-checking → crash na `TS18048`
+
+**Fix #3 — Weryfikacja pipeline:**
+- Wstrzyknięto testowy alert do `/tmp/nansen_raw_alert_queue.json` (processed=false)
+- mm-bot przetworzył → `processed: true`
+- `processNansenAlertQueue()` potwierdzone w logach
+
+**Nansen SM flow check (MCP API):**
+- LIT/FARTCOIN/VIRTUAL: Smart Trader flow = **zero** od 7+ dni na spot
+- Brak alertów bo brak SM aktywności na spot (cała akcja SM na perpach HL → whale_tracker)
+- Pipeline naprawiony i gotowy — gdy Nansen wyśle alert, dotrze do bota
+
+### 32. Nansen Spot Alerts — diagnoza braku alertów (23.02)
+
+**Sprawdzone przez Nansen MCP API:**
+
+| Token | Chain | SM Trader 1h | SM Trader 1d | SM Trader 7d | Inne segmenty |
+|-------|-------|-------------|-------------|-------------|---------------|
+| LIT | Ethereum | No data | No flow | No flow | Fresh wallets +$70K |
+| FARTCOIN | Solana | No data | No flow | No flow | Whale outflow -$785K/7d (4.6x avg) |
+| VIRTUAL | Base | No data | No flow | No flow | Zero aktywności |
+
+**Wniosek:** Alerty Nansen Dashboard **są aktywne** ale Smart Money nie handluje tymi tokenami na spot. Progi alertów (LIT >$3K/1h, FARTCOIN >$25K/1h) nie są przekraczane. Cała akcja SM odbywa się na **perpach Hyperliquid** — to whale_tracker.py obsługuje (działa prawidłowo, update co 15 min).
+
 ---
 
 ## Zmiany 22 lutego 2026
@@ -185,7 +241,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | PM2 id | Nazwa | Skrypt | Status | Rola |
 |--------|-------|--------|--------|------|
 | 5 | `ai-executor` | `src/signals/ai-executor-v2.mjs` | online | Nansen alert relay |
-| 36 | `mm-bot` | główny bot | online | Market making engine |
+| 41 | `mm-bot` | główny bot | online | Market making engine (recreated 23.02, was id=36) |
 | 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
@@ -202,8 +258,8 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 - `0 8 * * *` — `scripts/daily-whale-report.ts` → Discord daily whale report
 
 **Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
-- PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot
-- PID 1474088: `ai-executor.mjs` v4.0 GOD MODE — interaktywny asystent
+- PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot (token `8145609459`)
+- `ai-executor.mjs` v4.0 GOD MODE — **WYŁĄCZONY** (23.02, zastąpiony stubem `process.exit(0)`, backup: `ai-executor.mjs.DISABLED`). Był zarządzany przez systemd `/etc/systemd/system/ai-executor.service` z `Restart=always` — stub powoduje że restartuje się i natychmiast wychodzi. Konfliktował z PM2 ai-executor (ten sam token Telegram → 409)
 
 ### 26. Fix: prediction-api NansenFeatures data mismatch (22.02)
 
@@ -1413,6 +1469,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Fix #6: Oracle divergence logging added, non-invasive (DONE 22.02)
 - [x] prediction-api expanded to 8 tokens + 5 horizons (h1,h4,h12,w1,m1), PREDICTION_HORIZONS config, slope dampening, per-horizon MIN_SAMPLES (DONE 22.02)
 - [x] War Room dashboard expanded to 8 tokens + w1/m1 horizons, 4x2 grid layout, shrunk UI for smaller panels (DONE 23.02)
+- [x] Fix ai-executor v1 systemd conflict — Telegram 409, stub + TS_NODE_TRANSPILE_ONLY fix (DONE 23.02)
+- [x] Nansen Spot Alerts diagnoza — zero SM activity na spot dla LIT/FARTCOIN/VIRTUAL, pipeline działa ale nic do alertowania (DONE 23.02)
 
 ## Notatki
 - `whale_tracker.py` w cronie co 15 min (od 22.02)
@@ -1430,6 +1488,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Nansen AI hallucynacje**: Symbole `xyz:TSM` i `cash:HOOD` NIE istnieją na HL — zawsze weryfikuj przez `curl` do API giełdy
 - **Dwa tryby par**: SM-rotated (BTC/ETH — co 4H) vs Sticky (LIT/FARTCOIN — zawsze aktywne)
 - **kPEPE Toxicity Engine**: 8 sygnałów detekcji, 10-zone time-of-day, per-layer refresh, hedge triggers (IOC), VPIN $500 buckets
+- **TS_NODE_TRANSPILE_ONLY=1**: KRYTYCZNE przy recreate mm-bot w PM2 — bez tego crash loop na type errors (np. `TS18048: possibly undefined`). Env var jest w `ecosystem.config.js`
+- **systemd ai-executor.service**: `Restart=always` na serwerze, nie da się zatrzymać bez sudo. Workaround: stub script `process.exit(0)` → respawnuje się i natychmiast wychodzi
+- **Nansen Spot Alerts (23.02)**: Zero SM activity na spot dla LIT/FARTCOIN/VIRTUAL — pipeline działa (ai-executor polls → queue → mm-bot processes), ale Nansen nie wysyła alertów bo SM nie traduje spot tych tokenów. Prawdziwe dane SM płyną przez whale_tracker.py (Hyperliquid perps)
 - **kPEPE CANDLE_COINS**: Dodane do data fetcher — bez tego momentum=0 i volatility sizing nie działa
 - **Hyperliquid fills bez adresów**: Fills dają tylko oid/coin/side/px/sz/time/fee — toksyczność musi być wykrywana z wzorców (VPIN, adverse selection, rapid fills, sweeps)
 - **Shadow trading**: Wyłączone (`SHADOW_TRADING_ENABLED=false`). Nie ma serwera shadow trades. Domyślny URL trafia w telemetry (port 8081). Gdyby trzeba było włączyć — najpierw postawić serwer i ustawić `SHADOW_TRADING_TRADES_URL`
