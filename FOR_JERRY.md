@@ -22,7 +22,8 @@
 14. [Sesja 22.02 -- Trzy bugi ktore kradly nam edge](#sesja-2202----trzy-bugi-ktore-kradly-nam-edge)
 15. [Rozdzial X: XGBoost + Rozszerzenie 8 tokenow/5 horyzontow](#rozdzial-x-xgboost--jak-dalismy-botowi-prawdziwy-mozg)
 16. [Naming Convention — jeden trader, jedna nazwa](#naming-convention--jeden-trader-jedna-nazwa)
-17. [Slowniczek](#slowniczek)
+17. [Whale Changes Report — radar zmian pozycji](#whale-changes-report--radar-zmian-pozycji)
+18. [Slowniczek](#slowniczek)
 
 ---
 
@@ -2087,3 +2088,216 @@ Caly deploy trwa **10 sekund**. Zero build step, zero CI/CD, zero Docker. To jes
 ```
 7840af1 feat: War Room dashboard — 8 tokens + w1/m1 horizons, 4x2 grid
 ```
+
+---
+
+## Whale Changes Report — radar zmian pozycji
+
+### Problem: za duzo danych, za malo informacji
+
+Mielismy juz dwa sposoby monitorowania wielorybow:
+
+1. **whale_tracker.py** (cron co 15 min) — produkuje snapshot "kto ma ile" do `/tmp/smart_money_data.json`. Bot konsumuje. Zero ludzkiego interfejsu.
+2. **daily-whale-report.ts** (cron o 08:00 UTC) — "rentgen" 41 portfeli na Discord. Pelny snapshot z equity, pozycjami, agregatem per coin.
+
+Problem? **Daily report** to fotografia — mowisz "dzis Generał ma $3.3M LIT SHORT". Ale nie wiesz *co sie zmienilo* od ostatniego razu. Musisz sam porownac z wczorajszym raportem. A **whale_tracker** daje dane w JSON, nie do czytania. **VIP Spy** (vip_spy.py) monitoruje zmiany real-time, ale tylko 4 portfele i alerty lecą na Telegram per-zmiana — trudno złapac obraz calości.
+
+### Rozwiazanie: Whale Changes Report
+
+Nowy skrypt `scripts/whale-changes-report.ts` — uruchamiany 3x dziennie (06:00, 12:00, 18:00 UTC). Zamiast *snapshot* pozycji, pokazuje **tylko zmiany** od ostatniego runu.
+
+```
+Analogia: Daily Report to zdjecie rentgenowskie.
+          Changes Report to raport z kamery przemyslowej:
+          "O 14:32 ktos wszedl. O 15:17 ktos wyszedl. O 16:45 ktos wrocil z wiekszym plecakiem."
+```
+
+### Jak dziala — krok po kroku
+
+```
+whale-changes-report.ts (cron 0 6,12,18 * * *)
+  ↓
+1. Czytaj PREVIOUS snapshot z /tmp/whale_changes_snapshot.json
+2. Fetchuj CURRENT pozycje z Hyperliquid API (batch 5 adresow, 200ms delay)
+3. Porownaj: NEW / CLOSED / FLIPPED / INCREASED / REDUCED
+4. Formatuj raport → Discord webhook (chunked per 1950 znaków)
+5. Zapisz CURRENT jako nowy snapshot
+```
+
+**Kluczowa roznica vs daily report:** Daily report nie zapisuje nic — kazdorazowo fetchuje i formatuje. Changes report **musi pamietac** co bylo ostatnio, zeby wykryc roznice. Dlatego snapshot file.
+
+### 5 typow zmian (ported z whale_tracker.py `detect_changes()`)
+
+| Typ | Kiedy | Przyklad |
+|-----|-------|---------|
+| **NEW** | Pozycja istnieje w current ale nie w previous | "Generał OPENED SHORT ASTER — $2.4M" |
+| **CLOSED** | Pozycja w previous ale nie w current | "Pulkownik CLOSED SHORT BTC — was $46.3M" |
+| **FLIPPED** | Ten sam coin, inna strona (LONG↔SHORT) | "Porucznik SOL3 FLIPPED SOL: SHORT → LONG — $1.9M" |
+| **INCREASED** | Wartosc wzrosla o >10% | "Kraken A SHORT SOL +29% → $15.2M" |
+| **REDUCED** | Wartosc spadla o >10% | "Wice-Generał SHORT BTC -75% → $9.9M" |
+
+### Progi (thresholds)
+
+| Parametr | Wartosc | Dlaczego |
+|----------|---------|----------|
+| Min position value | **$10K** | Nizszy niz daily report ($100K) — chcemy widziec wiecej zmian |
+| Min change % | **10%** | Filtruje szum (drobne korekty cen) ale lapie realne ruchy |
+
+### Snapshot file — serce systemu
+
+`/tmp/whale_changes_snapshot.json` — JSON z pozycjami kazdego portfela z ostatniego runu.
+
+**Pierwszy run** (brak pliku) = zapisuje baseline, nie wysyla raportu. To jest ważne — nie chcesz dostawac "41 NEW POSITIONS" bo nie ma z czym porownac.
+
+**Struktura:**
+```json
+{
+  "0xa312114b5795dff9b8db50474dd57701aa78ad1e": {
+    "positions": {
+      "ASTER": { "coin": "ASTER", "side": "SHORT", "valueUsd": 2400000, "uPnl": 935000, ... },
+      "LIT":   { "coin": "LIT",   "side": "SHORT", "valueUsd": 3300000, "uPnl": 1300000, ... }
+    }
+  },
+  ...
+}
+```
+
+Pozycje sa kluczowane po coin name (nie indeksie tablicy) — to pozwala na O(1) lookup zamiast iterowania.
+
+### Reuse patternow z daily-whale-report
+
+Nie wymyslamy kola na nowo. Skrypt uzywa dokladnie tych samych patternow:
+
+| Pattern | Zrodlo | Uzycie |
+|---------|--------|--------|
+| `WHALES` dict | daily-whale-report.ts | Te same 41 adresow z tymi samymi nazwami |
+| Batch fetch 5 adresow + 200ms delay | daily-whale-report.ts | Unika rate limit API |
+| `Promise.allSettled()` | daily-whale-report.ts | Jeden timeout nie killuje calego batcha |
+| `postToDiscord()` + chunk splitting | daily-whale-report.ts | Discord limit 2000 znaków |
+| `fmtUsd()` / `fmtUsdNoSign()` | daily-whale-report.ts | Spójne formatowanie $1.2M / $350K |
+| `--dry-run` flag | daily-whale-report.ts | Testowanie bez spamu na Discord |
+
+### Lekcja: Change Detection to nie jest trywialne
+
+Porownywanie dwoch snapshotow wyglada prosto, ale jest kilka pulapek:
+
+**1. Pozycje ponizej progu**
+
+Jesli pozycja spadla z $50K do $8K — to CLOSED czy REDUCED? W naszej implementacji: **CLOSED** (bo $8K < $10K min threshold). Traktujemy pozycje ponizej $10K jakby nie istnialy.
+
+**2. Kolejnosc operacji**
+
+```typescript
+// Zla kolejnosc:
+if (curr && !prev) → NEW
+if (!curr && prev) → CLOSED
+if (curr.side !== prev.side) → FLIPPED  // CRASH! prev moze byc undefined
+
+// Dobra kolejnosc:
+if (currAboveMin && !prevAboveMin) → NEW
+if (prevAboveMin && !currAboveMin) → CLOSED
+if (currAboveMin && prevAboveMin) {
+  if (curr.side !== prev.side) → FLIPPED  // Bezpieczne — oba istnieja
+}
+```
+
+**3. Division by zero**
+
+```typescript
+const changePct = (curr.valueUsd - prev.valueUsd) / prev.valueUsd;
+// Co jesli prev.valueUsd === 0? → Infinity
+// Zabezpieczenie: if (prev.valueUsd > 0)
+```
+
+**4. Pierwszy run = baseline, nie raport**
+
+Bez tego dostajesz "41 NEW POSITIONS" — kazda istniejaca pozycja wyglada jak "nowa". Rozwiazanie: sprawdz czy plik istnieje, jesli nie — zapisz i wyjdz bez raportu.
+
+### Format raportu na Discord
+
+Przykladowy raport (gdy sa zmiany):
+```
+📊 WHALE CHANGES REPORT (06:00 UTC)
+Period: ~6h | 41 wallets tracked
+
+🔄 FLIPPED:
+  🟢 Porucznik SOL3 FLIPPED SOL: SHORT → LONG — $1.9M
+
+🆕 NEW POSITIONS:
+  🔴 Generał OPENED SHORT ASTER — $2.4M
+  🔴 Manifold Trading OPENED SHORT ZEC — $86K
+
+❌ CLOSED:
+  🔴 Pułkownik CLOSED SHORT BTC — was $46.3M
+
+📈 INCREASED:
+  🔴 Kraken A SHORT SOL +29% → $15.2M (uPnL +$7.6M)
+
+📉 REDUCED:
+  🔴 Wice-Generał SHORT BTC -75% → $9.9M
+
+━━━━━━━━━━━━
+Summary: 6 changes across 5 wallets
+```
+
+Jesli zero zmian:
+```
+📊 WHALE CHANGES REPORT (12:00 UTC)
+✅ No significant changes — all positions stable
+41 wallets tracked | min $10K | min 10% change
+```
+
+### Architektura raportow — pelny obraz
+
+Teraz mamy 3 warstwy raportowania (kazda z inna czestotliwoscia i detalami):
+
+```
+┌─────────────────────────────────────────────────────┐
+│  VIP Spy (co 30s)                                   │
+│  Real-time alerty per-zmiana na Telegram            │
+│  4 portfele, próg $10K / 5%                         │
+│  → "Generał OPENED SHORT ASTER NOW!"                │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│  Whale Changes Report (3x dziennie)                 │
+│  Zbiorcze podsumowanie zmian na Discord             │
+│  41 portfeli, próg $10K / 10%                       │
+│  → "6 changes across 5 wallets in last ~6h"         │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│  Daily Whale Report (1x dziennie, 08:00 UTC)        │
+│  Pelny snapshot wszystkich pozycji na Discord        │
+│  41 portfeli, próg $100K                            │
+│  → "Kraken A: $4.66M eq, SOL SHORT $15M (+$8M)"    │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│  whale_tracker.py (co 15 min)                       │
+│  JSON data dla bota, zero interfejsu ludzkiego      │
+│  ~39 portfeli + trendy + ważenie + PnL              │
+│  → /tmp/smart_money_data.json                       │
+└─────────────────────────────────────────────────────┘
+```
+
+Kazda warstwa ma inny cel. VIP Spy mowi "CO SIE DZIEJE TERAZ". Changes Report mowi "CO SIE ZMIENILO OD RANA". Daily Report mowi "JAK WYGLADA CALOSC". whale_tracker mowi to samo co Daily Report, ale w formacie ktory bot umie czytac.
+
+### Cron na serwerze
+
+```bash
+# Whale Changes Report - 3x daily (06:00, 12:00, 18:00 UTC)
+0 6,12,18 * * * cd /home/jerry/hyperliquid-mm-bot-complete && npx tsx scripts/whale-changes-report.ts >> runtime/whale_changes_report.log 2>&1
+```
+
+Uzywa `npx tsx` (nie `ts-node`!) — na serwerze `ts-node --transpile-only` nie dziala z ESM (daje `ERR_UNKNOWN_FILE_EXTENSION`). `npx tsx` rozwiazuje to automatycznie.
+
+### Lekcja: Pattern reuse > cleverness
+
+Ten skrypt to ~300 linii, z czego ~100 to skopiowany `WHALES` dict. Mozna by bylo stworzyc shared module i importowac, ale:
+
+1. Kazdy skrypt jest self-contained — mozesz go uruchomic niezaleznie
+2. Zero risk ze zmiana w jednym skrypcie zlamie drugi
+3. Prostsze debugowanie — caly kontekst w jednym pliku
+
+Trade-off: jak dodajesz nowego wieloryba, musisz zmienic go w 3 plikach (whale_tracker.py, daily-whale-report.ts, whale-changes-report.ts). W zamian: **kazdy plik dziala sam i nie moze sie zepsuc przez zmiane w innym**. Dla skryptow cron ktore sie uruchamiaja raz dziennie, ta niezaleznosc jest wazniejsza niz DRY.
