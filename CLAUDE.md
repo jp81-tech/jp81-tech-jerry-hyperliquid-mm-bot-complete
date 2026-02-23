@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-22
+- Data: 2026-02-23
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -38,6 +38,33 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 23 lutego 2026
+
+### 30. War Room Dashboard — 8 tokens + w1/m1 horizons (23.02)
+
+**Plik:** `dashboard.mjs` (PM2 `war-room`, port 3000)
+
+**Przed:** 3 tokeny (LIT, FARTCOIN, HYPE), 3 horyzonty (h1, h4, h12), grid 3-kolumnowy
+**Po:** 8 tokenów (BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN), 5 horyzontów (h1, h4, h12, w1, m1), grid 4x2
+
+**Zmiany:**
+
+| Co | Przed | Po |
+|----|-------|----|
+| COINS array | `["LIT", "FARTCOIN", "HYPE"]` | `["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]` |
+| CSS grid | `repeat(3, 1fr)` | `repeat(4, 1fr)` + `repeat(2, 1fr)` rows |
+| Panel borders | `.panel:last-child` | `.panel:nth-child(4n)` / `.panel:nth-child(n+5)` |
+| Chart min-height | 200px | 100px |
+| Factors-box max-height | 40px | 25px |
+| Font sizes (pred/signals/factors) | 9px | 8px |
+| Prediction rows | h1, h4, h12 | h1, h4, h12, **w1**, **m1** |
+| Chart horizon lines | 3 (green/yellow/red) | 5 (+purple=w1, +cyan=m1) |
+| Fallback predictions | h1, h4, h12 | h1, h4, h12, w1 (168h), m1 (720h) |
+
+**Deploy:** scp → server, `pm2 restart war-room`, verified via curl (8 coins + w1/m1 confirmed)
 
 ---
 
@@ -162,7 +189,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
-| 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 |
+| 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 (8 tokens, 5 horizons, 23.02) |
 | 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (8 tokens, 5 horizons, 22.02) |
 
 **Usunięte z PM2:**
@@ -1385,6 +1412,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Fix #5: whale_tracker.py added to crontab */15 min, nansen_bias.json fresh (DONE 22.02)
 - [x] Fix #6: Oracle divergence logging added, non-invasive (DONE 22.02)
 - [x] prediction-api expanded to 8 tokens + 5 horizons (h1,h4,h12,w1,m1), PREDICTION_HORIZONS config, slope dampening, per-horizon MIN_SAMPLES (DONE 22.02)
+- [x] War Room dashboard expanded to 8 tokens + w1/m1 horizons, 4x2 grid layout, shrunk UI for smaller panels (DONE 23.02)
 
 ## Notatki
 - `whale_tracker.py` w cronie co 15 min (od 22.02)
@@ -1426,6 +1454,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **prediction-api PREDICTION_HORIZONS**: Config-driven horyzonty w `HybridPredictor.ts`. confMax maleje (80→30) bo dlugi horyzont = mniej pewnosci. Slope dampened logarytmicznie dla w1/m1.
 - **XGBoost data timeline**: w1 etykiety po 7 dniach, m1 po 30 dniach. MIN_SAMPLES: h1-h12=200, w1=100, m1=50. Collector `LABEL_BACKFILL_ROWS=0` (skanuje wszystkie wiersze dla m1 30-day lookback).
 - **Nansen channel ID**: `-1003886465029` = "BOT i jego Sygnaly" (prawidłowy). `-1003724824266` = stary/nieistniejący. Bot `@HyperliquidMM_bot` jest administratorem kanału.
-- **Porty na serwerze (updated)**: 3000=war-room, 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
+- **Porty na serwerze (updated)**: 3000=war-room (8 tokens, 4x2 grid), 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
 - **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 57 portfeli. Oba potrzebują `DISCORD_WEBHOOK_URL` w `.env`.
 - **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.
