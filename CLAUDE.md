@@ -45,6 +45,59 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 24 lutego 2026
 
+### 38. VIP Flash Override — szybsze wykrywanie flipow SM (24.02)
+
+**Problem:** Generał flipnął z SHORT na LONG na LIT (23.02, $192K). whale_tracker.py aktualizuje co 15 min, ale agregat 6 traderów nadal pokazywał FOLLOW_SM_SHORT bo inni SM wciąż shortują. Bot kontynuował shortowanie LIT mimo że najważniejszy VIP (weight=0.95) flipnął.
+
+**Rozwiązanie:** VIP Flash Override — po `analyzeTokenSm()` w `loadAndAnalyzeAllTokens()`, czyta `/tmp/vip_spy_state.json` (30s fresh z vip_spy.py) i sprawdza czy top VIP (signalWeight >= 0.90) z pozycją >= $50K disagrees z aktualnym directional mode. Jeśli tak → downgrade do PURE_MM (nie flip — zbyt agresywne).
+
+**Plik:** `src/mm/SmAutoDetector.ts`
+
+**Stałe:**
+- `VIP_FLASH_MIN_WEIGHT = 0.90` (Generał 0.95, Major 0.95, Wice-Generał 0.90, Kraken A 0.90)
+- `VIP_FLASH_MIN_POSITION_USD = 50_000`
+- Czyta `/tmp/vip_spy_state.json` (async, fsp.readFile)
+
+**Logika:**
+```
+analysis.mode = FOLLOW_SM_SHORT + Generał is LONG $192K
+→ DISAGREE → downgrade to PURE_MM
+→ convictionScore = 0, source = 'VIP_FLASH_OVERRIDE'
+→ Log: "🕵️ [VIP_FLASH] LIT: Generał is LONG $192K vs FOLLOW_SM_SHORT → PURE_MM"
+```
+
+**Dlaczego PURE_MM a nie flip:**
+- 5 traderów nadal shortuje, Generał jedynym longiem
+- Flip na FOLLOW_SM_LONG = ryzykowne (może być trap)
+- PURE_MM = bezpieczne (stop shortowania, czekaj na potwierdzenie)
+- Gdy whale_tracker się zaktualizuje i agregat potwierdzi flip → bot sam przejdzie na FOLLOW_SM_LONG
+
+**Edge cases:** vip_spy nie istnieje → skip, pozycja < $50K → skip, PURE_MM/FLAT → skip (nie override neutralnych), pierwszy disagreement → break
+
+**Kompilacja:** `tsc --noEmit` czysto (jedyny pre-existing error w mm_alert_bot.ts)
+
+**Deploy:** SCP → server, `pm2 restart mm-bot` — działa, zero VIP_FLASH logów bo LIT już w PURE_MM (SignalEngine WAIT zone). Override zadziała gdy whale_tracker da FOLLOW_SM_SHORT a VIP wciąż będzie LONG.
+
+### 39. LIT Vesting Distribution Alert (24.02, intel)
+
+**Nansen Alert:** Fresh wallets received $17.5M LIT w 24h (76× avg)
+
+**Źródło:** Oficjalna dystrybucja z kontraktu `Lighter: LIT Distributor`:
+- $11.1M → Token Millionaire (0xb3058a)
+- $5M → Lightspeed Fund VC (0x1190ce)
+- $1.5M → kolejny Token Millionaire
+
+**Interpretacja:** Vesting/unlock tokenów zespołu i inwestorów — NIE organiczny popyt. Potencjalna presja sprzedażowa.
+
+**Kontekst LIT:**
+- Lighter = DEX perps, token uruchomiony XII.2025, 25% podaży w airdropie
+- Dominacja spadła z 60% → 8.1% (bearish fundamental)
+- Cena: ATH ~$3+ → $1.35 (24.02)
+- Program buybacków $30-40M z opłat protokołu (bullish long-term)
+- Generał LONG $192K mimo vestingu — może wie o buybackach
+
+**Wpływ na bota:** Brak zmian. LIT już w PURE_MM (mixed signals). VIP Flash Override gotowy na wypadek gdyby whale_tracker wygenerował FOLLOW_SM_SHORT.
+
 ### 36. TWAP Executor — zamykanie pozycji w slice'ach (24.02)
 
 **Nowy plik:** `src/execution/TwapExecutor.ts`
@@ -1648,6 +1701,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować VIP Flash Override — logi `🕵️ [VIP_FLASH]`, sprawdzić czy triggeruje gdy VIP disagrees
+- [ ] LIT vesting monitoring — $17.5M unlock 24.02, obserwować presję sprzedażową i reakcję ceny
 - [ ] Monitorować FibGuard — logi `🏛️ [FIB_GUARD]`, czy guard aktywuje się blisko Fib support levels
 - [ ] Sprawdzić SM Override FibGuard — gdy SM confidence >= 70%, guard powinien być OFF
 - [ ] Deploy TWAP na serwer — `TWAP_ENABLED=true` w .env, `pm2 restart mm-bot`, obserwować logi `🔄 [TWAP]`
@@ -1751,3 +1806,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Porty na serwerze (updated)**: 3000=war-room (8 tokens, 4x2 grid), 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
 - **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 41 portfeli, whale changes 3x daily (06/12/18 UTC) = delta zmian pozycji. Wszystkie potrzebują `DISCORD_WEBHOOK_URL` w `.env`. Snapshot zmian: `/tmp/whale_changes_snapshot.json`.
 - **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.
+- **VIP Flash Override (24.02)**: Czyta `/tmp/vip_spy_state.json` po `analyzeTokenSm()`. VIP (signalWeight >= 0.90) z pozycją >= $50K disagrees z directional mode → downgrade do PURE_MM. Nie flip — za agresywne. Logi: `🕵️ [VIP_FLASH]`. Stałe: `VIP_FLASH_MIN_WEIGHT=0.90`, `VIP_FLASH_MIN_POSITION_USD=50000`.
+- **LIT Vesting (24.02)**: $17.5M unlock z `Lighter: LIT Distributor` → Lightspeed Fund VC + Token Millionaires. Nie organiczny popyt. Dominacja Lighter 60%→8.1%. Cena ATH $3+ → $1.35. Buyback program $30-40M (bullish long-term).

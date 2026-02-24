@@ -24,7 +24,9 @@
 16. [Naming Convention — jeden trader, jedna nazwa](#naming-convention--jeden-trader-jedna-nazwa)
 17. [Whale Changes Report — radar zmian pozycji](#whale-changes-report--radar-zmian-pozycji)
 18. [Fib Guard — nie shortuj dna](#fib-guard--nie-shortuj-dna)
-19. [Slowniczek](#slowniczek)
+19. [VIP Flash Override — szpieg ratuje sytuacje](#vip-flash-override--szpieg-ratuje-sytuacje)
+20. [LIT Vesting — anatomia Nansen alertu](#lit-vesting--anatomia-nansen-alertu)
+21. [Slowniczek](#slowniczek)
 
 ---
 
@@ -820,6 +822,219 @@ My zrobilismy krok 1-2 (reczna synchronizacja). Krok 3 (dynamiczne czytanie z vi
 
 **Czego NIE ruszylismy:**
 - `NANSEN_SM_LABELS` w whale_tracker.py — wyglada jak lista nazw, ale to tak naprawde **kategorie Nansen** ("Smart HL Perps Trader", "Fund"). Sa uzywane w `CREDIBILITY_MULTIPLIERS` do obliczania wagi sygnalu. Zmiana "Smart HL Perps Trader" na "General" by zlamala lookup i trader dostalby wage 0.20 (Unknown) zamiast 1.0. **Zawsze czytaj kod zanim zmienisz** — nazwy moga byc kluczami w innym dicu.
+
+---
+
+## VIP Flash Override — szpieg ratuje sytuacje
+
+### Problem: General flipnal, bot tego nie widzial
+
+23 lutego 2026, godzina 20:51 UTC. General — nasz najwazniejszy trader (weight 0.95, lacznie +$15M zysku) — flipnal swoja pozycje na LIT z SHORT na LONG. Pozycja: $192K.
+
+Bot tego nie zauwazyl. Dlaczego?
+
+**whale_tracker.py** aktualizuje dane co 15 minut przez cron. Ale nawet po aktualizacji, problem nie zniknal — bo whale_tracker patrzy na **agregat wszystkich traderow**. A agregat wyglada tak:
+
+```
+Wice-General:      LIT SHORT $353K  (weight 0.90)
+Laurent Zeimes:    LIT SHORT $1.29M (weight 0.70)
+Inni SM:           LIT SHORT $XXK
+General:           LIT LONG  $192K  (weight 0.95)  ← FLIP!
+                   ─────────────────────────
+Agregat:           FOLLOW_SM_SHORT 46%
+```
+
+General flipnal, ale reszta nadal shortuje. Agregat mowi "FOLLOW_SM_SHORT". Bot kontynuuje shortowanie LIT.
+
+To jest klasyczny problem **"glos wiekszosci vs glos eksperta"**. Wyobraz sobie glowodowodzacego armii (General) ktory mowi "wycofujemy sie!", ale jego 5 oficerow mowi "atakujemy!". System demokratycznego glosowania kaze atakowac. Ale General wie cos czego oficerowie nie wiedza.
+
+### Rozwiazanie: VIP Flash Override
+
+Pomysl jest prosty: mamy juz `vip_spy.py` (PM2, polling co 30 sekund), ktory zapisuje aktualne pozycje VIPow do `/tmp/vip_spy_state.json`. Ten plik jest **50x swiezszy** niz whale_tracker (30s vs 15min).
+
+Po tym jak `analyzeTokenSm()` oblicza mode z agregatu, dodajemy "szybka sciezke":
+
+```
+1. Czytaj /tmp/vip_spy_state.json (30s fresh)
+2. Dla kazdego tokenu w trybie kierunkowym (FOLLOW_SM_SHORT/LONG):
+   a. Znajdz VIPow z signalWeight >= 0.90
+   b. Czy maja pozycje >= $50K na tym tokenie?
+   c. Czy ich pozycja DISAGREES z aktualnym modem?
+3. Jesli DISAGREE → downgrade do PURE_MM
+```
+
+### Dlaczego PURE_MM a nie flip?
+
+To kluczowa decyzja architektoniczna. Mielismy dwie opcje:
+
+**Opcja A: Flip na FOLLOW_SM_LONG** — ZLE
+- 5 traderow nadal shortuje, General jest jedynym longiem
+- Co jesli General sie myli? Co jesli to trap?
+- Agresywne flipowanie na podstawie jednego VIPa = ryzyko
+
+**Opcja B: Downgrade na PURE_MM** — BEZPIECZNE
+- Przestajemy shortowac (nie ladujemy nowych shorów)
+- Nie otwieramy longow (bo inni SM nadal shortuja)
+- Czekamy na nastepny whale_tracker run (15 min)
+- Jesli agregat potwierdzi flip → bot sam przejdzie na FOLLOW_SM_LONG
+
+To jest zasada **"kiedy sie nie zgadzasz, nie rob nic"**. W tradingu nie musisz ciagle miec pozycji. Czasem najlepsza decyzja to wyjsc na bok i poczekac az sytuacja sie wyjasni. Warren Buffett nazwalby to "circle of competence" — nie wchodzisz w transakcje ktorych nie rozumiesz.
+
+### Analogia: System wczesnego ostrzegania
+
+Wyobraz sobie radar wojskowy. Masz dwa systemy:
+
+| System | Czas aktualizacji | Co widzi |
+|--------|-------------------|----------|
+| **whale_tracker** (satelita) | co 15 min | Cale pole bitwy — wszystkie oddzialy, pozycje, sily |
+| **vip_spy** (dron) | co 30 sekund | Tylko generala i kilku kluczowych oficerów — ale w czasie rzeczywistym |
+
+Satelita daje pelny obraz ale z opoznieniem. Dron widzi mniej ale natychmiast. VIP Flash Override laczy oba: "Satelita mowi atakuj, ale dron widzi ze General sie wycofal. Wstrzymaj natarcie do nastepnego zdjecia satelitarnego."
+
+### Implementacja — ~50 linii kodu
+
+Cala zmiana miesci sie w jednym pliku: `src/mm/SmAutoDetector.ts`.
+
+**Stalye konfiguracyjne:**
+```typescript
+const VIP_FLASH_MIN_WEIGHT = 0.90       // Tylko top VIPy
+const VIP_FLASH_MIN_POSITION_USD = 50_000  // Ignoruj dust
+const VIP_SPY_STATE_PATH = '/tmp/vip_spy_state.json'
+```
+
+**Helper:**
+```typescript
+async function readVipSpyState() {
+  try {
+    const content = await fsp.readFile(VIP_SPY_STATE_PATH, 'utf-8')
+    return JSON.parse(content)
+  } catch {
+    return null  // File missing → skip, normalne zachowanie
+  }
+}
+```
+
+**Override (po analyzeTokenSm, przed cache):**
+```typescript
+const vipState = await readVipSpyState()
+if (vipState) {
+  for (const [token, analysis] of newAnalysis.entries()) {
+    if (analysis.mode !== FOLLOW_SM_SHORT && analysis.mode !== FOLLOW_SM_LONG) continue
+
+    for (const [address, positions] of Object.entries(vipState)) {
+      const trader = KNOWN_TRADERS[address]
+      if (!trader || trader.signalWeight < 0.90) continue
+
+      const vipPos = positions[token]
+      if (!vipPos || vipPos.position_value < 50_000) continue
+
+      const disagrees = (isShortMode && vipIsLong) || (!isShortMode && !vipIsLong)
+      if (disagrees) {
+        analysis.mode = MmMode.PURE_MM  // Stop, don't flip
+        analysis.convictionScore = 0
+        break  // Jeden disagreement wystarczy
+      }
+    }
+  }
+}
+```
+
+Zwroc uwage: **zero nowych importow, zero nowych plikow, zero npm dependencies**. Uzywamy istniejacych: `fsp` (juz importowany), `KNOWN_TRADERS` (juz istnieje), `MmMode` (juz istnieje). To jest dobra inzynieria — maksymalne reuse.
+
+### Edge cases i defensive coding
+
+| Case | Co sie stanie | Dlaczego to OK |
+|------|---------------|----------------|
+| vip_spy_state.json nie istnieje | `readVipSpyState()` → null → skip | vip_spy moze byc wylaczony |
+| VIP ma pozycje < $50K | Skip | Moze to dust, reszta z zamknietej pozycji |
+| Dwoch VIPow: jeden zgadza, drugi nie | Pierwszy disagreement → PURE_MM | Ostroznosc wygrywa |
+| VIP nie ma pozycji na tokenie | Skip | Brak danych ≠ disagreement |
+| PURE_MM lub FLAT | Skip | Nie override'ujemy neutralnych modow |
+
+`try/catch` w `readVipSpyState()` to przyklad defensive coding — plik moze byc uszkodzony (np. vip_spy w polowie zapisu), JSON moze byc niepoprawny. Zamiast crashowac bota, po prostu skipujemy override. Bot dziala dalej z agregatu whale_tracker.
+
+### Lekcje
+
+**1. Szybkosc danych > ilosc danych.** whale_tracker ma dane od 30+ traderow ale co 15 min. vip_spy ma dane od 4 ale co 30s. W tradingu, 30-sekundowy signal od jednego top VIPa jest cenniejszy niz 15-minutowy konsensus 30 traderow. Rynki poruszaja sie szybko.
+
+**2. Nie flipuj — parkuj.** Kiedy sygnaly sa sprzeczne, najgorsza decyzja to agresywnie postawic na jedna strone. Najlepsza: wyjsc na bok (PURE_MM) i poczekac na potwierdzenie. To jest odpowiednik "I don't know" w inwestowaniu — i to jest OK.
+
+**3. Post-processor pattern.** VIP Flash Override nie modyfikuje `analyzeTokenSm()`. Dziala POTEM — po analizie, przed cache. To minimalna ingerencja. Gdyby cos poszlo nie tak, wystarczy usunac 40 linii i wrocic do starego zachowania. Dobra architektura pozwala na latwy rollback.
+
+**4. Hierarchia dowodzenia.** W armii i w tradingu: kiedy General mowi cos innego niz oficerowie, sluchasz Generala. Ale nie sledzo — nie atakujesz gdzie General, tylko wstrzymujesz natarcie. Bo moze General tez sie myli. Czekasz na potwierdzenie.
+
+**5. Reuse > nowy kod.** Ta zmiana to 50 linii w istniejacym pliku. Zero nowych plikow, zero importow, zero dependencies. Uzywamy juz istniejace: `KNOWN_TRADERS`, `fsp`, `MmMode`, `vip_spy_state.json`. Najlepszy kod to ten ktorego nie trzeba pisac.
+
+---
+
+## LIT Vesting — anatomia Nansen alertu
+
+### Co sie stalo
+
+24 lutego 2026, Nansen wysyla alert:
+
+> **Fresh wallets received $17.5M of LIT in the last 24 hours (76.47x the recent average)**
+
+76x powyzej sredniej! Brzmi dramatycznie. "Fresh wallets" to portfele utworzone w ciagu ostatnich 15 dni. $17.5M naplywu do swiezych portfeli.
+
+Pierwsza mysl: ktos akumuluje LIT? Insiderzy kupuja przed wielkim ruchem?
+
+### Dochodzenie — co naprawde sie stalo
+
+Analiza transferow z Nansen pokazala dokladne zrodlo:
+
+| Kwota | Skad | Dokad |
+|-------|------|-------|
+| **$11.1M** | `Lighter: LIT Distributor` | "Token Millionaire" (0xb3058a) |
+| **$5M** | `Lighter: LIT Distributor` | Lightspeed Fund VC (0x1190ce) |
+| **$1.5M** | `Lighter: LIT Distributor` | kolejny "Token Millionaire" |
+
+To nie jest "ktos akumuluje". To **oficjalna dystrybucja tokenow z kontraktu projektu**. Vesting/unlock — tokeny zespolu i inwestorow sa blokowane na 1 rok z 3-letnim vestingiem, i wlasnie zaczely sie odblokowywac.
+
+### Dlaczego to wazne dla bota
+
+**Vesting = supply unlock = presja sprzedazowa.** Kiedy insiderzy/VC dostaja odblokowane tokeny, czesto je sprzedaja (albo natychmiast, albo stopniowo). $17.5M nowego supply na rynku to duzo dla tokenu z ~$150M market cap.
+
+**Ale nasz General ma LIT LONG $192K.** Dlaczego?
+
+Mozliwe wyjasnienia:
+1. **Wie o buybackach** — Lighter ma program buybackow z oplat protokolu ($30-40M planowane). Buybacki = popyt ktory absorbuje supply
+2. **Kontrarianski play** — wszyscy shortuja po unlock, General idzie long bo spodziewa sie odwrotnej reakcji
+3. **Inne informacje** — jako wieloryb z Nansen label "Smart HL Perps Trader", moze miec dostep do flow data ktorego my nie widzimy
+
+### Kontekst fundamentalny LIT/Lighter
+
+| Metryka | Wartosc | Sygnał |
+|---------|---------|--------|
+| Dominacja DEX perps | 60% → 8.1% | Bearish (strata udzialu) |
+| Cena | ATH $3+ → $1.35 | Bearish (spadek ~55%) |
+| Buyback program | $30-40M planowane | Bullish long-term |
+| VC inwestorzy (Lightspeed) | Odbieraja tokeny | Neutral/Bearish short-term |
+
+### Lekcja: Nie reaguj emocjonalnie na alerty
+
+Ten alert jest idealnym przykladem dlaczego **trzeba kopac glebiej zanim podejmiesz decyzje**:
+
+1. **Naglowek**: "76x average! $17.5M! Fresh wallets!" — brzmi bullish (ktos kupuje!)
+2. **Rzeczywistosc**: Oficjalny unlock vestingu — bearish (wiecej supply)
+3. **Kontekst**: General jest long mimo unlock — mixed signals
+
+Gdyby bot zareagowal na sam naglowek alertu, moglby kupic LIT (bo "ktos akumuluje"). W rzeczywistosci to unlock vestingu = wiecej tokenow na rynku = presja sprzedazowa.
+
+**Zasada: Alert to poczatek dochodzenia, nie koniec.** Zawsze sprawdz zrodlo transferow zanim zinterpretujesz naglowek.
+
+### Co bot faktycznie robi z LIT teraz
+
+```
+whale_tracker agregat:  Mixed signals (conviction 43%)
+SignalEngine:           WAIT zone → PURE_MM
+VIP Flash Override:     Gotowy, ale LIT juz w PURE_MM → skip
+Generał (vip_spy):      LONG $192K
+
+Rezultat: PURE_MM — bot nie shortuje, nie longuje, czeka
+```
+
+To jest najrozsadniejsza decyzja. Mixed signals + vesting unlock + General long = nie rob nic. Czekaj na potwierdzenie.
 
 ---
 

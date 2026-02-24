@@ -1105,6 +1105,30 @@ function checkRatioAlerts(analysis: Map<string, TokenSmAnalysis>): void {
   }
 }
 
+// ============================================================
+// VIP FLASH OVERRIDE
+// Reads live VIP positions from vip_spy.py (30s polling)
+// Downgrades directional mode to PURE_MM when top VIP disagrees
+// ============================================================
+const VIP_FLASH_MIN_WEIGHT = 0.90       // Tylko top VIPy (Generał 0.95, Major 0.95, Wice-Generał 0.90, Kraken A 0.90)
+const VIP_FLASH_MIN_POSITION_USD = 50_000  // Ignoruj pozycje < $50K
+const VIP_SPY_STATE_PATH = '/tmp/vip_spy_state.json'
+
+interface VipPosition {
+  side: 'LONG' | 'SHORT'
+  size: number
+  position_value: number
+}
+
+async function readVipSpyState(): Promise<Record<string, Record<string, VipPosition>> | null> {
+  try {
+    const content = await fsp.readFile(VIP_SPY_STATE_PATH, 'utf-8')
+    return JSON.parse(content)
+  } catch {
+    return null  // File missing or corrupted — skip override
+  }
+}
+
 /**
  * Loads SM data and analyzes all tokens.
  * Results are cached for 30 seconds.
@@ -1131,6 +1155,48 @@ export async function loadAndAnalyzeAllTokens(forceReload = false): Promise<Map<
     for (const [token, smData] of Object.entries(enrichedSmData)) {
       const analysis = analyzeTokenSm(token, smData)
       newAnalysis.set(token, analysis)
+    }
+
+    // 🕵️ VIP FLASH OVERRIDE: Check live VIP positions vs stale whale_tracker
+    const vipState = await readVipSpyState()
+    if (vipState) {
+      for (const [token, analysis] of newAnalysis.entries()) {
+        // Only check directional modes
+        if (analysis.mode !== MmMode.FOLLOW_SM_SHORT && analysis.mode !== MmMode.FOLLOW_SM_LONG) continue
+
+        const isShortMode = analysis.mode === MmMode.FOLLOW_SM_SHORT
+
+        // Check each VIP address
+        for (const [address, positions] of Object.entries(vipState)) {
+          const trader = KNOWN_TRADERS[address]
+          if (!trader || trader.signalWeight < VIP_FLASH_MIN_WEIGHT) continue
+
+          const vipPos = positions[token]
+          if (!vipPos || vipPos.position_value < VIP_FLASH_MIN_POSITION_USD) continue
+
+          const vipIsLong = vipPos.side === 'LONG'
+          const disagrees = (isShortMode && vipIsLong) || (!isShortMode && !vipIsLong)
+
+          if (disagrees) {
+            const prevMode = analysis.mode
+            // Downgrade to PURE_MM (conservative — don't flip, just stop)
+            analysis.mode = MmMode.PURE_MM
+            analysis.multipliers = {
+              bid: 1.0,
+              ask: 1.0,
+              bidLocked: false,
+              askLocked: false,
+              maxInventoryUsd: analysis.multipliers.maxInventoryUsd,
+              priority: analysis.multipliers.priority,
+              source: 'VIP_FLASH_OVERRIDE',
+              reason: `${trader.label} (w=${trader.signalWeight}) is ${vipPos.side} $${(vipPos.position_value / 1000).toFixed(0)}K — disagrees with ${prevMode}`
+            }
+            analysis.convictionScore = 0  // No conviction — conflicting signals
+            console.log(`🕵️ [VIP_FLASH] ${token}: ${trader.label} is ${vipPos.side} $${(vipPos.position_value / 1000).toFixed(0)}K vs ${prevMode} → PURE_MM (flash override)`)
+            break  // One VIP disagreement is enough
+          }
+        }
+      }
     }
 
     cachedAnalysis = newAnalysis
