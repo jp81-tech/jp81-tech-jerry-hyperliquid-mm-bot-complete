@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: "mm-follower",
-      cwd: "/root/hyperliquid-mm-bot-complete",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
       script: "src/mm_hl.ts",
       interpreter: "node",
       interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=512",
@@ -25,7 +25,7 @@ module.exports = {
     },
     {
       name: "mm-pure",
-      cwd: "/root/hyperliquid-mm-bot-complete",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
       script: "src/mm_hl.ts",
       interpreter: "node",
       interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=384",
