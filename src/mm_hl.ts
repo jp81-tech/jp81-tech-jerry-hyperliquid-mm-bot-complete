@@ -114,6 +114,46 @@ import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
 import { TwapExecutor, type TwapConfig } from './execution/TwapExecutor.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BOT_MODE — Split PURE_MM and SM_FOLLOWER into separate PM2 processes
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BOT_MODE = (process.env.BOT_MODE || 'UNIFIED') as 'PURE_MM' | 'SM_FOLLOWER' | 'UNIFIED'
+const IS_PURE_MM_BOT = BOT_MODE === 'PURE_MM'
+const IS_SM_FOLLOWER_BOT = BOT_MODE === 'SM_FOLLOWER'
+
+const MM_ONLY_PAIRS = (process.env.MM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
+const SM_ONLY_PAIRS = (process.env.SM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
+
+console.log(`\n🤖 BOT_MODE=${BOT_MODE}`)
+if (IS_PURE_MM_BOT) console.log(`📊 PURE_MM pairs: ${MM_ONLY_PAIRS.join(', ') || '(all)'}`)
+else if (IS_SM_FOLLOWER_BOT) console.log(`🐋 SM_FOLLOWER pairs: ${SM_ONLY_PAIRS.join(', ') || '(all)'}`)
+else console.log(`🔄 UNIFIED mode (legacy)`)
+
+/**
+ * Wrapper around getAutoEmergencyOverrideSync that forces PURE_MM
+ * for all pairs when running in PURE_MM bot mode.
+ * In SM_FOLLOWER or UNIFIED mode, delegates to the real function.
+ */
+function getSignalEngineForPair(pair: string) {
+  if (IS_PURE_MM_BOT) {
+    return {
+      bidEnabled: true,
+      askEnabled: true,
+      bidMultiplier: 1.0,
+      askMultiplier: 1.0,
+      maxInventoryUsd: 5000,
+      reason: `[BOT_MODE_PURE_MM] ${pair}: PURE_MM forced`,
+      mode: MmMode.PURE_MM,
+      convictionScore: 0,
+      signalEngineOverride: true,
+      signalEngineAllowLongs: true,
+      signalEngineAllowShorts: true,
+    }
+  }
+  return getAutoEmergencyOverrideSync(pair)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TYPE EXTENSIONS - Fix TypeScript errors without changing runtime
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4110,10 +4150,14 @@ class HyperliquidMMBot {
         this.checkFillWatchdog()
 
         // 🐋 Load whale tracker data into SmAutoDetector cache (refreshes every 30s)
-        await loadAndAnalyzeAllTokens()
+        if (!IS_PURE_MM_BOT) {
+          await loadAndAnalyzeAllTokens()
+        }
 
         // 🔔 NANSEN ALERT QUEUE: Process alerts from Telegram (via ai-executor)
-        await this.processNansenAlertQueue()
+        if (!IS_PURE_MM_BOT) {
+          await this.processNansenAlertQueue()
+        }
 
         // 🛑 LIQUIDITY GUARD: Cancel orders on blocked pairs
         await this.cancelAllOnBlockedPairs();
@@ -4236,26 +4280,28 @@ class HyperliquidMMBot {
         await this.rotateIfNeeded()
         await this.sleep(2000);
 
-        // WHALE TRACKER CHECK
-        const now = Date.now();
-        if (now - this.lastWhaleCheck > 300000) { // Check every 5 mins
-          const whaleTokens = Object.entries(NANSEN_TOKENS).map(([symbol, cfg]) => ({
-            symbol,
-            address: cfg.address,
-            chain: cfg.chain
-          }));
+        // WHALE TRACKER CHECK (skip in PURE_MM bot — no SM tracking needed)
+        if (!IS_PURE_MM_BOT) {
+          const now = Date.now();
+          if (now - this.lastWhaleCheck > 300000) { // Check every 5 mins
+            const whaleTokens = Object.entries(NANSEN_TOKENS).map(([symbol, cfg]) => ({
+              symbol,
+              address: cfg.address,
+              chain: cfg.chain
+            }));
 
-          // Don't await to not block main loop
-          mmAlertBot.checkWhaleActivity(whaleTokens).catch(err => {
-            console.error('[WhaleTracker] Error:', err);
-          });
+            // Don't await to not block main loop
+            mmAlertBot.checkWhaleActivity(whaleTokens).catch(err => {
+              console.error('[WhaleTracker] Error:', err);
+            });
 
-          this.lastWhaleCheck = now;
-        }
+            this.lastWhaleCheck = now;
+          }
 
-        // Check for Nansen strong conflicts and auto-close if needed
-        if (this.nansenConflictCheckEnabled) {
-          await this.checkNansenConflicts()
+          // Check for Nansen strong conflicts and auto-close if needed
+          if (this.nansenConflictCheckEnabled) {
+            await this.checkNansenConflicts()
+          }
         }
         await this.sleep(2000);
 
@@ -4272,7 +4318,7 @@ class HyperliquidMMBot {
           this.notifier.info(`[INFO] ROTATION_MODE=manual`)
           this.notifier.info(`[INFO] Using MANUAL_ACTIVE_PAIRS=${manualPairs.join(',')}`)
           activePairs = manualPairs
-        } else if (rotationMode === 'sm') {
+        } else if (rotationMode === 'sm' && !IS_PURE_MM_BOT) {
           // Auto-select top 3 by Engine score (force reload to avoid stale cache from dynamic_config)
           await loadAndAnalyzeAllTokens(true)
           const smPairs = getTopSmPairs(3)
@@ -4292,6 +4338,35 @@ class HyperliquidMMBot {
         // Update activePairs to the actual allowed list (after sticky pairs merge + cap)
         activePairs = await this.applyRotationPairs(activePairs)
         await this.sleep(2000);
+
+        // 🤖 BOT_MODE pair filtering — restrict to configured pairs only
+        if (IS_PURE_MM_BOT && MM_ONLY_PAIRS.length > 0) {
+          activePairs = activePairs.filter(p => MM_ONLY_PAIRS.includes(p))
+          if (activePairs.length === 0) activePairs = MM_ONLY_PAIRS
+        } else if (IS_SM_FOLLOWER_BOT && SM_ONLY_PAIRS.length > 0) {
+          activePairs = activePairs.filter(p => SM_ONLY_PAIRS.includes(p))
+          if (activePairs.length === 0) activePairs = SM_ONLY_PAIRS
+        }
+
+        // 🤖 BOT_MODE overlap prevention — write active pairs file + check other mode
+        if (BOT_MODE !== 'UNIFIED') {
+          const activePairsFile = `/tmp/mm_active_pairs_${BOT_MODE.toLowerCase()}.json`
+          fs.writeFileSync(activePairsFile, JSON.stringify({
+            mode: BOT_MODE, pairs: activePairs, pid: process.pid, updatedAt: new Date().toISOString()
+          }))
+
+          const otherMode = IS_PURE_MM_BOT ? 'sm_follower' : IS_SM_FOLLOWER_BOT ? 'pure_mm' : null
+          if (otherMode) {
+            try {
+              const other = JSON.parse(fs.readFileSync(`/tmp/mm_active_pairs_${otherMode}.json`, 'utf-8'))
+              const overlap = activePairs.filter(p => other.pairs.includes(p))
+              if (overlap.length > 0) {
+                console.warn(`⚠️ [BOT_MODE] PAIR OVERLAP with ${other.mode}: ${overlap.join(', ')}!`)
+                activePairs = activePairs.filter(p => !overlap.includes(p))
+              }
+            } catch {}
+          }
+        }
 
         // Enforce MAX_ACTIVE_PAIRS for execution as well
         if (activePairs.length > MAX_ACTIVE_PAIRS) {
@@ -6140,7 +6215,7 @@ class HyperliquidMMBot {
 
     // 🛑 AUTO-PAUSE CHECK (Safety Circuit Breaker)
     // 🧠 SignalEngine PURE_MM tokens can bypass global pause
-    const signalEngineResultPause = getAutoEmergencyOverrideSync(pair) ?? null;
+    const signalEngineResultPause = getSignalEngineForPair(pair) ?? null;
     const isSignalEnginePureMmPause = signalEngineResultPause?.signalEngineOverride &&
       signalEngineResultPause?.mode === MmMode.PURE_MM;
 
@@ -6797,7 +6872,7 @@ class HyperliquidMMBot {
     }
 
     // 🧠 SignalEngine PURE_MM check for inventory deviation bypass
-    const signalEngineResultInv = getAutoEmergencyOverrideSync(pair);
+    const signalEngineResultInv = getSignalEngineForPair(pair);
     const isSignalEnginePureMmInv = signalEngineResultInv?.signalEngineOverride && signalEngineResultInv?.mode === MmMode.PURE_MM;
 
     const inventoryDeviation = actualSkew - targetInventoryBias
@@ -7336,7 +7411,7 @@ class HyperliquidMMBot {
 
     // 🛑 FOLLOW SM DIRECTION: Block counter-SM side, hold aligned position for TP
     // Bot autonomously decides SHORT or LONG based on SM data
-    const signalEngineResultFso = getAutoEmergencyOverrideSync(pair);
+    const signalEngineResultFso = getSignalEngineForPair(pair);
     const isSignalEnginePureMmFso = signalEngineResultFso?.signalEngineOverride && signalEngineResultFso?.mode === MmMode.PURE_MM;
     const smDir = getSmDirection(pair);
 
@@ -7416,7 +7491,7 @@ class HyperliquidMMBot {
 
     // 🧠 SIGNAL ENGINE MASTER OVERRIDE - applies to all SM-tracked tokens
     {
-      const signalEngineResult = getAutoEmergencyOverrideSync(pair);
+      const signalEngineResult = getSignalEngineForPair(pair);
       const isPureMmMode = signalEngineResult?.signalEngineOverride && signalEngineResult?.mode === MmMode.PURE_MM;
 
       if (isPureMmMode) {

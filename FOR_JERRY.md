@@ -28,6 +28,7 @@
 20. [LIT Vesting — anatomia Nansen alertu](#lit-vesting--anatomia-nansen-alertu)
 21. [Czyszczenie danych — Fasanara, Dormant Decay, Manual Boost](#czyszczenie-danych--fasanara-dormant-decay-manual-boost)
 22. [Slowniczek](#slowniczek)
+23. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
 
 ---
 
@@ -3118,3 +3119,71 @@ To jest pattern ktory warto zapamietac: **jesli cos nie wplywa na decyzje, nie p
 **10. Drugie szanse wymagaja ostrożnosci — i weryfikacji.** Selini Capital: usunięte 22.02 za spam → re-added 24.02 (fresh shorts, wyglada na directional) → **znowu reclassified jako MM** tego samego dnia (openOrders ujawnilo tight spread grids). Dalismy im druga szanse i okazalo sie ze nie zasluguja. Ale dowiedzielismy sie tego dzieki **weryfikacji orderami**, nie intuicji. **Pozycja nie rowna sie intencji. Open orders ujawniaja prawde. Zawsze weryfikuj przed zaufaniem.**
 
 **11. Jesli cos nie wplywa na decyzje, nie powinno generowac alertow.** MARKET_MAKER adresy mialy weight=0.0 — zero wplywu na sygnaly bota. Ale tracker i tak generowal alerty o ich flipach. To klasyczny szum zagluszajacy sygnal. Fix: jedna linia `if tier == 'MARKET_MAKER': continue`. **Alarm powinien wymagac akcji. Jesli nie — to nie alarm, to spam.**
+
+---
+
+## Rozdzielenie bota — PURE_MM vs SM_FOLLOWER (BOT_MODE)
+
+### Problem: jeden pracownik, dwa zawody
+
+Wyobraz sobie, ze masz jednego czlowieka ktory jest jednoczesnie cierpliwym sklepikarzem (ustawia ceny kupna i sprzedazy, lapie spread) **i** agresywnym snajperem (podaza za Smart Money, trzyma pozycje tygodniami na Diamond Hands). Gdy snajper dostanie rozkaz "TRZYMAJ SHORT!", sklepikarz tez go slyszy i przestaje normalnie handlowac. Jeden crash restartuje obu. Logi sa pomieszane. Debugowanie to koszmar.
+
+To jest dokladnie to co mielismy — jeden monolit `mm_hl.ts` obslugiwal oba tryby z dziesiatkami `if (isPureMm)` / `if (isFollowSm)` branchy.
+
+### Rozwiazanie: Feature Flag, nie Fork
+
+Kluczowa decyzja architektoniczna: **nie skopiowalismy pliku**. Moglibyśmy stworzyc `mm_hl_pure.ts` i `mm_hl_follower.ts` — ale to oznaczaloby dwa pliki po 8000+ linii, gdzie kazda zmiana musi byc robiona w obu. Koszmar utrzymania.
+
+Zamiast tego: jedna flaga `BOT_MODE` w zmiennych srodowiskowych, kilka warunkowych branchow w kodzie, i PM2 uruchamia dwa procesy z tego samego pliku:
+
+```
+mm_hl.ts (jeden plik)
+    │
+    ├── BOT_MODE=PURE_MM     → mm-pure    (kPEPE, port 8083)
+    ├── BOT_MODE=SM_FOLLOWER → mm-follower (BTC/ETH/SOL/HYPE/FARTCOIN, port 8082)
+    └── BOT_MODE=UNIFIED     → stare zachowanie (backwards compatible)
+```
+
+**Zasada:** Jesli masz <10% roznic miedzy wariantami, uzyj flagi. Jesli >50%, rozważ fork. My mielismy ~5% roznic.
+
+### Wrapper Pattern — jedno miejsce kontroli
+
+W grid pipeline jest 4 miejsca gdzie bot pyta "co mi kaze SignalEngine?":
+```typescript
+const signalEngineResultPause = getAutoEmergencyOverrideSync(pair)  // pause check
+const signalEngineResultInv = getAutoEmergencyOverrideSync(pair)    // inventory
+const signalEngineResultFso = getAutoEmergencyOverrideSync(pair)    // force short only
+const signalEngineResult = getAutoEmergencyOverrideSync(pair)       // regime permissions
+```
+
+Moglibyśmy dodac `if (IS_PURE_MM_BOT)` w kazdym z nich. Ale to 4 identyczne bloki kodu — latwo o bug gdy zmienisz jeden a zapomnisz o pozostalych.
+
+Zamiast tego: **jeden wrapper** `getSignalEngineForPair()`:
+```typescript
+function getSignalEngineForPair(pair: string) {
+  if (IS_PURE_MM_BOT) {
+    return { mode: MmMode.PURE_MM, bidMultiplier: 1.0, askMultiplier: 1.0, ... }
+  }
+  return getAutoEmergencyOverrideSync(pair)  // delegacja do oryginalu
+}
+```
+
+Jedna funkcja, jedna logika, jeden punkt kontroli. Gdybysmy chcieli dodac trzeci tryb — zmieniamy tylko wrapper.
+
+### Overlap Prevention — trust but verify
+
+Dwa procesy dziela ten sam vault na Hyperliquid. Jesli oba zaczna handlowac tym samym pairem — chaos (podwojne ordery, conflicting pozycje). Prosty mechanizm koordynacji:
+
+Kazdy bot zapisuje swoje aktywne pary do `/tmp/mm_active_pairs_<mode>.json`. Przy kazdej iteracji mainLoop sprawdza plik drugiego bota — jesli wykryje overlap, usuwa zduplikowane pary ze swojej listy.
+
+Nie wymaga bazy danych, IPC, czy lockfile — plik JSON w `/tmp` wystarczy.
+
+### Backwards Compatibility
+
+`BOT_MODE` nie ustawiony = `UNIFIED` = identyczne zachowanie jak przed zmianami. To krytyczne — jesli cos pojdzie nie tak, mozesz wrocic do starego monolitu bez zmian w kodzie.
+
+### Lekcja: rozdzielaj odpowiedzialnosci wczesnie
+
+Gdybysmy od poczatku zaprojektowali bota z myśla o dwoch trybach, mielibysmy czyste interfejsy. Zamiast tego musielismy "operowac na otwartym sercu" — dodawac flagi do dzialajacego systemu produkcyjnego. To dzialalo, ale byloby latwiejsze gdybysmy pomysleli o tym wczesniej.
+
+**Zasada dobrej inzynierii:** Gdy widzisz ze jeden modul robi dwie fundamentalnie rozne rzeczy — rozdziel go zanim stanie sie zbyt skomplikowany. Im dluzej czekasz, tym wiecej branchy i wyjatkow musisz ogarniać.

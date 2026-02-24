@@ -1,22 +1,53 @@
 module.exports = {
-  apps: [{
-    name: "hyperliquid-mm",
-    cwd: "/root/hyperliquid-mm-bot-complete",
-    script: "src/mm_hl.ts",
-    interpreter: "node",
-    interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=512",
-    env: { 
-      NODE_OPTIONS: "--max-old-space-size=512",
-      TS_NODE_TRANSPILE_ONLY: "1",
-      TS_NODE_IGNORE: "false"
+  apps: [
+    {
+      name: "mm-follower",
+      cwd: "/root/hyperliquid-mm-bot-complete",
+      script: "src/mm_hl.ts",
+      interpreter: "node",
+      interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=512",
+      env: {
+        NODE_OPTIONS: "--max-old-space-size=512",
+        TS_NODE_TRANSPILE_ONLY: "1",
+        TS_NODE_IGNORE: "false",
+        BOT_MODE: "SM_FOLLOWER",
+        SM_ONLY_PAIRS: "BTC,ETH,SOL,HYPE,FARTCOIN",
+        TELEMETRY_PORT: "8082",
+      },
+      max_memory_restart: "400M",
+      kill_timeout: 120000,
+      listen_timeout: 120000,
+      restart_delay: 3000,
+      exp_backoff_restart_delay: 3000,
+      max_restarts: 10,
+      min_uptime: 10000,
+      autorestart: true,
     },
-    max_memory_restart: "400M",
-    kill_timeout: 120000,
-    listen_timeout: 120000,
-    restart_delay: 3000,
-    exp_backoff_restart_delay: 3000,
-    max_restarts: 10,
-    min_uptime: 10000,
-    autorestart: true
-  }]
+    {
+      name: "mm-pure",
+      cwd: "/root/hyperliquid-mm-bot-complete",
+      script: "src/mm_hl.ts",
+      interpreter: "node",
+      interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=384",
+      env: {
+        NODE_OPTIONS: "--max-old-space-size=384",
+        TS_NODE_TRANSPILE_ONLY: "1",
+        TS_NODE_IGNORE: "false",
+        BOT_MODE: "PURE_MM",
+        MM_ONLY_PAIRS: "kPEPE",
+        FORCE_MM_PAIRS: "kPEPE",
+        ROTATION_MODE: "manual",
+        MANUAL_ACTIVE_PAIRS: "kPEPE",
+        TELEMETRY_PORT: "8083",
+      },
+      max_memory_restart: "300M",
+      kill_timeout: 120000,
+      listen_timeout: 120000,
+      restart_delay: 3000,
+      exp_backoff_restart_delay: 3000,
+      max_restarts: 10,
+      min_uptime: 10000,
+      autorestart: true,
+    }
+  ]
 }
