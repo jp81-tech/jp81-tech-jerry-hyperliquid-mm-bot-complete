@@ -1129,20 +1129,20 @@ WHALES = {
     "0x39475d17bcd20adc540e647dae6781b153fbf3b1": {
         "name": "Selini Capital #1",
         "emoji": "🏦",
-        "tier": "FUND",
-        "signal_weight": 0.40,
-        "nansen_label": "Fund",
+        "tier": "MARKET_MAKER",
+        "signal_weight": 0.0,
+        "nansen_label": "Market Maker",
         "min_change": 0.10,
-        "notes": "Selini Capital — known quant fund. BTC SHORT $3.4M (53.6 BTC, entry $62,940, 20x cross). Fresh short opened 24.02. Previously removed as MM (22.02) — re-added because this is directional, not hedging. Low weight because MM history. Watch for quick flip = revert to 0.0."
+        "notes": "Selini Capital — known quant fund running MM grids. RECLASSIFIED 24.02: tight spread MM grid ($60-100 spread) confirmed via openOrders API. Not directional — pure market making. Previously FUND 0.40 (24.02), originally removed as MM spam (22.02)."
     },
     "0x621c5551678189b9a6c94d929924c225ff1d63ab": {
         "name": "Selini Capital #2",
         "emoji": "🏦",
-        "tier": "FUND",
-        "signal_weight": 0.40,
-        "nansen_label": "Fund",
+        "tier": "MARKET_MAKER",
+        "signal_weight": 0.0,
+        "nansen_label": "Market Maker",
         "min_change": 0.10,
-        "notes": "Selini Capital second account. BTC SHORT $1.3M (20.1 BTC, entry $62,949, 20x cross). Fresh short opened 24.02. Same caveat as #1 — directional now, but could flip anytime."
+        "notes": "Selini Capital second account. RECLASSIFIED 24.02: tight spread MM grid ($57 spread) confirmed via openOrders API. Same as #1 — pure market making, not directional."
     },
 
     # --- Contrarian tracker (24.02) ---
@@ -1635,6 +1635,10 @@ def detect_changes(current: dict, previous: dict) -> list:
     changes = []
 
     for address, whale_info in WHALES.items():
+        # Skip MARKET_MAKER tier — no alerts for MMs (they flip constantly, noise)
+        if whale_info.get('tier') == 'MARKET_MAKER':
+            continue
+
         addr_lower = address.lower()
         curr_data = current.get(addr_lower, {})
         prev_data = previous.get(addr_lower, {})
