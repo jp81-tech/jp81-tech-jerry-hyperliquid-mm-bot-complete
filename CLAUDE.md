@@ -61,20 +61,22 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `nansen_label`: Fund → Market Maker
 - **Efekt:** `final_weight = 0.0` → kompletnie wyłączony z agregatu. Usunięcie ~$64M phantom SHORT.
 
-**B) Dormant Decay — obniżanie wagi stałych pozycji:**
+**B) PnL-aware Dormant Decay (updated 24.02):**
 - Nowy plik aktywności: `/tmp/whale_activity.json` (`{address: last_change_epoch}`)
 - `load_activity()` / `save_activity()` helpers
 - Update w `run_tracker()`: po `detect_changes()`, porównuje current vs previous pozycje per adres, aktualizuje timestamps
+- **PnL-aware logic**: dormant + profitable = diamond hands (full weight), dormant + losing = stale (decay)
 - Decay w `aggregate_sm_positions()`:
 
-| Dni bez zmian | Decay factor | Przykład |
-|---------------|-------------|----------|
-| 0-7 | 1.0 (full) | Generał, Major — aktywni |
-| 7-14 | 0.50 | Kapitan 99b1 |
-| 14-21 | 0.25 | Kraken A, SOL2, Kraken B |
-| 21+ | 0.10 | Kapitan BTC |
+| Warunek | Factor | Log | Przykład |
+|---------|--------|-----|----------|
+| Dormant >7d + uPnL > 0 | **1.0** | `💎 [DIAMOND_HANDS]` | Kapitan BTC (21d, +$14.8M), Kraken A (15d, +$12.8M) |
+| Dormant 7-14d + uPnL <= 0 | 0.50 | `💤 [DORMANT]` | — |
+| Dormant 14-21d + uPnL <= 0 | 0.25 | `💤 [DORMANT]` | ZEC Conviction (14d, -$3.8M), Arrington XRP (18d, -$402K) |
+| Dormant 21d+ + uPnL <= 0 | 0.10 | `💤 [DORMANT]` | — |
+| Active (0-7d) | 1.0 | — | Generał, Major |
 
-- Logi: `💤 [DORMANT] {name}: {days}d inactive → weight ×{factor}`
+- **Diamond Hands Hall of Fame (7 addresses, +$44M uPnL):** Kapitan BTC, Kraken A, Kapitan feec, Porucznik SOL2, Abraxas Capital, Kraken B, Kapitan 99b1
 - Pierwszy run po deploy ustawia `now_epoch` dla wszystkich (baseline). Decay startuje od kolejnych runów.
 
 **C) Manual Trader Boost:**
@@ -1898,5 +1900,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **VIP Flash Override (24.02)**: Czyta `/tmp/vip_spy_state.json` po `analyzeTokenSm()`. VIP (signalWeight >= 0.90) z pozycją >= $50K disagrees z directional mode → downgrade do PURE_MM. Nie flip — za agresywne. Logi: `🕵️ [VIP_FLASH]`. Stałe: `VIP_FLASH_MIN_WEIGHT=0.90`, `VIP_FLASH_MIN_POSITION_USD=50000`.
 - **LIT Vesting (24.02)**: $17.5M unlock z `Lighter: LIT Distributor` → Lightspeed Fund VC + Token Millionaires. Nie organiczny popyt. Dominacja Lighter 60%→8.1%. Cena ATH $3+ → $1.35. Buyback program $30-40M (bullish long-term).
 - **VIP Classification (24.02)**: 6 ALGO BOT (Generał, Wice-Generał, Major, Laurent Zeimes, Abraxas, donkstrategy), 4 MM BOT (Fasanara 100% maker, SOL3, 0x880ac4, BTC/LIT Trader), 1 TAKER (58bro.eth), 2 MANUAL (OG Shorter, Kapitan fce0), 9 DORMANT ($66.7M stale positions), 4 EMPTY. CLOID = custom order ID = programmatic trading.
-- **Dormant Decay (24.02)**: `/tmp/whale_activity.json` tracks last position change per address. `aggregate_sm_positions()` applies decay: 0-7d=1.0, 7-14d=0.50, 14-21d=0.25, 21d+=0.10. Pierwszy run ustawia baseline — decay zaczyna działać od 2. runu. Logi `💤 [DORMANT]`.
+- **Dormant Decay (24.02, updated)**: PnL-aware — dormant + profitable = `💎 [DIAMOND_HANDS]` (full weight), dormant + losing = `💤 [DORMANT]` (decay: 7-14d=0.50, 14-21d=0.25, 21d+=0.10). `/tmp/whale_activity.json` tracks last change per address. 7 diamond hands addresses (+$44M uPnL) keep full weight: Kapitan BTC, Kraken A, Kapitan feec, Porucznik SOL2, Abraxas Capital, Kraken B, Kapitan 99b1. Only stale losers (ZEC Conviction -$3.8M, Arrington XRP -$402K) get decayed.
 - **Manual Trader Boost (24.02)**: OG Shorter upgraded: ACTIVE→CONVICTION, weight 0.65→0.85, nansen_label "All Time Smart Trader" → finalWeight 0.13→0.81 (6x). Kapitan fce0: weight 0.80→0.85 → finalWeight 0.80→0.85. MANUAL traderzy (2 fills/7d) mają najwyższy conviction — rzadko tradują ale z ogromną dokładnością.

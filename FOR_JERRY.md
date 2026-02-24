@@ -2855,32 +2855,49 @@ for address in WHALES.keys():
         activity[addr] = now_epoch  # Ten adres jest aktywny!
 ```
 
-**3. Decay w `aggregate_sm_positions()`**:
-```python
-days_since_change = (now - activity.get(address, now)) / 86400
+**3. PnL-aware Decay w `aggregate_sm_positions()`** (updated):
 
-if days_since_change > 21:   dormant_factor = 0.10
-elif days_since_change > 14: dormant_factor = 0.25
-elif days_since_change > 7:  dormant_factor = 0.50
-else:                        dormant_factor = 1.0
+Pierwsza wersja decay byla slepa — kazdego dormant karano jednakowo. Ale analiza danych pokazala cos zaskakujacego: **dormant adresy mialy NAJLEPSZY timing**. Ktos kto shortnal BTC przy $106K i trzyma od 21 dni z +$14.8M uPnL to nie "zombie" — to **diamond hands**.
+
+```python
+addr_total_upnl = sum(p.get('unrealized_pnl', 0) for p in positions)
+
+if days_since_change > 7 and addr_total_upnl > 0:
+    # 💎 Diamond Hands: profitable hold = conviction, not dormancy
+    dormant_factor = 1.0
+elif days_since_change > 21:   dormant_factor = 0.10  # Stale loser
+elif days_since_change > 14:   dormant_factor = 0.25
+elif days_since_change > 7:    dormant_factor = 0.50
+else:                          dormant_factor = 1.0
 
 final_weight = signal_weight * credibility * dormant_factor
 ```
 
+**Kluczowa roznica:** Jesli trzymasz pozycje i zarabiasz — pelna waga. Jesli trzymasz i tracisz — decay.
+
 **Sprytny detal — pierwszy run:** Przy pierwszym uruchomieniu nie ma jeszcze historii aktywnosci. Zamiast karać wszystkich jako "dormant", inicjalizujemy kazdy adres z biezacym czasem (`now_epoch`). Dopiero NASTEPNE runy zaczynaja wykrywac kto jest aktywny a kto nie. To "graceful degradation" — system zaczyna ostroznie i stopniowo uczy sie prawdy.
 
-**Kogo to dotyczy:**
+**💎 Diamond Hands Hall of Fame (7 adresow, +$44M uPnL):**
 
-| Trader | Dni bez zmian | Decay | Wplyw |
-|--------|---------------|-------|-------|
-| Kapitan BTC | 21d | ×0.10 | $20.3M → liczy sie jak $2M |
-| Kraken A | 15d | ×0.25 | $14.2M → liczy sie jak $3.6M |
-| Porucznik SOL2 | 16d | ×0.25 | $6.9M → liczy sie jak $1.7M |
-| Kraken B | 18d | ×0.25 | $1.4M → liczy sie jak $350K |
-| Kapitan 99b1 | 15d | ×0.50 | $1.2M → liczy sie jak $600K |
-| **Razem** | | | **$66.7M → ~$10M** |
+| Trader | Dni dormant | Pozycja | uPnL | PnL% | Status |
+|--------|------------|---------|------|------|--------|
+| Kapitan BTC | 21d | $35.1M SHORT | **+$14.8M** | 41.8% | 💎 full weight |
+| Kraken A | 15d | $26.9M SHORT | **+$12.8M** | 47.2% | 💎 full weight |
+| Kapitan feec | 15d | $22.0M SHORT | **+$8.3M** | 37.3% | 💎 full weight |
+| Porucznik SOL2 | 16d | $11.8M SHORT | **+$4.9M** | 41.3% | 💎 full weight |
+| Abraxas Capital | 18d | $7.2M SHORT | **+$2.1M** | 29.1% | 💎 full weight |
+| Kraken B | 18d | $2.5M SHORT | **+$1.0M** | 41.6% | 💎 full weight |
+| Kapitan 99b1 | 15d | $1.5M SHORT | **+$338K** | 21.5% | 💎 full weight |
 
-Logi: `💤 [DORMANT] Kapitan BTC: 21d inactive → weight ×0.10`
+**💤 Stale losers (decay):**
+
+| Trader | Dni dormant | uPnL | Decay |
+|--------|------------|------|-------|
+| ZEC Conviction | 14d | **-$3.8M** | ×0.25 |
+| Arrington XRP | 18d | **-$402K** | ×0.25 |
+
+Logi: `💎 [DIAMOND_HANDS] Kapitan BTC: 21d holding, +$14,775,492 uPnL → full weight`
+Logi: `💤 [DORMANT] ZEC Conviction: 14d inactive, $-3,782,011 uPnL → weight ×0.25`
 
 ### Fix C: Manual Trader Boost — cisza to nie slabość
 
@@ -2926,26 +2943,34 @@ W tradingu: bot moze miec 1000 filli ktore na koniec dnia netto = zero. Manual t
 
 ```
 PRZED:
-  Fasanara:      0.85 × 0.90 = 0.765 (phantom MM signal)
-  9 dormant:     pelna waga ($66.7M stale positions)
-  OG Shorter:    0.65 × 0.20 = 0.130 (niewidoczny)
+  Fasanara:        0.85 × 0.90 = 0.765 (phantom MM signal)
+  9 dormant:       pelna waga ($66.7M stale positions)
+  OG Shorter:      0.65 × 0.20 = 0.130 (niewidoczny)
 
-PO:
-  Fasanara:      0.0 (wyłączony — nie jest traderem)
-  9 dormant:     ×0.10 do ×0.50 (~$10M zamiast $66.7M)
-  OG Shorter:    0.85 × 0.95 = 0.808 (6x glosniejszy)
+PO (wersja 1 — slepa):
+  Fasanara:        0.0 (wyłączony)
+  9 dormant:       ×0.10 do ×0.50 (~$10M) ← ALE karano diamond hands!
+  OG Shorter:      0.85 × 0.95 = 0.808 (6x glosniejszy)
+
+PO (wersja 2 — PnL-aware):
+  Fasanara:        0.0 (wyłączony — nie jest traderem)
+  7 diamond hands: 💎 pelna waga ($110M, +$44M uPnL — najlepszy timing!)
+  2 stale losers:  💤 ×0.25 (ZEC -$3.8M, Arrington -$402K)
+  OG Shorter:      0.85 × 0.95 = 0.808 (6x glosniejszy)
 ```
 
-SM agregat jest teraz **czystszy** — mniej szumu od market makerow i zombie pozycji, wiecej sygnalu od ludzi ktorzy naprawde wiedza co robia.
+SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (trzyma i traci) od "diamond hands" (trzyma i zarabia). Ktos kto shortnal BTC przy $106K i siedzi na +$14.8M to nie zombie — to geniusz.
 
 ### Lekcje
 
 **1. Garbage in, garbage out — nawet w "prostych" systemach.** Nasz system wazenia (signal_weight × credibility) jest elegancki. Ale jesli karmisz go bledna klasyfikacja (Fasanara = Fund zamiast MM) albo brakujacymi danymi (OG Shorter bez nansen_label), to nawet najlepszy algorytm da zle wyniki. **Audyt danych jest wazniejszy niz ulepszanie algorytmu.**
 
-**2. Nie usuwaj — degraduj.** Dormant decay nie kasuje adresow. Obniza im glos. Jesli dormant trader nagle ozyje i zmieni pozycje — jego timestamp sie zaktualizuje i wroci do pelnej wagi. System jest **samoleczący** — nie wymaga recznej interwencji.
+**2. Nie usuwaj — degraduj. Ale degraduj MADRZEJ.** Pierwsza wersja dormant decay slepо karale wszystkich dormant adresow. Ale dane pokazaly ze dormant + profitable = diamond hands (najlepszy timing w calym trackerze!). Dopiero druga iteracja (PnL-aware) poprawnie rozroznia "trzyma i zarabia" (pelna waga) od "trzyma i traci" (decay). **Pierwsza implementacja rzadko jest idealna — iteruj na podstawie danych, nie intuicji.**
 
-**3. Activeness ≠ Importance.** Bot z 2000 fillami dziennie nie jest wazniejszy od czlowieka z 2 fillami tygodniowo. Czestotliwosc tradingu to nie signal quality. Najcenniejsi traderzy w naszym systemie (OG Shorter, Kapitan fce0) traduja najrzadziej ale z najwieksza precyzja.
+**3. Activeness ≠ Importance.** Bot z 2000 fillami dziennie nie jest wazniejszy od czlowieka z 2 fillami tygodniowo. Czestotliwosc tradingu to nie signal quality. Najcenniejsi traderzy w naszym systemie (OG Shorter, Kapitan fce0) traduja najrzadziej ale z najwieksza precyzja. To samo z dormant holders — Kapitan BTC nie ruszyl pozycji 21 dni i ma +$14.8M profit. Czasem najlepsza decyzja to **nie robic nic**.
 
 **4. Jeden plik, trzy fixy.** Cala ta zmiana dotyczy jednego pliku (`whale_tracker.py`). Fasanara to 3 pola, dormant decay to ~35 linii kodu, manual boost to 4 pola. Lacznie <50 linii zmian, ale efekt na jakosc sygnalu jest ogromny. **Najlepsze fixy to czesto te najkrotsze.**
 
 **5. First run graceful degradation.** Dormant decay ustawia baseline przy pierwszym uruchomieniu zamiast panikować ze nie ma danych. Dobry pattern: zawsze zakładaj ze system moze sie uruchomic bez historii i stopniowo buduj wiedze.
+
+**6. Diamond Hands to prawdziwa strategia.** 7 adresow ktore shortowaly i nie ruszaly pozycji przez 2-3 tygodnie maja lacznie +$44M uPnL. To nie jest lenistwo — to CONVICTION. W swiecie gdzie 99% traderow robi overtrading, ktos kto wchodzi i czeka jest statystycznie lepszy. Nasz system teraz to rozumie — `💎 [DIAMOND_HANDS]` to nie ozdoba, to informacja ze ten trader wie co robi.
