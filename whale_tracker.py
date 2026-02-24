@@ -37,6 +37,7 @@ HOURLY_HISTORY_FILE = CACHE_DIR / "hourly_history.json"  # 24h granular history 
 BOT_DATA_FILE = Path("/tmp/smart_money_data.json")
 BOT_BIAS_FILE = Path("/tmp/nansen_bias.json")
 WHALE_ACTIVITY_FILE = Path("/tmp/whale_activity.json")
+SHORT_EXIT_LOG_FILE = Path("/tmp/short_exit_log.json")
 
 # Bottom detection settings
 HOURLY_HISTORY_HOURS = 48  # Keep 48 hours of hourly data
@@ -1832,6 +1833,61 @@ def send_short_exit_alerts(changes: list, current: dict):
 
     send_telegram(msg)
     print(f"[SHORT EXIT ALERT] {len(short_exits)} exits, ${total_closed:,.0f} closed")
+
+    # Append to cumulative log for analysis & daily reports
+    _append_short_exit_log(short_exits, sm_shorts_remaining, total_closed)
+
+
+def _append_short_exit_log(short_exits: list, sm_shorts_remaining: dict, total_closed: float):
+    """Append SHORT EXIT events to cumulative log file for daily reports and on-demand analysis."""
+    from datetime import datetime
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Load existing log
+    try:
+        with open(SHORT_EXIT_LOG_FILE, 'r') as f:
+            log = json.load(f)
+    except:
+        log = []
+
+    entry = {
+        'timestamp': now,
+        'total_closed_usd': total_closed,
+        'exits': [],
+        'sm_shorts_snapshot': {}
+    }
+
+    for se in short_exits:
+        coin = se['coin']
+        remaining = sm_shorts_remaining.get(coin, {'count': 0, 'value': 0})
+        entry['exits'].append({
+            'whale': se['whale'],
+            'coin': coin,
+            'action': se['action'],
+            'closed_usd': se['closed_usd'],
+            'remaining_usd': se['remaining_usd'],
+            'pct_closed': se['pct_closed'],
+            'sm_remaining_count': remaining['count'],
+            'sm_remaining_value': remaining['value']
+        })
+
+    # Snapshot of total SM shorts per coin at this moment
+    for coin, data in sm_shorts_remaining.items():
+        entry['sm_shorts_snapshot'][coin] = {
+            'count': data['count'],
+            'value_usd': data['value']
+        }
+
+    log.append(entry)
+
+    # Keep last 30 days (max ~3000 entries at 4/hour)
+    if len(log) > 3000:
+        log = log[-3000:]
+
+    with open(SHORT_EXIT_LOG_FILE, 'w') as f:
+        json.dump(log, f, indent=2)
+
+    print(f"[SHORT EXIT LOG] Appended to {SHORT_EXIT_LOG_FILE} ({len(log)} entries total)")
 
 
 # ============================================================
