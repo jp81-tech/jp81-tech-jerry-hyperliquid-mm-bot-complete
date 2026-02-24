@@ -96,6 +96,19 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - **Algo Shorter d62d48** (`0xd62d484b...`): CONVICTION, weight 0.70. ALGO BOT (14,996 trades/30d). $8.6M equity, BTC SHORT $20.9M (279 BTC, entry $75.2K, +$3.4M, +778% ROI, 40x lev). Liq $92.5K. #16 BTC PnL leaderboard (+$5.1M/30d). Brak nansen_label → finalWeight 0.70×0.30 = **0.21**
 - Niski finalWeight (0.21-0.23) bo brak Nansen label — jeśli user dostarczy labele, credibility skoczy do 0.95-1.0
 
+**F) Selini Capital re-add + Contrarian tracker (24.02):**
+- Nansen live scan: Selini Capital otworzył FRESH BTC shorts @ $62,940 (24.02) — directional, nie MM behavior
+- **Selini Capital #1** (`0x39475d...`): FUND, weight 0.40, nansen_label "Fund". BTC SHORT $3.4M (53.6 BTC, 20x cross). Low weight bo MM history (usunięte 22.02 za flipping spam). Re-added bo directional.
+- **Selini Capital #2** (`0x621c55...`): FUND, weight 0.40, nansen_label "Fund". BTC SHORT $1.3M (20.1 BTC, 20x cross).
+- **Contrarian Long 015354** (`0x015354...`): WATCH, weight 0.15, nansen_label "Smart HL Perps Trader". Jedyny notable SM BTC LONG ($12M, 191 BTC, entry $65,849, 2x isolated, -$597K underwater). Negative confirmation — gdy traci, SHORT thesis potwierdzona.
+- finalWeight: Selini 0.40×0.90=**0.36**, Contrarian 0.15×1.0=**0.15**
+
+**SM Activity Snapshot (24.02, live Nansen scan):**
+- **58bro.eth REDUCING** — sold ~49 BTC ($3.1M) today @ $63K. Take profit, still 212 BTC SHORT
+- **OG Shorter c7290b REDUCED** — sold 20 BTC ($1.3M) yesterday @ $66,130. Now 76 BTC SHORT
+- **Selini Capital** — fresh entry, 2 accounts BTC SHORT $4.7M @ $62,940
+- **Only notable LONG** — 0x015354 $12M @ $65,849, 2x isolated, already -$597K
+
 **Open Orders Intelligence (24.02):**
 - Hyperliquid API `openOrders` ujawnia take-profit/re-entry levels SM traderów
 - **Consensus BTC target zone: $50,000-$53,500** (3 niezależni traderzy):
@@ -104,7 +117,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
   - October f62ede: BTC bids $51,139-$52,639 + apocalyptic alt targets (ETH $521-$1,563, SOL $21-$50)
 - Kraken B: 247 orders across ETH/SOL/XRP/HYPE/ZEC (~$9.1M)
 
-**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 53→55 adresami), `pm2 restart mm-bot`
+**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, 22 changes sent, 55→58 adresów), `pm2 restart mm-bot`
 
 ### 38. VIP Flash Override — szybsze wykrywanie flipow SM (24.02)
 
@@ -1926,3 +1939,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **October 2025 Manual Traders (24.02)**: Nansen BTC Short leaderboard cross-ref → 2 nowe adresy dodane. October Shorter f62ede (`0xf62ede...`, CONVICTION 0.80, BTC SHORT $3.5M +67%, ZEREBRO +2503%). October Shorter c1471d (`0xc1471d...`, CONVICTION 0.80, BTC SHORT $2.9M +80%, ETH +106%, SOL +75%). Oba MANUAL (nie boty), Nansen "Smart HL Perps Trader" verified. Combined +$4.7M uPnL.
 - **Nansen Leaderboard Shorters (24.02)**: Top BTC shorters z Nansen leaderboard. Mega Shorter 218a65 (`0x218a65...`, CONVICTION 0.75, MANUAL, BTC SHORT $25.6M, +186% ROI). Algo Shorter d62d48 (`0xd62d48...`, CONVICTION 0.70, ALGO BOT 15K trades/30d, BTC SHORT $20.9M, +778% ROI). Brak nansen_label → niski finalWeight (0.21-0.23). Łącznie +$6.4M uPnL, combined $46.5M SHORT exposure.
 - **Open Orders Intelligence (24.02)**: SM take-profit targets z Hyperliquid openOrders API. Consensus BTC zone: $50,000-$53,500 (58bro.eth $17.76M bids, Pulkownik $7.73M bids, October f62ede bids $51-53K). October f62ede apocalyptic alt targets: ETH $521-$1,563, SOL $21-$50.
+- **Selini Capital re-add (24.02)**: Usunięte 22.02 jako MM spam (5 kont flipping). Re-added 24.02: 2 konta z FRESH BTC shorts @ $62,940 (directional, nie MM). Weight 0.40 (low, MM history). Selini #1 (0x39475d, $3.4M SHORT), #2 (0x621c55, $1.3M SHORT). Jeśli flipną szybko → weight z powrotem na 0.0.
+- **Contrarian Long tracker (24.02)**: 0x015354 — jedyny notable SM BTC LONG ($12M, 191 BTC, entry $65,849, 2x isolated, -$597K underwater). WATCH tier, weight 0.15. Negative confirmation: gdy traci, SHORT thesis potwierdzona. nansen_label "Smart HL Perps Trader".
+- **SM Live Activity (24.02)**: 58bro.eth reduced ~49 BTC ($3.1M) @ $63K (take profit, still 212 BTC SHORT). OG Shorter reduced 20 BTC ($1.3M) @ $66,130. Selini Capital fresh entry $4.7M. ETH: 58bro $9.3M SHORT, Galaxy $6.2M (+$8.8M uPnL). Fasanara $45M ETH SHORT (MM, ignored). Abraxas +$14.1M realized ETH PnL 7d.

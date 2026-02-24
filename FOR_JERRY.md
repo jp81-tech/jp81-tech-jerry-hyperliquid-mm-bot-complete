@@ -3050,7 +3050,7 @@ Ten trader oczekuje totalnego market wipeout — ETH do $500, SOL do $20. Albo j
 ### Zaktualizowane podsumowanie
 
 ```
-PO (wersja 3 — full expansion):
+PO (wersja 4 — Selini + contrarian):
   Fasanara:          0.0 (wyłączony — nie jest traderem)
   7 diamond hands:   💎 pelna waga ($110M, +$44M uPnL)
   2 stale losers:    💤 ×0.25 (ZEC -$3.8M, Arrington -$402K)
@@ -3058,8 +3058,24 @@ PO (wersja 3 — full expansion):
   2 October traders: 0.80 × 1.0 = 0.80 (Nansen verified, +$4.7M)
   Mega Shorter:      0.75 × 0.30 = 0.225 ($25.6M BTC SHORT)
   Algo Shorter:      0.70 × 0.30 = 0.21 ($20.9M BTC SHORT)
-  Total tracked:     55 adresow
+  Selini Capital:    0.40 × 0.90 = 0.36 (×2 konta, fresh BTC SHORT $4.7M)
+  Contrarian Long:   0.15 × 1.0 = 0.15 (negative confirmation, -$597K)
+  Total tracked:     58 adresow
 ```
+
+### Fix F: Selini Capital Re-Add + Contrarian Tracker (24.02)
+
+Ciekawy zwrot akcji z Selini Capital. Dwa dni temu (22.02) usunelismy ich z trackera — 5 kont MM ktore flipowaly pozycje non-stop, generujac spam alertow. Ale dzisiaj live scan Nansen pokazal ze Selini otworzyl FRESH BTC shorts na dwoch nowych kontach @ $62,940. To nie wyglada na market making — to directional bet.
+
+**Dlaczego re-add z niskim weight (0.40)?** Bo historia uczy ostroznosci. Jesli za tydzien te konta flipna na LONG, to wiemy ze to znowu MM behavior i weight wraca do 0.0. Ale jesli trzymaja — to Selini jako znany quant fund potwierdza bearish thesis.
+
+**Contrarian tracker** to nowy koncept. Adres 0x015354 to jedyny znaczacy SM z BTC LONG ($12M, 191 BTC). Wszyscy inni sa SHORT. Dajemy mu weight 0.15 — celowo niski, bo sluzy jako **negative confirmation**. Kiedy on traci (teraz -$597K), to potwierdza ze SHORT consensus jest sluszny. Gdyby zaczal zarabiac — to early warning ze cos sie zmienia.
+
+**SM Activity Snapshot (24.02):**
+- 58bro.eth realizuje zyski — sprzedal ~49 BTC ($3.1M) dzisiaj @ $63K
+- OG Shorter c7290b zredukowal 20 BTC ($1.3M) wczoraj @ $66,130
+- Selini Capital — swiezy entry, 2 konta BTC SHORT $4.7M
+- Jedyny notable LONG (0x015354) juz -$597K underwater
 
 ### Lekcje
 
@@ -3078,3 +3094,7 @@ PO (wersja 3 — full expansion):
 **7. Cross-reference to najlepsza metoda odkrywania.** Nansen ma leaderboard "kto shortuje BTC". My mamy liste 40 adresow. Porownanie tych dwoch zrodel dalo 11 nowych kandydatow, z ktorych 2 okazali sie swietni (+$4.7M combined uPnL). To jak porownywanie list gosci na dwoch imprezach — kto jest na obu, tego warto poznac. Ale klucz to **weryfikacja** — z 11 nowych, 9 to dust/puste konta. Bez sprawdzenia equity i pozycji na Hyperliquid API, dodalibyśmy smieci do systemu. **Odkrywaj szeroko, weryfikuj wasko.**
 
 **8. Open orders to okno do przyszlosci.** Pozycje mowia co SM **robi teraz**. Ale open orders mowia co SM **planuje zrobic**. Kiedy trzech niezaleznych traderow (rozny styl, zero powiazań) ustawia bidy w tej samej strefie $50-53K na BTC, to jest consensus — nie przypadek. A kiedy jeden z nich ustawia ETH bidy na $521 i SOL na $21, to albo szaleniec, albo widzi cos czego inni nie widza. Przy +$2.4M uPnL z BTC shorta, raczej to drugie. **Nie patrz tylko na co ktos robi — patrz na co sie przygotowuje.** `openOrders` to najlepszy darmowy edge na Hyperliquid.
+
+**9. Negative confirmation jest rownie wartosciowa jak positive.** Trackujemy 57 adresow SHORT i 1 adres LONG. Ten jeden LONG (0x015354, $12M BTC @ $65,849) jest juz -$597K underwater. To nie jest "szum" — to **informacja**. Jedyny kto postawil przeciwko consensus traci pieniadze. To potwierdza ze consensus jest sluszny. W systemach tradingowych czesto skupiamy sie na "kto ma racje" i ignorujemy "kto sie myli". Ale ktos kto sie myli jest rownie informatywny — bo mowi ci czego NIE robic. **Dodawaj kontrarianow do trackera z niskim weight — ich straty sa twoim zyskiem informacyjnym.**
+
+**10. Drugie szanse wymagaja ostrożnosci.** Selini Capital zostalo usunięte 22.02 za spam. 2 dni pozniej otwieraja fresh directional shorts. Dajemy im drug szanse — ale z weight 0.40 zamiast 0.85. Jesli sie sprawdza, mozna podniesc. Jesli flipna — weight z powrotem na 0.0. To jak zatrudnianie kogos kto odszedl ze zlymi referencjami — dajesz szanse ale z krotszym smyczem. **Reputacja jest trudna do odbudowania, ale nie niemozliwa. System powinien to odzwierciedlac.**
