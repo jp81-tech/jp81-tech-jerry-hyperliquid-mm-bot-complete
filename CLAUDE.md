@@ -83,7 +83,14 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - **OG Shorter**: tier ACTIVE→CONVICTION, signal_weight 0.65→0.85, dodano `nansen_label: "All Time Smart Trader"`. Efekt: 0.13 → **0.81** (6x boost)
 - **Kapitan fce0**: signal_weight 0.80→0.85. Efekt: 0.80 → **0.85**
 
-**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 51 adresami), `pm2 restart mm-bot`
+**D) October 2025 Manual Traders — Nansen cross-reference (24.02):**
+- Cross-referenced Nansen BTC Short leaderboard z whale_tracker — znaleziono 11 nowych adresów, 2 z nich mają duże aktywne pozycje
+- **October Shorter f62ede** (`0xf62edeee...`): CONVICTION, weight 0.80, nansen_label "Smart HL Perps Trader". $769K equity, BTC SHORT $3.5M (entry $105.5K, +$2.4M, +67%), ZEREBRO +2503%, PUMP +187%. MANUAL trader (nie bot).
+- **October Shorter c1471d** (`0xc1471df3...`): CONVICTION, weight 0.80, nansen_label "Smart HL Perps Trader". $1.7M equity, BTC SHORT $2.9M (+80%), ETH SHORT $2M (+106%), SOL SHORT $1M (+75%), FARTCOIN +718%, 8+ more shorts. MANUAL trader (nie bot).
+- Oba adresy z "October 2025 BTC short cohort" — shortowali BTC przy $105-113K i trzymają od miesięcy. Combined +$4.7M uPnL.
+- finalWeight: 0.80 × 1.0 = **0.80** (Nansen-verified = credibility 1.0)
+
+**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 51→53 adresami), `pm2 restart mm-bot`
 
 ### 38. VIP Flash Override — szybsze wykrywanie flipow SM (24.02)
 
@@ -1902,3 +1909,4 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **VIP Classification (24.02)**: 6 ALGO BOT (Generał, Wice-Generał, Major, Laurent Zeimes, Abraxas, donkstrategy), 4 MM BOT (Fasanara 100% maker, SOL3, 0x880ac4, BTC/LIT Trader), 1 TAKER (58bro.eth), 2 MANUAL (OG Shorter, Kapitan fce0), 9 DORMANT ($66.7M stale positions), 4 EMPTY. CLOID = custom order ID = programmatic trading.
 - **Dormant Decay (24.02, updated)**: PnL-aware — dormant + profitable = `💎 [DIAMOND_HANDS]` (full weight), dormant + losing = `💤 [DORMANT]` (decay: 7-14d=0.50, 14-21d=0.25, 21d+=0.10). `/tmp/whale_activity.json` tracks last change per address. 7 diamond hands addresses (+$44M uPnL) keep full weight: Kapitan BTC, Kraken A, Kapitan feec, Porucznik SOL2, Abraxas Capital, Kraken B, Kapitan 99b1. Only stale losers (ZEC Conviction -$3.8M, Arrington XRP -$402K) get decayed.
 - **Manual Trader Boost (24.02)**: OG Shorter upgraded: ACTIVE→CONVICTION, weight 0.65→0.85, nansen_label "All Time Smart Trader" → finalWeight 0.13→0.81 (6x). Kapitan fce0: weight 0.80→0.85 → finalWeight 0.80→0.85. MANUAL traderzy (2 fills/7d) mają najwyższy conviction — rzadko tradują ale z ogromną dokładnością.
+- **October 2025 Manual Traders (24.02)**: Nansen BTC Short leaderboard cross-ref → 2 nowe adresy dodane. October Shorter f62ede (`0xf62ede...`, CONVICTION 0.80, BTC SHORT $3.5M +67%, ZEREBRO +2503%). October Shorter c1471d (`0xc1471d...`, CONVICTION 0.80, BTC SHORT $2.9M +80%, ETH +106%, SOL +75%). Oba MANUAL (nie boty), Nansen "Smart HL Perps Trader" verified. Combined +$4.7M uPnL.

@@ -2939,6 +2939,42 @@ W tradingu: bot moze miec 1000 filli ktore na koniec dnia netto = zero. Manual t
 
 **Kapitan fce0** tez dostal maly boost (0.80 → 0.85) — manual trader z +$6.2M, rzadko traduje, najnizsze entry BTC z Kapitanow ($90,472).
 
+### Fix D: October 2025 Manual Traders — szukanie igiel w stogu siana
+
+Po audycie istniejacych adresow przyszedl czas na **ekspansje** — czy sa traderzy ktorych nie sledzilismy a powinniśmy?
+
+**Metoda:** Cross-reference Nansen BTC Short leaderboard z naszym whale_tracker. Nansen pokazuje kto shortuje BTC — porownalismy z naszymi ~40 adresami i znalezlismy **11 nowych** adresow ktorych nie trackujemy. Z tych 11, wiekszość to dust (pare dolarow equity, porzucone konta). Ale dwa adresy okazaly sie **zlotymi strzalami**:
+
+**October Shorter f62ede** (`0xf62ede...`):
+- $769K equity, multi-asset shorter
+- BTC SHORT $3.5M (entry $105.5K, +$2.4M, **+67%**)
+- ZEREBRO SHORT **+2503%** (tak, dwa i pol tysiaca procent)
+- PUMP SHORT +187%, HYPE SHORT +17.5%
+- Nansen "Smart HL Perps Trader" — zweryfikowany
+
+**October Shorter c1471d** (`0xc1471d...`):
+- $1.7M equity, aggressive multi-asset shorter
+- BTC SHORT $2.9M (entry $113.6K, +$2.3M, **+80%**)
+- ETH SHORT $2M (+$2.1M, **+106%**)
+- SOL SHORT $1M (+$784K, **+75%**)
+- FARTCOIN SHORT **+718%**
+- Plus 8 wiecej pozycji SHORT — facet shortuje dosłownie wszystko
+- Nansen "Smart HL Perps Trader" — zweryfikowany
+
+Obaj sa **MANUAL traderzy** (nie boty) — to byla kluczowa informacja od uzytkownika. W swiecie gdzie 90% aktywnosci to algo/boty, ludzki trader ktory konsekwentnie zarabia jest najcenniejszym sygnalem.
+
+**Konfiguracja:**
+```python
+"0xf62edeee17968d4c55d1c74936d2110333342f30": {
+    "tier": "CONVICTION",
+    "signal_weight": 0.80,
+    "nansen_label": "Smart HL Perps Trader",  # credibility 1.0
+}
+# finalWeight = 0.80 × 1.0 = 0.80
+```
+
+Dlaczego 0.80 a nie 0.90? Bo to nowe adresy — jeszcze nie widzielismy ich zachowania w naszym systemie. Jesli sie sprawdza (konsekwentni, precyzyjni), mozna podniesc.
+
 ### Podsumowanie efektu
 
 ```
@@ -2946,6 +2982,7 @@ PRZED:
   Fasanara:        0.85 × 0.90 = 0.765 (phantom MM signal)
   9 dormant:       pelna waga ($66.7M stale positions)
   OG Shorter:      0.65 × 0.20 = 0.130 (niewidoczny)
+  October traders: nie trackowane (0.00)
 
 PO (wersja 1 — slepa):
   Fasanara:        0.0 (wyłączony)
@@ -2957,9 +2994,10 @@ PO (wersja 2 — PnL-aware):
   7 diamond hands: 💎 pelna waga ($110M, +$44M uPnL — najlepszy timing!)
   2 stale losers:  💤 ×0.25 (ZEC -$3.8M, Arrington -$402K)
   OG Shorter:      0.85 × 0.95 = 0.808 (6x glosniejszy)
+  2 October traders: 0.80 × 1.0 = 0.80 (nowe sygnaly, +$4.7M combined)
 ```
 
-SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (trzyma i traci) od "diamond hands" (trzyma i zarabia). Ktos kto shortnal BTC przy $106K i siedzi na +$14.8M to nie zombie — to geniusz.
+SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (trzyma i traci) od "diamond hands" (trzyma i zarabia). Ktos kto shortnal BTC przy $106K i siedzi na +$14.8M to nie zombie — to geniusz. A teraz mamy tez dwoch nowych traderow z October cohort ktorzy dokladaja ~$6.4M weighted SHORT do agregatu.
 
 ### Lekcje
 
@@ -2974,3 +3012,5 @@ SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (t
 **5. First run graceful degradation.** Dormant decay ustawia baseline przy pierwszym uruchomieniu zamiast panikować ze nie ma danych. Dobry pattern: zawsze zakładaj ze system moze sie uruchomic bez historii i stopniowo buduj wiedze.
 
 **6. Diamond Hands to prawdziwa strategia.** 7 adresow ktore shortowaly i nie ruszaly pozycji przez 2-3 tygodnie maja lacznie +$44M uPnL. To nie jest lenistwo — to CONVICTION. W swiecie gdzie 99% traderow robi overtrading, ktos kto wchodzi i czeka jest statystycznie lepszy. Nasz system teraz to rozumie — `💎 [DIAMOND_HANDS]` to nie ozdoba, to informacja ze ten trader wie co robi.
+
+**7. Cross-reference to najlepsza metoda odkrywania.** Nansen ma leaderboard "kto shortuje BTC". My mamy liste 40 adresow. Porownanie tych dwoch zrodel dalo 11 nowych kandydatow, z ktorych 2 okazali sie swietni (+$4.7M combined uPnL). To jak porownywanie list gosci na dwoch imprezach — kto jest na obu, tego warto poznac. Ale klucz to **weryfikacja** — z 11 nowych, 9 to dust/puste konta. Bez sprawdzenia equity i pozycji na Hyperliquid API, dodalibyśmy smieci do systemu. **Odkrywaj szeroko, weryfikuj wasko.**
