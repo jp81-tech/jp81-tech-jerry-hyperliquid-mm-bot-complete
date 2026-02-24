@@ -108,6 +108,7 @@ NANSEN_SM_LABELS = {
     "0x5b5d51": "Fund",  # Abraxas Capital
     "0x8def9f": "All Time Smart Trader",  # Laurent Zeimes
     "0x418aa6": "Smart HL Perps Trader",  # 58bro.eth
+    "0x7717a7": "Token Millionaire",  # Token Millionaire 7717a7 - LIT LONG, algo bot from Binance
 }
 
 def get_nansen_label(address: str) -> str:
@@ -1144,6 +1145,17 @@ WHALES = {
         "nansen_label": "Market Maker",
         "min_change": 0.10,
         "notes": "Selini Capital second account. RECLASSIFIED 24.02: tight spread MM grid ($57 spread) confirmed via openOrders API. Same as #1 — pure market making, not directional."
+    },
+
+    # --- Token Millionaire LIT Bot (added 25.02) ---
+    "0x7717a7a245d9f950e586822b8c9b46863ed7bd7e": {
+        "name": "Token Millionaire 7717a7",
+        "emoji": "🤖",
+        "tier": "ACTIVE",
+        "signal_weight": 0.60,
+        "nansen_label": "Token Millionaire",
+        "min_change": 0.05,
+        "notes": "Trading Bot. $8.1M account, LIT LONG $187K (5x cross, entry $1.4194). Algo MM/grid bot — hundreds of small fills. Funded from Binance Hot Wallet ($11.7M USDC). Added 25.02."
     },
 
     # --- Contrarian tracker (24.02) ---

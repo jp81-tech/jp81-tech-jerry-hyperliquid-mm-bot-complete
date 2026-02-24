@@ -364,6 +364,13 @@ const KNOWN_TRADERS: Record<string, KnownTrader> = {
     signalWeight: 0.72,
     notes: 'Multi-asset'
   },
+  '0x7717a7a245d9f950e586822b8c9b46863ed7bd7e': {
+    label: 'Token Millionaire 7717a7',
+    tier: TraderTier.ACTIVE,
+    flipRate: 0.10,
+    signalWeight: 0.60,
+    notes: '$8.1M account, LIT LONG $187K, algo bot from Binance'
+  },
 
   // TIER 4: MARKET MAKERS - IGNORE
   '0x091144e651b334341eabdbbbfed644ad0100023e': {

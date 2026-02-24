@@ -95,6 +95,8 @@ const WHALES: Record<string, WhaleEntry> = {
   // October 2025 BTC crash — insider suspects + active traders
   '0x880ac484a1743862989a441d6d867238c7aa311c': { name: 'Silk Capital', tier: 'ACTIVE', weight: 0.60 },
   '0x4f7634c03ec4e87e14725c84913ade523c6fad5a': { name: 'Former SM 4f7634 (WATCH)', tier: 'ACTIVE', weight: 0.10 },
+  // Token Millionaire LIT Bot (added 25.02.2026)
+  '0x7717a7a245d9f950e586822b8c9b46863ed7bd7e': { name: 'Token Millionaire 7717a7', tier: 'ACTIVE', weight: 0.60 },
 };
 
 // ============================================================
