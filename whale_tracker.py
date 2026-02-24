@@ -1104,6 +1104,22 @@ WHALES = {
         "min_change": 0.10,
         "notes": "MANUAL TRADER (nie bot). $1.7M equity, aggressive multi-asset shorter. BTC SHORT $2.9M (entry $113.6K, +$2.3M, +80%), ETH SHORT $2M (+$2.1M, +106%), SOL SHORT $1M (+$784K, +75%), FARTCOIN SHORT +718%, 8+ more short positions. Nansen-verified Smart HL Perps Trader. Added 24.02 from October 2025 BTC short cohort analysis."
     },
+    "0x218a65e21eddeece7a9df38c6bbdd89f692b7da2": {
+        "name": "Mega Shorter 218a65",
+        "emoji": "🔴",
+        "tier": "CONVICTION",
+        "signal_weight": 0.75,
+        "min_change": 0.10,
+        "notes": "MANUAL TRADER (nie bot). $3.4M equity, BTC SHORT $25.6M (358 BTC, entry $71.2K, +$3M, +186% ROI, 14x lev). Funded from Coinbase — individual trader. Liq $71.6K (tight! relies on $5.8M DeFi collateral). Added 24.02 from Nansen BTC Short leaderboard."
+    },
+    "0xd62d484bda5391d75b414e68f9ddcedb207b7d91": {
+        "name": "Algo Shorter d62d48",
+        "emoji": "🔴",
+        "tier": "CONVICTION",
+        "signal_weight": 0.70,
+        "min_change": 0.10,
+        "notes": "ALGO BOT (14,996 trades/30d). $8.6M equity, BTC SHORT $20.9M (279 BTC, entry $75.2K, +$3.4M, +778% ROI, 40x lev). Liq $92.5K (comfortable). Ranked #16 BTC PnL leaderboard (+$5.1M/30d). $10.7M DeFi collateral. Anonymous — no related addresses. Added 24.02 from Nansen BTC Short leaderboard."
+    },
 
     # ================================================================
     # ❌ TIER 4: MARKET MAKERS (signal_weight: 0.0 - IGNORE!)
