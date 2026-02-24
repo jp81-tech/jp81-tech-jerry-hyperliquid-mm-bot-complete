@@ -28,6 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
+- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
@@ -76,6 +77,47 @@ TWAP_ENABLED=true              # domyślnie false (opt-in)
 LIT_TWAP_SLICES=10             # override per-token
 LIT_TWAP_DURATION=120          # override per-token
 ```
+
+**Kompilacja:** `tsc --noEmit` — czysto (jedyny error pre-existing w mm_alert_bot.ts)
+
+### 37. Fib Guard — nie shortuj dna (24.02)
+
+**Cel:** Zmniejszyć askMultiplier gdy cena blisko Fibonacci support levels (0.618, 0.786, 1.0), RSI oversold, i duży drawdown od szczytu. SM Override: gdy SM confidence >= 70% i aktywnie shortują → FibGuard off.
+
+**Pliki:**
+- `src/config/short_only_config.ts` — `FibGuardConfig` interface, defaults, per-token overrides, getter
+- `src/mm_hl.ts` — import `getFibGuardConfig`, integracja w grid pipeline (po bounce filter, przed dip filter)
+
+**Logika:**
+```
+guardScore = fibProximity × 0.50 + rsiScore × 0.25 + drawdownScore × 0.25
+
+fibProximity: odległość ceny od Fib 0.618/0.786/1.0 (1.0 = na poziomie)
+rsiScore:     pseudo-RSI z change1h/change4h (1.0 = oversold)
+drawdownScore: spadek od high24h (1.0 = drawdown >= maxPct)
+
+score >= 0.7 → ask × 0.15 (STRONG)
+score >= 0.5 → ask × 0.30 (MODERATE)
+score >= 0.3 → ask × 0.50 (LIGHT)
+score <  0.3 → ask × 1.00 (bez zmian)
+```
+
+**SM Override (używa istniejącego `signalEngineResultFso`):**
+- `smConfidence >= 70%` + SHORT → guard OFF
+- `smConfidence >= 50%` + SHORT → guardScore × 0.5
+
+**Per-token overrides:**
+| Token | proximityBps | drawdownMaxPct |
+|-------|-------------|----------------|
+| BTC | 30 | 5% |
+| ETH | 35 | 6% |
+| LIT | 80 | 12% |
+| FARTCOIN | 80 | 12% |
+| Default | 50 | 8% |
+
+**Pseudo-RSI zamiast prawdziwego:** `50 + change1h×5 + change4h×2` — brak dodatkowych API calls, wystarczająco dobre dla guardu.
+
+**Logi:** `🏛️ [FIB_GUARD] PAIR: STRONG/MODERATE/LIGHT/SM OVERRIDE/SM SOFTEN`
 
 **Kompilacja:** `tsc --noEmit` — czysto (jedyny error pre-existing w mm_alert_bot.ts)
 
@@ -1606,6 +1648,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować FibGuard — logi `🏛️ [FIB_GUARD]`, czy guard aktywuje się blisko Fib support levels
+- [ ] Sprawdzić SM Override FibGuard — gdy SM confidence >= 70%, guard powinien być OFF
 - [ ] Deploy TWAP na serwer — `TWAP_ENABLED=true` w .env, `pm2 restart mm-bot`, obserwować logi `🔄 [TWAP]`
 - [ ] Monitorować TWAP slippage — porównać avg fill price vs start mid price w logach `📊 [TWAP]`
 - [ ] Sprawdzić TWAP eskalację — czy ALO→GTC→IOC działa poprawnie na illiquid coinach (LIT, FARTCOIN)
@@ -1659,6 +1703,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Nansen Spot Alerts diagnoza — zero SM activity na spot dla LIT/FARTCOIN/VIRTUAL, pipeline działa ale nic do alertowania (DONE 23.02)
 
 ## Notatki
+- **Fib Guard**: Redukuje askMultiplier blisko Fib support levels (0.618, 0.786, 1.0). Trzy sygnały: fibProximity (50%), pseudo-RSI (25%), drawdown (25%). SM Override: conf>=70% → guard OFF, conf>=50% → guard×0.5. Per-token overrides: BTC/ETH tighter, LIT/FARTCOIN wider. Pipeline: po bounce filter, przed dip filter. Config w `short_only_config.ts`. Logi: `🏛️ [FIB_GUARD]`.
 - **TWAP Executor**: `TWAP_ENABLED=true` w .env włącza TWAP. Domyślnie wyłączony. `closePositionTwap()` fallbackuje na stary IOC gdy TWAP niedostępny. Per-token override: `${PAIR}_TWAP_SLICES`, `${PAIR}_TWAP_DURATION`. Logi: `🔄 [TWAP]`, `📤 [TWAP]`, `✅ [TWAP]`, `📊 [TWAP]`. TWAP NIE dotyczy kPEPE hedge ani HOLD_FOR_TP — tylko rotation cleanup i manual close.
 - `whale_tracker.py` w cronie co 15 min (od 22.02)
 - `vip_spy.py` działa jako PM2 process `vip-spy` (polling co 30s)
