@@ -26,7 +26,8 @@
 18. [Fib Guard — nie shortuj dna](#fib-guard--nie-shortuj-dna)
 19. [VIP Flash Override — szpieg ratuje sytuacje](#vip-flash-override--szpieg-ratuje-sytuacje)
 20. [LIT Vesting — anatomia Nansen alertu](#lit-vesting--anatomia-nansen-alertu)
-21. [Slowniczek](#slowniczek)
+21. [Czyszczenie danych — Fasanara, Dormant Decay, Manual Boost](#czyszczenie-danych--fasanara-dormant-decay-manual-boost)
+22. [Slowniczek](#slowniczek)
 
 ---
 
@@ -2753,3 +2754,198 @@ FibGuard siedzi miedzy Bounce Filter a Dip Filter. Logika: Bounce Filter mowi "n
 **3. Kazdy filtr to warstwa obrony.** Bounce Filter, FibGuard, Dip Filter — kazdy chroni przed innym bledem. Razem tworza defense-in-depth. Zaden filtr nie jest idealny, ale razem pokrywaja wiekszosc scenariuszy.
 
 **4. Taki sam pattern = mniej bugow.** FibGuard uzywa dokladnie tego samego wzorca co BounceFilter: config interface → defaults → overrides → getter → if block w pipeline. Kazdy nowy filtr dodaje ~100 linii ale nie zmienia architektury. Developer za rok zrozumie go natychmiast bo wygada jak kazdy inny filtr.
+
+---
+
+## Czyszczenie danych — Fasanara, Dormant Decay, Manual Boost
+
+> "Garbage in, garbage out. Nie ma znaczenia jak genialny jest twoj algorytm, jezeli karmisz go smieciowymi danymi."
+
+### Problem: Audyt ujawnil trzy trucizny w danych
+
+Wyobraz sobie, ze masz 22 agentow w terenie i zbierasz ich raporty zeby zdecydowac co robic. Brzmi rozsadnie. Ale co jesli:
+
+1. **Jeden z nich to podwojny agent** — Fasanara Capital. Raportuje "SHORT $83.9M!" ale tak naprawde to market maker. Jego shorty to hedges (zabezpieczenia), nie zaklady na spadki. To tak jakby szpieg raportujacy pozycje wroga okazal sie sprzedawca hot-dogow ktory stoi obok kazdej armii.
+
+2. **9 agentow zasneło w terenie** — nie ruszyli sie od 7 do 21 dni. Kapitan BTC trzyma $20.3M SHORT od 3 tygodni i nie zmienil ani grama. Ale tracker liczy go tak samo jak Generala ktory aktywnie traduje co 30 sekund. To jakby raport zwiadowcy z zeszlego miesiaca traktowac na rowni z raportem z dzisiejszego poranka.
+
+3. **Najcenniejszy agent ma najnizsza range** — OG Shorter ($23M pozycji, +$15.5M zysku, traduje RECZNIE z 2 fillami na tydzien) mial finalWeight=0.13. Dla porownania, Generał (bot algorytmiczny) mial 0.95. Dlaczego? Bo OG Shorter nie mial nansen_label, wiec dostal domyslna credibility 0.20. **6x niedowazony** — najlepszy czlowiek w pokoju mial najcichszy glos.
+
+### Jak to wygladalo w liczbach
+
+```
+PRZED czyszczeniem:
+  BTC SM agregat:  SHORT $153M vs LONG $0
+  → Fasanara wrzuca $24M "phantom SHORT" (to hedge, nie bet)
+  → 5 dormant adresow wrzuca $47M "stale SHORT"
+  → OG Shorter z $5M SHORT liczy sie jako $650K (weight 0.13)
+
+Prawdziwy "zywy" sentiment aktywnych traderow:
+  Duzo mniejszy SHORT consensus niz tracker pokazywal
+```
+
+### Fix A: Fasanara Capital → Market Maker (weight 0.0)
+
+To bylo proste. Audyt fills ujawnil smoking gun:
+
+| Metryka | Fasanara | Normalny trader |
+|---------|----------|-----------------|
+| Maker fills | **100%** | 0-60% |
+| CLOID (Custom Order ID) | **100%** | 0-100% |
+| Pozycje | 70+ coinow | 3-15 coinow |
+| Interpretacja | **Market maker** | Directional |
+
+100% maker fills = nigdy nie "bierze" z ksiazki zlecen, zawsze "wystawia". To definicja market makera. Ich shorty to nie "stawiam na spadki BTC", to "zapewniam plynnosc na rynku i hedguje ryzyko".
+
+**Zmiana w kodzie:**
+```python
+# PRZED:
+"tier": "FUND",
+"signal_weight": 0.85,
+"nansen_label": "Fund",
+
+# PO:
+"tier": "MARKET_MAKER",
+"signal_weight": 0.0,
+"nansen_label": "Market Maker",
+```
+
+`final_weight = 0.0 * 0.0 = 0.0` → linia `if final_weight == 0: continue` → Fasanara kompletnie znika z agregatu. ~$64M phantom SHORT usuniete jednym ruchem.
+
+**Lekcja:** Nie kazdy kto ma duza pozycje jest directional traderem. Market makerzy to "infrastruktura" rynku — musza miec pozycje po obu stronach zeby dzialac. Ich SHORT to nie bearish signal, to koszt prowadzenia biznesu.
+
+### Fix B: Dormant Decay — usypiajace adresy traca glos
+
+To bardziej elegancki problem. Nie mozesz po prostu usunac dormant adresow — moze sa "set and forget" traderzy z genialna teza. Ale nie mozesz tez traktowac ich na rowni z kims kto aktywnie zarzadza pozycja.
+
+**Analogia:** Wyobraz sobie sondaz wyborczy. Pytasz 100 osob "na kogo glosujesz?". 30 z nich odpowiada "na partię X" ale dodaje "odpowiadalem to samo 3 tygodnie temu i od tego czasu nie sledzę polityki". Czy ich glos powinien liczyc sie tak samo jak kogos kto przeanalizowal program wyborczy wczoraj?
+
+**Mechanizm:**
+
+```
+                    DORMANT DECAY
+    ┌──────────────────────────────────────────┐
+    │ Dni bez zmian     Mnoznik wagi           │
+    │ ─────────────     ────────────           │
+    │ 0-7 dni           1.0 (pelna waga)       │
+    │ 7-14 dni          0.50 (polowa)          │
+    │ 14-21 dni         0.25 (cwierc)          │
+    │ 21+ dni           0.10 (prawie zero)     │
+    └──────────────────────────────────────────┘
+```
+
+**Implementacja w 3 czesciach:**
+
+**1. Activity tracker** (`/tmp/whale_activity.json`):
+```json
+{
+  "0xa31211...": 1740412800,    // Generał — zmienił pozycję 15 min temu
+  "0x71dfc0...": 1738900000,    // Kapitan BTC — ostatnia zmiana 21 dni temu
+}
+```
+
+Kazdy run whale_trackera porownuje current vs previous pozycje. Jezeli COKOLWIEK sie zmienilo (nowa pozycja, zamknieta, zmieniony rozmiar, flip) — aktualizuje timestamp na "teraz".
+
+**2. Update w `run_tracker()`** — po `detect_changes()`:
+```python
+for address in WHALES.keys():
+    curr_map = {p['coin']: (p['side'], p['position_value']) for p in current_positions}
+    prev_map = {p['coin']: (p['side'], p['position_value']) for p in previous_positions}
+    if curr_map != prev_map:
+        activity[addr] = now_epoch  # Ten adres jest aktywny!
+```
+
+**3. Decay w `aggregate_sm_positions()`**:
+```python
+days_since_change = (now - activity.get(address, now)) / 86400
+
+if days_since_change > 21:   dormant_factor = 0.10
+elif days_since_change > 14: dormant_factor = 0.25
+elif days_since_change > 7:  dormant_factor = 0.50
+else:                        dormant_factor = 1.0
+
+final_weight = signal_weight * credibility * dormant_factor
+```
+
+**Sprytny detal — pierwszy run:** Przy pierwszym uruchomieniu nie ma jeszcze historii aktywnosci. Zamiast karać wszystkich jako "dormant", inicjalizujemy kazdy adres z biezacym czasem (`now_epoch`). Dopiero NASTEPNE runy zaczynaja wykrywac kto jest aktywny a kto nie. To "graceful degradation" — system zaczyna ostroznie i stopniowo uczy sie prawdy.
+
+**Kogo to dotyczy:**
+
+| Trader | Dni bez zmian | Decay | Wplyw |
+|--------|---------------|-------|-------|
+| Kapitan BTC | 21d | ×0.10 | $20.3M → liczy sie jak $2M |
+| Kraken A | 15d | ×0.25 | $14.2M → liczy sie jak $3.6M |
+| Porucznik SOL2 | 16d | ×0.25 | $6.9M → liczy sie jak $1.7M |
+| Kraken B | 18d | ×0.25 | $1.4M → liczy sie jak $350K |
+| Kapitan 99b1 | 15d | ×0.50 | $1.2M → liczy sie jak $600K |
+| **Razem** | | | **$66.7M → ~$10M** |
+
+Logi: `💤 [DORMANT] Kapitan BTC: 21d inactive → weight ×0.10`
+
+### Fix C: Manual Trader Boost — cisza to nie slabość
+
+To moj ulubiony fix bo pokazuje jak kontraintuicyjne sa dobre dane.
+
+**OG Shorter** — facet ktory:
+- Trzyma $23M SHORT
+- Ma +$15.5M zysku
+- Traduje RECZNIE (2 fille na tydzien!)
+- Zlapal top BTC ($97K entry) i top ETH ($3,070 entry)
+- Mial `finalWeight = 0.13`
+
+**Dlaczego?** Bo braklo mu jednego pola w konfiguracji:
+
+```python
+# PRZED:
+"signal_weight": 0.65,
+# Brak nansen_label → credibility = 0.20 (Unknown)
+# 0.65 × 0.20 = 0.13
+
+# PO:
+"tier": "CONVICTION",
+"signal_weight": 0.85,
+"nansen_label": "All Time Smart Trader",  # credibility = 0.95
+# 0.85 × 0.95 = 0.8075
+```
+
+Z 0.13 na 0.81 — **6-krotny boost**. Z najcichszego glosu w pokoju do jednego z najglosniejszych.
+
+**Dlaczego manual traderzy sa tak cenni?**
+
+Pomysl o tym tak: masz pilota odrzutowca (algorytm) i masz snajpera (manual trader).
+
+Pilot lata 1,977 misji dziennie (Generał ma 1,977 filli/24h). Reaguje na sygnaly quantitative w milisekundach. Jest niesamowicie skuteczny... ale moze sie mylic systematycznie, bo jego model nie uwzglednia czegos czego nie widzi w danych.
+
+Snajper strzela 2 razy na tydzien. Ale kazdy strzal jest wynikiem GODZIN analizy — czytania newsow, rozmow z innymi traderami, intuicji zbudowanej na latach doswiadczenia. Jego trades to **pure conviction** — nie noise.
+
+W tradingu: bot moze miec 1000 filli ktore na koniec dnia netto = zero. Manual trader ma 2 fille ktore netto = +$15.5M. Kto ma wiekszą wartosc informacyjna?
+
+**Kapitan fce0** tez dostal maly boost (0.80 → 0.85) — manual trader z +$6.2M, rzadko traduje, najnizsze entry BTC z Kapitanow ($90,472).
+
+### Podsumowanie efektu
+
+```
+PRZED:
+  Fasanara:      0.85 × 0.90 = 0.765 (phantom MM signal)
+  9 dormant:     pelna waga ($66.7M stale positions)
+  OG Shorter:    0.65 × 0.20 = 0.130 (niewidoczny)
+
+PO:
+  Fasanara:      0.0 (wyłączony — nie jest traderem)
+  9 dormant:     ×0.10 do ×0.50 (~$10M zamiast $66.7M)
+  OG Shorter:    0.85 × 0.95 = 0.808 (6x glosniejszy)
+```
+
+SM agregat jest teraz **czystszy** — mniej szumu od market makerow i zombie pozycji, wiecej sygnalu od ludzi ktorzy naprawde wiedza co robia.
+
+### Lekcje
+
+**1. Garbage in, garbage out — nawet w "prostych" systemach.** Nasz system wazenia (signal_weight × credibility) jest elegancki. Ale jesli karmisz go bledna klasyfikacja (Fasanara = Fund zamiast MM) albo brakujacymi danymi (OG Shorter bez nansen_label), to nawet najlepszy algorytm da zle wyniki. **Audyt danych jest wazniejszy niz ulepszanie algorytmu.**
+
+**2. Nie usuwaj — degraduj.** Dormant decay nie kasuje adresow. Obniza im glos. Jesli dormant trader nagle ozyje i zmieni pozycje — jego timestamp sie zaktualizuje i wroci do pelnej wagi. System jest **samoleczący** — nie wymaga recznej interwencji.
+
+**3. Activeness ≠ Importance.** Bot z 2000 fillami dziennie nie jest wazniejszy od czlowieka z 2 fillami tygodniowo. Czestotliwosc tradingu to nie signal quality. Najcenniejsi traderzy w naszym systemie (OG Shorter, Kapitan fce0) traduja najrzadziej ale z najwieksza precyzja.
+
+**4. Jeden plik, trzy fixy.** Cala ta zmiana dotyczy jednego pliku (`whale_tracker.py`). Fasanara to 3 pola, dormant decay to ~35 linii kodu, manual boost to 4 pola. Lacznie <50 linii zmian, ale efekt na jakosc sygnalu jest ogromny. **Najlepsze fixy to czesto te najkrotsze.**
+
+**5. First run graceful degradation.** Dormant decay ustawia baseline przy pierwszym uruchomieniu zamiast panikować ze nie ma danych. Dobry pattern: zawsze zakładaj ze system moze sie uruchomic bez historii i stopniowo buduj wiedze.
