@@ -1227,11 +1227,11 @@ WHALES = {
     "0x880ac484a1743862989a441d6d867238c7aa311c": {
         "name": "Silk Capital",
         "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.60,
+        "tier": "CONVICTION",
+        "signal_weight": 0.75,
         "nansen_label": "Token Millionaire",  # Nansen category label; entity name = Silk Capital
         "min_change": 0.08,
-        "notes": "$5.7M equity, 23 pozycji. XMR SHORT $10.1M (+$2.9M), HYPE SHORT $9.3M (+$1.1M). Trading bot. +$33.8M Oct 2025 PnL. 🟡 OCT_CRASH: INSIDER_60% — algorytm wykrył sygnały przed crashem, mega short XMR (privacy coin)."
+        "notes": "$5.2M equity, 23 pozycji. XMR SHORT $7.6M (+$2.4M), HYPE SHORT $8.3M (+$974K), BTC SHORT $1.6M. UPGRADED 24.02: HYBRID algo fund — 97.9% maker fills (limit order discipline), 99.5% SHORT exposure, $16.7M cumulative funding paid. +$33.8M Oct 2025 PnL. Directional shorter, NOT MM."
     },
     "0x4f7634c03ec4e87e14725c84913ade523c6fad5a": {
         "name": "Former SM 4f7634 (WATCH)",
@@ -1659,11 +1659,13 @@ def detect_changes(current: dict, previous: dict) -> list:
             if curr and not prev:
                 changes.append({
                     'type': 'NEW',
+                    'address': addr_lower,
                     'whale': whale_info['name'],
                     'emoji': whale_info['emoji'],
                     'coin': coin,
                     'side': curr['side'],
                     'value': curr['position_value'],
+                    'prev_value': 0,
                     'upnl': curr['unrealized_pnl']
                 })
 
@@ -1671,11 +1673,13 @@ def detect_changes(current: dict, previous: dict) -> list:
             elif prev and not curr:
                 changes.append({
                     'type': 'CLOSED',
+                    'address': addr_lower,
                     'whale': whale_info['name'],
                     'emoji': whale_info['emoji'],
                     'coin': coin,
                     'side': prev['side'],
-                    'value': prev['position_value']
+                    'value': prev['position_value'],
+                    'prev_value': prev['position_value']
                 })
 
             # Zmiana pozycji
@@ -1689,23 +1693,27 @@ def detect_changes(current: dict, previous: dict) -> list:
                 if curr['side'] != prev['side']:
                     changes.append({
                         'type': 'FLIPPED',
+                        'address': addr_lower,
                         'whale': whale_info['name'],
                         'emoji': whale_info['emoji'],
                         'coin': coin,
                         'from': prev['side'],
                         'to': curr['side'],
-                        'value': curr['position_value']
+                        'value': curr['position_value'],
+                        'prev_value': prev['position_value']
                     })
                 # Znacząca zmiana
                 elif abs(value_change) > whale_info['min_change']:
                     changes.append({
                         'type': 'INCREASED' if value_change > 0 else 'REDUCED',
+                        'address': addr_lower,
                         'whale': whale_info['name'],
                         'emoji': whale_info['emoji'],
                         'coin': coin,
                         'side': curr['side'],
                         'change_pct': value_change,
                         'value': curr['position_value'],
+                        'prev_value': prev['position_value'],
                         'upnl': curr['unrealized_pnl']
                     })
 
@@ -1727,6 +1735,104 @@ def format_change(change: dict) -> str:
         direction = "📈" if change['type'] == 'INCREASED' else "📉"
         return f"{emoji} *{whale}* {direction} {change['side'].upper()} {coin} by {abs(change['change_pct'])*100:.0f}%\n   Value: ${change['value']:,.0f} | uPnL: ${change['upnl']:,.0f}"
     return ""
+
+
+def send_short_exit_alerts(changes: list, current: dict):
+    """
+    Dedykowany alarm na zamykanie/redukcję shortów przez SM.
+    Wysyła osobną wiadomość priorytetową gdy SM zamyka shorty.
+    Typy: CLOSED (short gone), REDUCED (short smaller), FLIPPED (short→long)
+    """
+    short_exits = []
+
+    for c in changes:
+        coin = c.get('coin', '')
+        whale = c.get('whale', '')
+        emoji = c.get('emoji', '')
+        ctype = c.get('type', '')
+
+        # CLOSED short
+        if ctype == 'CLOSED' and c.get('side', '').lower() == 'short':
+            closed_usd = c.get('prev_value', c.get('value', 0))
+            short_exits.append({
+                'whale': whale, 'emoji': emoji, 'coin': coin,
+                'action': 'ZAMKNĄŁ SHORT',
+                'closed_usd': closed_usd,
+                'remaining_usd': 0,
+                'pct_closed': 100.0
+            })
+
+        # REDUCED short (value went down = short getting smaller)
+        elif ctype == 'REDUCED' and c.get('side', '').lower() == 'short':
+            prev_val = c.get('prev_value', 0)
+            curr_val = c.get('value', 0)
+            closed_usd = prev_val - curr_val
+            pct = abs(c.get('change_pct', 0)) * 100
+            short_exits.append({
+                'whale': whale, 'emoji': emoji, 'coin': coin,
+                'action': f'REDUKUJE SHORT (-{pct:.0f}%)',
+                'closed_usd': closed_usd,
+                'remaining_usd': curr_val,
+                'pct_closed': pct
+            })
+
+        # FLIPPED from short to long
+        elif ctype == 'FLIPPED' and c.get('from', '').lower() == 'short':
+            closed_usd = c.get('prev_value', 0)
+            new_val = c.get('value', 0)
+            short_exits.append({
+                'whale': whale, 'emoji': emoji, 'coin': coin,
+                'action': f'FLIP SHORT → LONG (${new_val:,.0f})',
+                'closed_usd': closed_usd,
+                'remaining_usd': 0,
+                'pct_closed': 100.0
+            })
+
+    if not short_exits:
+        return
+
+    # Count remaining SM shorts per coin from current data
+    sm_shorts_remaining = {}
+    for address, whale_info in WHALES.items():
+        if whale_info.get('tier') == 'MARKET_MAKER':
+            continue
+        if whale_info.get('signal_weight', 0) == 0:
+            continue
+        addr_lower = address.lower()
+        positions = current.get(addr_lower, {}).get('positions', [])
+        for p in positions:
+            if p.get('coin') in TRACKED_COINS and p.get('side', '').lower() == 'short':
+                coin = p['coin']
+                if coin not in sm_shorts_remaining:
+                    sm_shorts_remaining[coin] = {'count': 0, 'value': 0}
+                sm_shorts_remaining[coin]['count'] += 1
+                sm_shorts_remaining[coin]['value'] += p.get('position_value', 0)
+
+    # Build alert message
+    msg = "🚨 *SHORT EXIT ALERT* 🚨\n\n"
+
+    for se in short_exits:
+        coin = se['coin']
+        remaining = sm_shorts_remaining.get(coin, {'count': 0, 'value': 0})
+
+        msg += f"{se['emoji']} *{se['whale']}* {se['action']} {coin}\n"
+        msg += f"   Zamknięte: ${se['closed_usd']:,.0f}"
+        if se['remaining_usd'] > 0:
+            msg += f" | Zostaje: ${se['remaining_usd']:,.0f}"
+        msg += "\n"
+        msg += f"   SM SHORT jeszcze: {remaining['count']} traderów, ${remaining['value']:,.0f}\n\n"
+
+    total_closed = sum(se['closed_usd'] for se in short_exits)
+    msg += f"💰 *Łącznie zamknięte shorty: ${total_closed:,.0f}*"
+
+    # Check if this is a mass exit (3+ traders or >$1M closed)
+    unique_whales = len(set(se['whale'] for se in short_exits))
+    if unique_whales >= 3 or total_closed >= 1_000_000:
+        msg += f"\n\n⚠️ *MASS SHORT EXIT* — {unique_whales} traderów zamyka ${total_closed:,.0f}!"
+
+    send_telegram(msg)
+    print(f"[SHORT EXIT ALERT] {len(short_exits)} exits, ${total_closed:,.0f} closed")
+
 
 # ============================================================
 # AGGREGATION FOR BOT
@@ -2071,6 +2177,9 @@ def run_tracker():
 
             send_telegram(msg)
             print(f"[ALERT] Sent {len(changes)} changes to Telegram")
+
+            # Dedykowany alarm na zamykanie shortów
+            send_short_exit_alerts(changes, current)
         else:
             print("[INFO] No significant changes detected")
     else:
