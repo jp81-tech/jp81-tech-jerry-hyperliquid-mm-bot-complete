@@ -111,6 +111,7 @@ import { sendRiskAlert, sendSystemAlert } from './utils/slack_router.js'
 import { applySpecOverrides } from './utils/spec_overrides.js'
 import { VolatilityRotation } from './utils/volatility_rotation.js'
 import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
+import { TwapExecutor, type TwapConfig } from './execution/TwapExecutor.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TYPE EXTENSIONS - Fix TypeScript errors without changing runtime
@@ -1413,6 +1414,9 @@ class LiveTrading implements TradingInterface {
   public fundingArb: FundingArbitrage = new FundingArbitrage()
   public liqShield: LiquidationShield = new LiquidationShield()
 
+  // 🔄 TWAP EXECUTOR — close positions in slices like the Generał
+  public twapExecutor: TwapExecutor | null = null  // Initialized after assetMap is ready
+
   // 🔮 SMART MONEY SHADOW TRADING MODULE
   public shadowTrading: ShadowTradingIntegration = new ShadowTradingIntegration()
   private shadowAlert: ShadowAlertIntegration | null = null
@@ -1755,6 +1759,12 @@ class LiveTrading implements TradingInterface {
     })
 
     console.log(`LiveTrading initialized: ${this.assetMap.size} assets mapped`)
+
+    // Initialize TWAP executor (if enabled)
+    if (process.env.TWAP_ENABLED === 'true') {
+      this.twapExecutor = new TwapExecutor(this.exchClient, this.infoClient, this.assetMap, this.walletAddress)
+      console.log('🔄 [TWAP] TwapExecutor initialized — positions will close in slices')
+    }
 
     // Initialize WebSocket for real-time data
     const enableWebSocket = process.env.ENABLE_WEBSOCKET === 'true'
@@ -3339,6 +3349,52 @@ class LiveTrading implements TradingInterface {
   }
 
   /**
+   * Close position via TWAP (sliced execution) if enabled, otherwise falls back to IOC.
+   * Used by rotation cleanup to get better fills like the Generał.
+   */
+  async closePositionTwap(pair: string, reason: string = 'rotation_cleanup', configOverride?: Partial<TwapConfig>): Promise<void> {
+    // If TWAP not initialized or already active for this pair, fall back to IOC
+    if (!this.twapExecutor || this.twapExecutor.isActive(pair)) {
+      return this.closePositionForPair(pair, reason)
+    }
+
+    try {
+      // Get current position
+      const state = await this.infoClient.clearinghouseState({ user: this.walletAddress })
+      const assetPos = state?.assetPositions?.find((ap: any) => ap.position?.coin === pair)
+      if (!assetPos) return
+
+      const size = parseFloat(assetPos.position.szi)
+      if (Math.abs(size) < 1e-6) return
+
+      // MANUAL_POSITIONS check
+      const manualPositions = (process.env.MANUAL_POSITIONS ?? '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
+      if (manualPositions.includes(pair.toUpperCase())) {
+        console.log(`🚫 [TWAP] ${pair}: skipping close — manually managed`)
+        return
+      }
+
+      const closeSize = Math.abs(size)
+      const closeSide: 'buy' | 'sell' = size < 0 ? 'buy' : 'sell'
+      const posDir = size > 0 ? 'LONG' : 'SHORT'
+
+      console.log(`🔄 [TWAP] ${pair}: closing ${posDir} ${closeSize.toFixed(6)} via TWAP (reason=${reason})`)
+
+      const started = await this.twapExecutor.start(pair, closeSize, closeSide, configOverride)
+      if (!started) {
+        // TWAP couldn't start — fall back to IOC
+        console.log(`⚠️ [TWAP] ${pair}: start failed, falling back to IOC`)
+        return this.closePositionForPair(pair, reason)
+      }
+
+      // TWAP is now running asynchronously — slices will execute via setInterval
+    } catch (error) {
+      console.warn(`⚠️ [TWAP] ${pair}: error starting TWAP, falling back to IOC: ${error}`)
+      return this.closePositionForPair(pair, reason)
+    }
+  }
+
+  /**
    * Get recent fills from Hyperliquid API using userFillsByTime endpoint
    * Note: userFills endpoint returns cached/stale data, userFillsByTime is real-time
    */
@@ -4262,6 +4318,11 @@ class HyperliquidMMBot {
           }
         }
 
+        // Tick TWAP executor — log progress of any active TWAPs
+        if (this.trading instanceof LiveTrading && this.trading.twapExecutor) {
+          this.trading.twapExecutor.tick()
+        }
+
         // Now trade ONLY on active pairs (zombie positions have been cleaned)
         if (activePairs.length > 0) {
           // Subscribe to L2 books for real-time data (WebSocket)
@@ -5125,9 +5186,9 @@ class HyperliquidMMBot {
 
             this.notifier.info(`   💥 Cleanup ${pair}: closing position...`)
 
-            // Then close position
+            // Then close position (TWAP if enabled, otherwise IOC)
             if (this.trading instanceof LiveTrading) {
-              await (this.trading as LiveTrading).closePositionForPair(pair, 'rotation_cleanup')
+              await (this.trading as LiveTrading).closePositionTwap(pair, 'rotation_cleanup')
             }
 
             this.notifier.info(`   ✅ Cleanup done for ${pair}`)

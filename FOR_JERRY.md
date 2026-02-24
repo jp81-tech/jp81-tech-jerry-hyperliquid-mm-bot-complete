@@ -2301,3 +2301,91 @@ Ten skrypt to ~300 linii, z czego ~100 to skopiowany `WHALES` dict. Mozna by byl
 3. Prostsze debugowanie — caly kontekst w jednym pliku
 
 Trade-off: jak dodajesz nowego wieloryba, musisz zmienic go w 3 plikach (whale_tracker.py, daily-whale-report.ts, whale-changes-report.ts). W zamian: **kazdy plik dziala sam i nie moze sie zepsuc przez zmiane w innym**. Dla skryptow cron ktore sie uruchamiaja raz dziennie, ta niezaleznosc jest wazniejsza niz DRY.
+
+---
+
+## TWAP Executor — zamykanie pozycji jak General
+
+### Dlaczego?
+
+Przeanalizowalismy fille Generala (najlepszy wieloryb w trackerze, +$30M profit). Kiedy zamyka pozycje, NIE robi jednego duzego "market sell". Rozklada to na **60 malych limit orderow po $300-2000** rozlozonych w 45 minut. To technika znana jako **TWAP** (Time-Weighted Average Price).
+
+Nasz stary sposob: jeden IOC (Immediate or Cancel) z 5% slippage. Efekt: duzy market impact, taker fee (4.5bps), gorsze ceny.
+
+Nowy sposob: wiele malych limit orderow (ALO = maker only). Efekt: minimalny market impact, maker fee (1.5bps), lepsze ceny.
+
+Analogia: wyobraz sobie ze chcesz sprzedac 100 jablek na bazarze. Stary bot krzyczal "SPRZEDAJE WSZYSTKO!" i dostawal gorsza cene bo kupujacy widzieli desperacje. General po cichu stawia jablka po jednym na ladzie i cierpliwie czeka na kupcow — dostaje lepsza cene za kazde jablko.
+
+### Jak to dziala
+
+```
+Trigger (rotation cleanup / TP / manual close)
+  |
+  v
+closePositionTwap(pair, reason)          <-- wrapper w LiveTrading
+  |
+  v
+TwapExecutor.start(pair, size, side)     <-- osobny modul
+  |
+  v
++-- setInterval loop (co 3-12s) ---------------------------+
+|                                                           |
+|  1. Sprawdz L2 book -> oblicz cene slice'a                |
+|  2. Zloz limit ALO (maker-only, reduce-only)              |
+|  3. Czekaj na fill...                                     |
+|  4. Nie fillnal? -> eskaluj:                              |
+|     Level 0: ALO (maker) -> Level 1: GTC@mid              |
+|     -> Level 2: IOC (taker, gwarantowany fill)            |
+|  5. Cena uciekla >50bps? -> IOC reszty natychmiast        |
+|  6. Powtarzaj az filled lub timeout                       |
++-----------------------------------------------------------+
+  |
+  v
+Done -> log: avg price, slippage, fills, czas
+```
+
+### Eskalacja — kluczowy koncept
+
+Bot zaczyna cierpliwie (ALO = maker only, najnizszy fee), a jesli rynek nie chce kupic -> eskaluje do agresywniejszych metod. To jak negocjacje — zaczynasz od delikatnej oferty, a jesli czas ucieka -> dajesz lepsza cene.
+
+| Level | Typ orderu | Fee | Kiedy aktywny |
+|-------|-----------|-----|---------------|
+| 0 | ALO (maker) | 1.5bps | Domyslne — cierpliwe czekanie |
+| 1 | GTC @ mid | maker/taker | Po X sekundach bez filla |
+| 2 | IOC (taker) | 4.5bps | Drugi timeout — gwarantuj fill |
+
+### Dlaczego osobny modul?
+
+MainLoop tick = 60 sekund. TWAP potrzebuje slice'y co 3-12 sekund. Gdybysmy wsadzili TWAP w mainLoop, moglby zlozyc tylko 1 order na tick.
+
+Dlatego TwapExecutor uzywa `setInterval()` — niezalezny timer ktory tyka co kilka sekund, nie blokujac reszty bota. MainLoop tylko loguje postep przez `tick()`.
+
+Analogia: mainLoop to general ktory co minute sprawdza mape bitwy. TWAP to specjalista od snajperow ktory ma swoj wlasny zegar i strzela co kilka sekund — general tylko dostaje raporty.
+
+### Konfiguracja per-token
+
+Plynne coiny (BTC/ETH) -> wiecej slice'ow, szybciej. Illiquid (LIT) -> mniej slice'ow ale dluzej czeka na fill.
+
+```
+BTC:      10 slices, 60s, escalate po 8s
+ETH:      10 slices, 60s, escalate po 8s
+SOL:       8 slices, 45s, escalate po 8s
+HYPE:      5 slices, 30s, escalate po 10s
+LIT:       5 slices, 60s, escalate po 15s
+FARTCOIN:  5 slices, 45s, escalate po 12s
+Default:   5 slices, 30s, escalate po 10s
+```
+
+Env vars: `TWAP_ENABLED=true`, `LIT_TWAP_SLICES=10`, `LIT_TWAP_DURATION=120`
+
+### Lekcje
+
+**1. Obserwuj profesjonalistow.** Zamiast wymyslac kolo od nowa, przeanalizowalismy jak najlepsi traderzy faktycznie traduja. TWAP to standard w institutional trading.
+
+**2. Maker vs Taker = 3x roznica.** Na $10K pozycji: taker $4.50, maker $1.50. Przy 10 zamkniec dziennie = $30/dzien oszczednosci na samych fee.
+
+**3. setInterval daje pseudo-concurrency.** TWAP timer tyka w tle, mainLoop robi swoje. Pattern "fire and forget with monitoring".
+
+**4. Eskalacja > natychmiastowe poddanie sie.** Zamiast "nie fillnal -> IOC od razu", robimy stopniowa eskalacje (ALO -> GTC -> IOC). Wiekszosc slice'ow fillnie sie jako maker, tylko ostatnie moga byc taker.
+
+**5. Design for failure.** Kazda metoda ma graceful fallback. TWAP nie startuje? -> IOC. Slice rejected? -> Eskalacja. Timeout? -> IOC reszty. Cena uciekla? -> IOC reszty. Zawsze jest plan B.

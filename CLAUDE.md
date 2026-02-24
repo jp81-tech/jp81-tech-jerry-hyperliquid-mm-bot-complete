@@ -28,6 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
+- `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
 
@@ -38,6 +39,45 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 24 lutego 2026
+
+### 36. TWAP Executor — zamykanie pozycji w slice'ach (24.02)
+
+**Nowy plik:** `src/execution/TwapExecutor.ts`
+
+**Cel:** Zamykanie pozycji w małych limit orderach (jak Generał) zamiast jednego IOC z 5% slippage. Niższy slippage, maker fees (1.5bps vs 4.5bps), mniejszy market impact.
+
+**Architektura:**
+- Standalone klasa z własnym `setInterval` timer loop (mainLoop 60s tick za wolny)
+- 3-level eskalacja: ALO (maker) → GTC@mid → IOC (taker)
+- Max slippage guard (50bps) → automatyczny IOC jeśli cena ucieknie
+- Per-token defaults (BTC 10 slices/60s, LIT 5 slices/60s, etc.)
+- Env var override: `${PAIR}_TWAP_SLICES`, `${PAIR}_TWAP_DURATION`
+
+**Zmiany w `src/mm_hl.ts`:**
+- Import `TwapExecutor`, `TwapConfig`
+- Property `twapExecutor: TwapExecutor | null` na LiveTrading
+- Init w `initialize()` gdy `TWAP_ENABLED=true`
+- Nowa metoda `closePositionTwap()` — wrapper z fallback na IOC
+- `applyRotationPairs()` używa `closePositionTwap()` zamiast `closePositionForPair()`
+- `mainLoop` tick: `twapExecutor.tick()` do logowania postępu
+
+**Nie zmienione:**
+- Grid ordery — bez zmian
+- HOLD_FOR_TP — nadal blokuje bidy/aski
+- kPEPE hedge — nadal IOC (za pilne na TWAP)
+
+**Env:**
+```
+TWAP_ENABLED=true              # domyślnie false (opt-in)
+LIT_TWAP_SLICES=10             # override per-token
+LIT_TWAP_DURATION=120          # override per-token
+```
+
+**Kompilacja:** `tsc --noEmit` — czysto (jedyny error pre-existing w mm_alert_bot.ts)
 
 ---
 
@@ -1566,6 +1606,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Deploy TWAP na serwer — `TWAP_ENABLED=true` w .env, `pm2 restart mm-bot`, obserwować logi `🔄 [TWAP]`
+- [ ] Monitorować TWAP slippage — porównać avg fill price vs start mid price w logach `📊 [TWAP]`
+- [ ] Sprawdzić TWAP eskalację — czy ALO→GTC→IOC działa poprawnie na illiquid coinach (LIT, FARTCOIN)
 - [ ] Monitorować kPEPE Toxicity Engine — logi `🐸 [kPEPE TOXICITY]` co 20 ticków, sprawdzić VPIN readings
 - [ ] Sprawdzić kPEPE VPIN po deployu — czy readings != 0.5 (baseline) po przejściu na $500 buckets
 - [ ] Monitorować hedge triggers — czy IOC fires gdy skew >50% przez 30min
@@ -1616,6 +1659,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Nansen Spot Alerts diagnoza — zero SM activity na spot dla LIT/FARTCOIN/VIRTUAL, pipeline działa ale nic do alertowania (DONE 23.02)
 
 ## Notatki
+- **TWAP Executor**: `TWAP_ENABLED=true` w .env włącza TWAP. Domyślnie wyłączony. `closePositionTwap()` fallbackuje na stary IOC gdy TWAP niedostępny. Per-token override: `${PAIR}_TWAP_SLICES`, `${PAIR}_TWAP_DURATION`. Logi: `🔄 [TWAP]`, `📤 [TWAP]`, `✅ [TWAP]`, `📊 [TWAP]`. TWAP NIE dotyczy kPEPE hedge ani HOLD_FOR_TP — tylko rotation cleanup i manual close.
 - `whale_tracker.py` w cronie co 15 min (od 22.02)
 - `vip_spy.py` działa jako PM2 process `vip-spy` (polling co 30s)
 - Telemetry działa na porcie 8082 (8080/8081 zajęte przez inne serwisy)
