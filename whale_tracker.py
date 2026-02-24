@@ -1684,10 +1684,18 @@ def aggregate_sm_positions(all_data: dict) -> dict:
         nansen_label = whale_info.get('nansen_label', 'Unknown')
         credibility = CREDIBILITY_MULTIPLIERS.get(nansen_label, 0.2)  # Default to Unknown
 
-        # Dormant decay: reduce weight for addresses with no changes
+        # PnL-aware dormant decay: diamond hands (profitable hold) vs stale losers
         days_since_change = (now_epoch - activity.get(address.lower(), now_epoch)) / 86400
-        if days_since_change > 21:
-            dormant_factor = 0.10   # Almost ignored
+        addr_total_upnl = sum(p.get('unrealized_pnl', 0) for p in data.get('positions', []))
+
+        if days_since_change > 7 and addr_total_upnl > 0:
+            # 💎 Diamond Hands: holding profitable positions = conviction, not dormancy
+            dormant_factor = 1.0
+            if days_since_change > 14:
+                name = whale_info.get('name', address[:10])
+                print(f"  💎 [DIAMOND_HANDS] {name}: {days_since_change:.0f}d holding, +${addr_total_upnl:,.0f} uPnL → full weight")
+        elif days_since_change > 21:
+            dormant_factor = 0.10   # Stale loser — almost ignored
         elif days_since_change > 14:
             dormant_factor = 0.25
         elif days_since_change > 7:
@@ -1700,7 +1708,7 @@ def aggregate_sm_positions(all_data: dict) -> dict:
 
         if dormant_factor < 1.0:
             name = whale_info.get('name', address[:10])
-            print(f"  💤 [DORMANT] {name}: {days_since_change:.0f}d inactive → weight ×{dormant_factor}")
+            print(f"  💤 [DORMANT] {name}: {days_since_change:.0f}d inactive, ${addr_total_upnl:,.0f} uPnL → weight ×{dormant_factor}")
 
         # Market makers (credibility=0) są ignorowane
         if final_weight == 0:
