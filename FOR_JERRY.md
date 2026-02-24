@@ -23,7 +23,8 @@
 15. [Rozdzial X: XGBoost + Rozszerzenie 8 tokenow/5 horyzontow](#rozdzial-x-xgboost--jak-dalismy-botowi-prawdziwy-mozg)
 16. [Naming Convention — jeden trader, jedna nazwa](#naming-convention--jeden-trader-jedna-nazwa)
 17. [Whale Changes Report — radar zmian pozycji](#whale-changes-report--radar-zmian-pozycji)
-18. [Slowniczek](#slowniczek)
+18. [Fib Guard — nie shortuj dna](#fib-guard--nie-shortuj-dna)
+19. [Slowniczek](#slowniczek)
 
 ---
 
@@ -2389,3 +2390,151 @@ Env vars: `TWAP_ENABLED=true`, `LIT_TWAP_SLICES=10`, `LIT_TWAP_DURATION=120`
 **4. Eskalacja > natychmiastowe poddanie sie.** Zamiast "nie fillnal -> IOC od razu", robimy stopniowa eskalacje (ALO -> GTC -> IOC). Wiekszosc slice'ow fillnie sie jako maker, tylko ostatnie moga byc taker.
 
 **5. Design for failure.** Kazda metoda ma graceful fallback. TWAP nie startuje? -> IOC. Slice rejected? -> Eskalacja. Timeout? -> IOC reszty. Cena uciekla? -> IOC reszty. Zawsze jest plan B.
+
+---
+
+## Fib Guard — nie shortuj dna
+
+### Problem: shortowanie przy samym supportcie
+
+Wyobraz sobie ze jestes w wojsku i dostajesz rozkaz "bombarduj wroga". Ale twoje bomby laduja na wlasnej linii frontu. To wlasnie robil nasz bot — otwienal shorty tuz nad kluczowymi supportami Fibonacciego, a potem cena odbijala i pozycja byla underwater.
+
+Prawdziwy przyklad: APEX przy Fib 0.786 ($0.2902). Bot zaladowal shorty, bounce +5%, strata. Smart Money nie shortuja dna — czekaja na odbicie i dopiero wtedy atakuja. Nasz bot powinien robic to samo.
+
+### Co to Fibonacci i dlaczego dziala?
+
+Fibonacci retracement to narzedzie analizy technicznej oparte na ciagu Fibonacciego (0, 1, 1, 2, 3, 5, 8, 13...). Kluczowe poziomy to **0.618** (zloty podzial), **0.786** i **1.0** (pelna korekta). Dlaczego dzialaja? Bo tysiace traderow patrza na te same poziomy — staja sie samospelniajaca przepowiednia (self-fulfilling prophecy).
+
+Kiedy cena spada o 61.8% zakresu (high24h - low24h), wielu traderow sklada bidy wlasnie tam. Efekt: wsparcie, odbicie, i nasz short traci pieniadze.
+
+Obliczenie jest proste — zero zaleznosci, czysta matematyka:
+
+```
+range = high24h - low24h
+
+Fib 0.618 = high24h - range × 0.618   ← KEY SUPPORT
+Fib 0.786 = high24h - range × 0.786   ← STRONG SUPPORT
+Fib 1.000 = low24h                     ← DNO (pelna korekta)
+```
+
+### Jak dziala Fib Guard?
+
+Guard NIE blokuje shortow calkowicie — to bylby zbyt agresywne. Zamiast tego **redukuje moc askow** (askMultiplier) proporcjonalnie do tego jak blisko cena jest supportu.
+
+Trzy sygnaly skladaja sie na "guard score":
+
+```
+guardScore = fibProximity × 0.50 + rsiScore × 0.25 + drawdownScore × 0.25
+```
+
+| Sygnal | Waga | Co mierzy | Kiedy = 1.0 |
+|--------|------|-----------|-------------|
+| **fibProximity** | 50% | Odleglosc ceny od najblizszego Fib support | Cena dokladnie na poziomie |
+| **rsiScore** | 25% | Czy rynek jest oversold (pseudo-RSI z momentum) | RSI <= 30 |
+| **drawdownScore** | 25% | Jak bardzo cena spadla od 24h high | Drawdown >= 8% |
+
+Wynikowy askMultiplier:
+
+| Guard Score | Ask Multiplier | Znaczenie |
+|-------------|----------------|-----------|
+| >= 0.7 | × 0.15 | STRONG — prawie zero nowych shortow |
+| >= 0.5 | × 0.30 | MODERATE — 30% mocy |
+| >= 0.3 | × 0.50 | LIGHT — polowa mocy |
+| < 0.3 | × 1.00 | Bez zmian — daleko od supportu |
+
+### SM Override — General ma ostatnie slowo
+
+Kluczowa innowacja: gdy Smart Money **aktywnie** shortuja z wysokim conviction, FibGuard ustepuje. Bo jesli General mowi "shortuj mimo supportu", to wie cos czego Fibonacci nie widzi.
+
+```
+SM Confidence >= 70% + aktywnie SHORT → FibGuard OFF (pelne aski)
+SM Confidence >= 50% + aktywnie SHORT → guardScore × 0.5 (polowiczny guard)
+SM Confidence <  50%                  → FibGuard dziala normalnie
+```
+
+Analogia: FibGuard to straznik przy bramie mowiacy "nie wchodzic, strefa niebezpieczna". Ale jesli General (SM z 70%+ conviction) rozkazuje "atakuj!" — straznik salutuje i przepuszcza.
+
+### Pseudo-RSI — dlaczego nie prawdziwy?
+
+Prawdziwy RSI wymaga 15+ candle close prices. W naszym grid pipeline mamy tylko snapshot z momentum (change1h, change4h). Wiec aproksymujemy:
+
+```
+pseudoRsi = 50 + (change1h × 5) + (change4h × 2)
+```
+
+Przyklad: 1h = -3%, 4h = -5% → pseudoRsi = 50 + (-15) + (-10) = **25** (oversold).
+
+Czy to dokladne? Nie. Czy jest "wystarczajaco dobre" zeby chronic przed shortowaniem dna? Tak. Jesli okazaloby sie za slabe, mozna dodac prawdziwy RSI do MarketSnapshot (cache w data fetcher) — ale po co dodawac kolejne API call jesli prosta heurystyka dziala?
+
+**Lekcja: 80% rozwiazanie dzis > 100% rozwiazanie za tydzien.** W tradingu liczy sie execution speed. Bot ktory czeka na idealny RSI traci pieniadze podczas czekania.
+
+### Przyklad z zycia — APEX z wykresu
+
+```
+high24h = $0.3200, low24h = $0.2800
+range = $0.0400
+
+Fib levels:
+  0.618 = $0.3200 - $0.0400 × 0.618 = $0.2953
+  0.786 = $0.3200 - $0.0400 × 0.786 = $0.2886
+  1.000 = $0.2800
+
+Cena = $0.2902 (z wykresu)
+  → odleglosc od Fib 0.786 ($0.2886) = 55bps
+
+Z default config (proximityBps=50): fibProximity = 0 (poza zasiegiem)
+Z LIT/FARTCOIN override (proximityBps=80): fibProximity = 1 - 55/80 = 0.31
+
+change1h = -2%, change4h = -4% → pseudoRsi = 32 → rsiScore = 0.87
+drawdown = 9.4% → drawdownScore = 1.0
+
+guardScore = 0.31×0.50 + 0.87×0.25 + 1.0×0.25 = 0.62
+→ MODERATE → ask × 0.30
+
+Zamiast pelnych shortow, bot uzywa 30% mocy. Jesli cena odbije — mniej strat.
+Jesli cena przebije support i dalej spada — nadal mamy 30% pozycji.
+```
+
+### Per-token overrides
+
+Kazdy token ma inna zmiennosc. BTC porusza sie wolniej niz LIT. Dlatego:
+
+| Token | proximityBps | drawdownMaxPct | Dlaczego |
+|-------|-------------|----------------|----------|
+| BTC | 30 (0.3%) | 5% | Stabilny, tighter |
+| ETH | 35 (0.35%) | 6% | Troche bardziej zmienny |
+| LIT | 80 (0.8%) | 12% | Volatile memecoin, szersze progi |
+| FARTCOIN | 80 (0.8%) | 12% | Volatile memecoin, szersze progi |
+| Default | 50 (0.5%) | 8% | Srodek |
+
+Pattern jest identyczny jak w BounceFilter i DipFilter — defaults + per-token overrides + getter function. Caly config w jednym pliku (`short_only_config.ts`), zero nowych plikow.
+
+### Gdzie w pipeline?
+
+```
+Grid Pipeline (mm_hl.ts):
+  ...
+  → Bounce Filter (nie shortuj w spadku, czekaj na bounce)
+  → 🏛️ FIB GUARD (nie shortuj na supportcie)      ← TUTAJ
+  → Dip Filter (nie kupuj na szczycie, czekaj na dip)
+  ...
+```
+
+FibGuard siedzi miedzy Bounce Filter a Dip Filter. Logika: Bounce Filter mowi "nie shortuj w trakcie spadku", FibGuard mowi "nie shortuj na supportcie nawet po bounce'u", Dip Filter mowi "nie longuj na szczycie".
+
+### Pliki zmienione
+
+| Plik | Co | Ile linii |
+|------|-----|-----------|
+| `src/config/short_only_config.ts` | Interface, defaults, overrides, getter | +45 |
+| `src/mm_hl.ts` | Import + integracja w grid pipeline | +78 |
+
+### Lekcje
+
+**1. Redukuj, nie blokuj.** Poprzednie filtry (HARD_BLOCK) blokowaly calkowicie — zero shortow. Problem: kiedy mialy racje, tracilismy okazje. FibGuard redukuje moc zamiast blokowac — nawet w najgorszym przypadku (score 0.7+) mamy 15% mocy. Jesli support przebity — nadal mamy pozycje.
+
+**2. SM Override ratuje sytuacje.** Fibonacci to tylko techniczna analiza — linie na wykresie. Smart Money widza rzeczy ktorych linie nie widza (insajderzy, flow data, portfolio context). Dlatego SM z wysokim conviction overriduja guard. Hierarchia: SM > TA.
+
+**3. Kazdy filtr to warstwa obrony.** Bounce Filter, FibGuard, Dip Filter — kazdy chroni przed innym bledem. Razem tworza defense-in-depth. Zaden filtr nie jest idealny, ale razem pokrywaja wiekszosc scenariuszy.
+
+**4. Taki sam pattern = mniej bugow.** FibGuard uzywa dokladnie tego samego wzorca co BounceFilter: config interface → defaults → overrides → getter → if block w pipeline. Kazdy nowy filtr dodaje ~100 linii ale nie zmienia architektury. Developer za rok zrozumie go natychmiast bo wygada jak kazdy inny filtr.
