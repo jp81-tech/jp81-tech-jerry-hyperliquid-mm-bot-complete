@@ -1081,6 +1081,31 @@ WHALES = {
     },
 
     # ================================================================
+    # 🎯 NANSEN-VERIFIED MANUAL TRADERS (October 2025 cohort)
+    # Human traders (NOT bots) — Nansen "Smart HL Perps Trader"
+    # Added 24.02.2026 from Nansen BTC Short leaderboard cross-reference
+    # ================================================================
+
+    "0xf62edeee17968d4c55d1c74936d2110333342f30": {
+        "name": "October Shorter f62ede",
+        "emoji": "🔴",
+        "tier": "CONVICTION",
+        "signal_weight": 0.80,
+        "nansen_label": "Smart HL Perps Trader",
+        "min_change": 0.10,
+        "notes": "MANUAL TRADER (nie bot). $769K equity, multi-asset shorter. BTC SHORT $3.5M (entry $105.5K, +$2.4M, +67%), ZEREBRO SHORT +2503%, PUMP SHORT +187%, HYPE SHORT +17.5%. Nansen-verified Smart HL Perps Trader. Added 24.02 from October 2025 BTC short cohort analysis."
+    },
+    "0xc1471df385b1b039aae2000678e0b8bd905b3aef": {
+        "name": "October Shorter c1471d",
+        "emoji": "🔴",
+        "tier": "CONVICTION",
+        "signal_weight": 0.80,
+        "nansen_label": "Smart HL Perps Trader",
+        "min_change": 0.10,
+        "notes": "MANUAL TRADER (nie bot). $1.7M equity, aggressive multi-asset shorter. BTC SHORT $2.9M (entry $113.6K, +$2.3M, +80%), ETH SHORT $2M (+$2.1M, +106%), SOL SHORT $1M (+$784K, +75%), FARTCOIN SHORT +718%, 8+ more short positions. Nansen-verified Smart HL Perps Trader. Added 24.02 from October 2025 BTC short cohort analysis."
+    },
+
+    # ================================================================
     # ❌ TIER 4: MARKET MAKERS (signal_weight: 0.0 - IGNORE!)
     # These flip constantly and should NOT influence bias calculations
     # ================================================================
