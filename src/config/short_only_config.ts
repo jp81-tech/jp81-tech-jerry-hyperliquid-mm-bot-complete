@@ -130,3 +130,48 @@ export const FUNDING_FILTER_OVERRIDES: Record<string, Partial<FundingFilterConfi
 export function getFundingFilterConfig(token: string): FundingFilterConfig {
   return { ...FUNDING_FILTER_DEFAULTS, ...(FUNDING_FILTER_OVERRIDES[token.toUpperCase()] || {}) }
 }
+
+// ============================================================
+// FIB GUARD — nie shortuj dna
+// Redukuje aski gdy cena jest blisko Fib support + RSI oversold
+// SM Override: wysoki SM confidence wylacza guard
+// ============================================================
+
+export interface FibGuardConfig {
+  proximityBps: number     // ile bps od Fib level = "blisko" (default 50 = 0.5%)
+  rsiOversoldThreshold: number  // RSI ponizej tego = oversold (default 30)
+  rsiNeutralThreshold: number   // RSI powyzej tego = nie oversold (default 45)
+  drawdownMinPct: number   // min drawdown od high24h zeby guard sie wlaczyl (default 2%)
+  drawdownMaxPct: number   // drawdown dajacy max score (default 8%)
+  smOverrideConfidence: number  // SM confidence >= tego → guard OFF (default 70)
+  smSoftenConfidence: number    // SM confidence >= tego → guard × 0.5 (default 50)
+  strongGuardMult: number  // askMult gdy score >= 0.7 (default 0.15)
+  moderateGuardMult: number // askMult gdy score >= 0.5 (default 0.30)
+  lightGuardMult: number   // askMult gdy score >= 0.3 (default 0.50)
+  enabled: boolean
+}
+
+export const FIB_GUARD_DEFAULTS: FibGuardConfig = {
+  proximityBps: 50,        // 0.5% od Fib level
+  rsiOversoldThreshold: 30,
+  rsiNeutralThreshold: 45,
+  drawdownMinPct: 2.0,
+  drawdownMaxPct: 8.0,
+  smOverrideConfidence: 70,
+  smSoftenConfidence: 50,
+  strongGuardMult: 0.15,
+  moderateGuardMult: 0.30,
+  lightGuardMult: 0.50,
+  enabled: true,
+}
+
+export const FIB_GUARD_OVERRIDES: Record<string, Partial<FibGuardConfig>> = {
+  'BTC': { proximityBps: 30, drawdownMaxPct: 5.0 },   // BTC: tighter proximity, smaller drawdown
+  'ETH': { proximityBps: 35, drawdownMaxPct: 6.0 },
+  'LIT': { proximityBps: 80, drawdownMaxPct: 12.0 },   // LIT: wider — volatile memecoin
+  'FARTCOIN': { proximityBps: 80, drawdownMaxPct: 12.0 },
+}
+
+export function getFibGuardConfig(token: string): FibGuardConfig {
+  return { ...FIB_GUARD_DEFAULTS, ...(FIB_GUARD_OVERRIDES[token.toUpperCase()] || {}) }
+}

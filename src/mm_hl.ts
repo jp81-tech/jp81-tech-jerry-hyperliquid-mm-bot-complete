@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -7558,6 +7558,83 @@ class HyperliquidMMBot {
                 `ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)} (czekam na potwierdzenie)`
               )
             }
+          }
+        }
+      }
+    }
+
+    // 🏛️ FIB GUARD: Nie shortuj dna — redukuj aski blisko Fib support levels
+    if (getSmDirection(pair) === 'SHORT' && sizeMultipliers.ask > 0 && !bounceFilterChaseBlock) {
+      const fibConfig = getFibGuardConfig(pair)
+      if (fibConfig.enabled) {
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const high24h = snapshot?.momentum?.high24h
+        const low24h = snapshot?.momentum?.low24h
+
+        if (high24h && low24h && high24h > low24h) {
+          const range = high24h - low24h
+
+          // --- Fib proximity score ---
+          const fibSupports = [0.618, 0.786, 1.0].map(f => high24h - range * f)
+          let minDistBps = Infinity
+          for (const level of fibSupports) {
+            const distBps = Math.abs(midPrice - level) / midPrice * 10000
+            if (distBps < minDistBps) minDistBps = distBps
+          }
+          const fibProximity = Math.max(0, 1 - minDistBps / fibConfig.proximityBps)
+
+          // --- RSI score (proxy from momentum — no candle fetch needed) ---
+          const change1h = snapshot?.momentum?.change1h ?? 0
+          const change4h = snapshot?.momentum?.change4h ?? 0
+          const pseudoRsi = 50 + (change1h * 5) + (change4h * 2)
+          const clampedRsi = Math.max(10, Math.min(90, pseudoRsi))
+          const rsiScore = clampedRsi <= fibConfig.rsiOversoldThreshold
+            ? 1.0
+            : clampedRsi >= fibConfig.rsiNeutralThreshold
+              ? 0.0
+              : 1 - (clampedRsi - fibConfig.rsiOversoldThreshold) / (fibConfig.rsiNeutralThreshold - fibConfig.rsiOversoldThreshold)
+
+          // --- Drawdown score ---
+          const drawdownPct = (high24h - midPrice) / high24h * 100
+          const drawdownScore = drawdownPct <= fibConfig.drawdownMinPct
+            ? 0.0
+            : drawdownPct >= fibConfig.drawdownMaxPct
+              ? 1.0
+              : (drawdownPct - fibConfig.drawdownMinPct) / (fibConfig.drawdownMaxPct - fibConfig.drawdownMinPct)
+
+          // --- Combined guard score ---
+          let guardScore = fibProximity * 0.50 + rsiScore * 0.25 + drawdownScore * 0.25
+
+          // --- SM Override ---
+          const smConf = (signalEngineResultFso?.convictionScore ?? 0) * 100
+          const smIsShort = signalEngineResultFso?.mode === MmMode.FOLLOW_SM_SHORT
+
+          if (smIsShort && smConf >= fibConfig.smOverrideConfidence) {
+            if (guardScore >= 0.3) {
+              console.log(`🏛️ [FIB_GUARD] ${pair}: SM OVERRIDE (conf=${smConf.toFixed(0)}% >= ${fibConfig.smOverrideConfidence}%) → guard OFF (was score=${guardScore.toFixed(2)})`)
+            }
+            guardScore = 0
+          } else if (smIsShort && smConf >= fibConfig.smSoftenConfidence) {
+            const origScore = guardScore
+            guardScore *= 0.5
+            if (origScore >= 0.3) {
+              console.log(`🏛️ [FIB_GUARD] ${pair}: SM SOFTEN (conf=${smConf.toFixed(0)}%) → score ${origScore.toFixed(2)}→${guardScore.toFixed(2)}`)
+            }
+          }
+
+          // --- Apply multiplier ---
+          if (guardScore >= 0.7) {
+            const prev = sizeMultipliers.ask
+            sizeMultipliers.ask *= fibConfig.strongGuardMult
+            console.log(`🏛️ [FIB_GUARD] ${pair}: STRONG (score=${guardScore.toFixed(2)}, fib=${fibProximity.toFixed(2)}, rsi=${clampedRsi.toFixed(0)}, dd=${drawdownPct.toFixed(1)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+          } else if (guardScore >= 0.5) {
+            const prev = sizeMultipliers.ask
+            sizeMultipliers.ask *= fibConfig.moderateGuardMult
+            console.log(`🏛️ [FIB_GUARD] ${pair}: MODERATE (score=${guardScore.toFixed(2)}, fib=${fibProximity.toFixed(2)}, rsi=${clampedRsi.toFixed(0)}, dd=${drawdownPct.toFixed(1)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
+          } else if (guardScore >= 0.3) {
+            const prev = sizeMultipliers.ask
+            sizeMultipliers.ask *= fibConfig.lightGuardMult
+            console.log(`🏛️ [FIB_GUARD] ${pair}: LIGHT (score=${guardScore.toFixed(2)}, fib=${fibProximity.toFixed(2)}, rsi=${clampedRsi.toFixed(0)}, dd=${drawdownPct.toFixed(1)}%) → ask×${prev.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
           }
         }
       }
