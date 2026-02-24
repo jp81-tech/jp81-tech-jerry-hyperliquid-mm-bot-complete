@@ -738,7 +738,7 @@ WHALES = {
         "signal_weight": 1.0,
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED - profitable LIT/DOGE shorter
         "min_change": 0.05,
-        "notes": "Main LIT/DOGE shorter. $7.4M LIT SHORT (+$3.4M), $2M DOGE SHORT (+$291k). 🔴 OCT_CRASH: INSIDER_85% — +$48.8M PnL, First Funder Plasma: MEV Bot (0xcd4053), First Funder ETH: FTX. Wysłał 78.2M USDC na Binance przed crashem. Gnosis Safe + Kwenta margin accounts."
+        "notes": "⚠️ FLIPNĄŁ LIT: SHORT→LONG 24.02 (zamknął $3.3M SHORT z zyskiem, otworzył $200K LONG @$1.3753). ASTER SHORT $1.4M (+$1M), PUMP SHORT $514K, FARTCOIN SHORT $358K (+$600K). Equity $2.86M, uPnL +$2.04M. 🔴 OCT_CRASH: INSIDER_85% — +$48.8M PnL, MEV Bot + FTX first funder."
     },
     "0x35d1151ef1aab579cbb3109e69fa82f94ff5acb1": {
         "name": "Major",
