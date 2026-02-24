@@ -3050,32 +3050,50 @@ Ten trader oczekuje totalnego market wipeout — ETH do $500, SOL do $20. Albo j
 ### Zaktualizowane podsumowanie
 
 ```
-PO (wersja 4 — Selini + contrarian):
-  Fasanara:          0.0 (wyłączony — nie jest traderem)
+PO (wersja 5 — Selini→MM + alert filter):
+  Fasanara:          0.0 (MARKET_MAKER — nie jest traderem)
+  Selini Capital:    0.0 (×2 konta, MARKET_MAKER — tight MM grids potwierdzone)
   7 diamond hands:   💎 pelna waga ($110M, +$44M uPnL)
   2 stale losers:    💤 ×0.25 (ZEC -$3.8M, Arrington -$402K)
   OG Shorter:        0.85 × 0.95 = 0.808 (6x boost)
   2 October traders: 0.80 × 1.0 = 0.80 (Nansen verified, +$4.7M)
   Mega Shorter:      0.75 × 0.30 = 0.225 ($25.6M BTC SHORT)
   Algo Shorter:      0.70 × 0.30 = 0.21 ($20.9M BTC SHORT)
-  Selini Capital:    0.40 × 0.90 = 0.36 (×2 konta, fresh BTC SHORT $4.7M)
   Contrarian Long:   0.15 × 1.0 = 0.15 (negative confirmation, -$597K)
-  Total tracked:     58 adresow
+  MM alert filter:   detect_changes() skips MARKET_MAKER → zero szumu
+  Total tracked:     58 adresow (3 MM wyciszone)
 ```
 
-### Fix F: Selini Capital Re-Add + Contrarian Tracker (24.02)
+### Fix F: Selini Capital — trzy zmiany jednego dnia (24.02)
 
-Ciekawy zwrot akcji z Selini Capital. Dwa dni temu (22.02) usunelismy ich z trackera — 5 kont MM ktore flipowaly pozycje non-stop, generujac spam alertow. Ale dzisiaj live scan Nansen pokazal ze Selini otworzyl FRESH BTC shorts na dwoch nowych kontach @ $62,940. To nie wyglada na market making — to directional bet.
+Historia Selini Capital to lekcja o weryfikacji. Chronologicznie:
 
-**Dlaczego re-add z niskim weight (0.40)?** Bo historia uczy ostroznosci. Jesli za tydzien te konta flipna na LONG, to wiemy ze to znowu MM behavior i weight wraca do 0.0. Ale jesli trzymaja — to Selini jako znany quant fund potwierdza bearish thesis.
+1. **22.02**: Usunelismy Selini (5 kont MM) z trackera — spam alertow, flipuja non-stop
+2. **24.02 rano**: Live scan Nansen pokazuje FRESH BTC shorts na 2 nowych kontach @ $62,940. Wyglada na directional bet. Re-add jako FUND, weight 0.40
+3. **24.02 po poludniu**: Sprawdzamy openOrders API i... Selini ma tight spread MM grids ($57-100 spread). To nie directional — to klasyczny market making. **Reklasyfikacja na MARKET_MAKER, weight 0.0**
 
-**Contrarian tracker** to nowy koncept. Adres 0x015354 to jedyny znaczacy SM z BTC LONG ($12M, 191 BTC). Wszyscy inni sa SHORT. Dajemy mu weight 0.15 — celowo niski, bo sluzy jako **negative confirmation**. Kiedy on traci (teraz -$597K), to potwierdza ze SHORT consensus jest sluszny. Gdyby zaczal zarabiac — to early warning ze cos sie zmienia.
+**Lekcja:** Pozycja (SHORT $3.4M) **nie oznacza** directional conviction. Market maker tez ma pozycje — ale to hedging, nie przekonanie o kierunku. Dopiero **open orders** ujawniaja prawdziwa intencje. Selini ma symetryczny grid buy/sell z minimalnym spreadem — to czysta platforma MM, nie zakład o spadek BTC.
+
+**Contrarian tracker** to nowy koncept. Adres 0x015354 to jedyny znaczacy SM z BTC LONG ($12M, 191 BTC). Wszyscy inni sa SHORT. Dajemy mu weight 0.15 — celowo niski, bo sluzy jako **negative confirmation**. Kiedy on traci (teraz -$597K), to potwierdza ze SHORT consensus jest sluszny.
+
+### Fix G: MARKET_MAKER alert filter (24.02)
+
+Prosty ale wazny fix. `detect_changes()` w whale_tracker.py iterowalo po WSZYSTKICH adresach w WHALES dict — wlacznie z MARKET_MAKER. Mimo ze MMs maja weight=0.0 (zero wplywu na sygnaly bota), tracker i tak generowal alerty Telegram o ich flipach.
+
+**Fix:** Jedna linia: `if whale_info.get('tier') == 'MARKET_MAKER': continue`
+
+**Efekt:** Fasanara Capital, Selini #1, Selini #2 — zero alertow. Czysty feed z alarmami tylko od prawdziwych traderow.
+
+To jest pattern ktory warto zapamietac: **jesli cos nie wplywa na decyzje, nie powinno generowac alertow**. Szum zaglusza sygnal.
 
 **SM Activity Snapshot (24.02):**
 - 58bro.eth realizuje zyski — sprzedal ~49 BTC ($3.1M) dzisiaj @ $63K
 - OG Shorter c7290b zredukowal 20 BTC ($1.3M) wczoraj @ $66,130
-- Selini Capital — swiezy entry, 2 konta BTC SHORT $4.7M
+- Selini Capital — swiezy entry, ale potwierdzone jako MM (tight grids)
 - Jedyny notable LONG (0x015354) juz -$597K underwater
+
+**58bro.eth BTC open orders deep dive:**
+41 orderow, $12.5M total. Kluczowy insight — 25 BUY orderow $50K-$62K to **take profit** na shorcie (zamykanie po nizszej cenie). 16 SELL orderow $66K-$69.75K to **scaling in** (dodawanie do shorta przy odbiciu). Gap $62K-$66K = strefa konsolidacji. 58bro nie planuje zamykac ani flipowac — jesli cena spadnie, bierze zysk; jesli wzrosnie, shortuje jeszcze wiecej. **Hardcore diamond hands bear.**
 
 ### Lekcje
 
@@ -3097,4 +3115,6 @@ Ciekawy zwrot akcji z Selini Capital. Dwa dni temu (22.02) usunelismy ich z trac
 
 **9. Negative confirmation jest rownie wartosciowa jak positive.** Trackujemy 57 adresow SHORT i 1 adres LONG. Ten jeden LONG (0x015354, $12M BTC @ $65,849) jest juz -$597K underwater. To nie jest "szum" — to **informacja**. Jedyny kto postawil przeciwko consensus traci pieniadze. To potwierdza ze consensus jest sluszny. W systemach tradingowych czesto skupiamy sie na "kto ma racje" i ignorujemy "kto sie myli". Ale ktos kto sie myli jest rownie informatywny — bo mowi ci czego NIE robic. **Dodawaj kontrarianow do trackera z niskim weight — ich straty sa twoim zyskiem informacyjnym.**
 
-**10. Drugie szanse wymagaja ostrożnosci.** Selini Capital zostalo usunięte 22.02 za spam. 2 dni pozniej otwieraja fresh directional shorts. Dajemy im drug szanse — ale z weight 0.40 zamiast 0.85. Jesli sie sprawdza, mozna podniesc. Jesli flipna — weight z powrotem na 0.0. To jak zatrudnianie kogos kto odszedl ze zlymi referencjami — dajesz szanse ale z krotszym smyczem. **Reputacja jest trudna do odbudowania, ale nie niemozliwa. System powinien to odzwierciedlac.**
+**10. Drugie szanse wymagaja ostrożnosci — i weryfikacji.** Selini Capital: usunięte 22.02 za spam → re-added 24.02 (fresh shorts, wyglada na directional) → **znowu reclassified jako MM** tego samego dnia (openOrders ujawnilo tight spread grids). Dalismy im druga szanse i okazalo sie ze nie zasluguja. Ale dowiedzielismy sie tego dzieki **weryfikacji orderami**, nie intuicji. **Pozycja nie rowna sie intencji. Open orders ujawniaja prawde. Zawsze weryfikuj przed zaufaniem.**
+
+**11. Jesli cos nie wplywa na decyzje, nie powinno generowac alertow.** MARKET_MAKER adresy mialy weight=0.0 — zero wplywu na sygnaly bota. Ale tracker i tak generowal alerty o ich flipach. To klasyczny szum zagluszajacy sygnal. Fix: jedna linia `if tier == 'MARKET_MAKER': continue`. **Alarm powinien wymagac akcji. Jesli nie — to nie alarm, to spam.**
