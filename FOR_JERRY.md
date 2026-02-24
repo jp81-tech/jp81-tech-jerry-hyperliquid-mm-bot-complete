@@ -2999,6 +2999,68 @@ PO (wersja 2 — PnL-aware):
 
 SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (trzyma i traci) od "diamond hands" (trzyma i zarabia). Ktos kto shortnal BTC przy $106K i siedzi na +$14.8M to nie zombie — to geniusz. A teraz mamy tez dwoch nowych traderow z October cohort ktorzy dokladaja ~$6.4M weighted SHORT do agregatu.
 
+### Fix E: Nansen Leaderboard Expansion + Open Orders Intelligence (24.02)
+
+Po dodaniu October traderow, poszerzyliśmy search na caly Nansen BTC Short leaderboard. Znaleźliśmy dwoch potężnych shorterow:
+
+**Mega Shorter 218a65** (`0x218a65e21eddeece7a9df38c6bbdd89f692b7da2`):
+- $3.4M equity, BTC SHORT **$25.6M** (358 BTC!)
+- Entry $71,253 — shortuje od pazdziernika 2025
+- +$3M unrealized, **+186% ROI**, 14x leverage
+- Funded from Coinbase → individual human trader (MANUAL)
+- Liquidation $71.6K — tight! Ale ma $5.8M DeFi collateral jako safety net
+
+**Algo Shorter d62d48** (`0xd62d484bda5391d75b414e68f9ddcedb207b7d91`):
+- $8.6M equity, BTC SHORT **$20.9M** (279 BTC)
+- Entry $75,151, +$3.4M unrealized, **+778% ROI** (!), 40x leverage
+- 14,996 trades w 30 dni = oczywisty algo bot
+- #16 na Nansen BTC PnL leaderboard (+$5.1M/30d)
+- Anonymous — zero relacji z innymi adresami
+
+**Problem z finalWeight:** Oba adresy nie maja `nansen_label`, wiec credibility = 0.30 (Unknown). To daje:
+- 218a65: 0.75 × 0.30 = **0.225** (w porownaniu z f62ede ktore ma 0.80 × 1.0 = 0.80)
+- d62d48: 0.70 × 0.30 = **0.21**
+
+Jesli uzytkownik dostarczy Nansen labele, finalWeight skoczy 3-4x. To pokazuje jak wazna jest weryfikacja zewnetrzna.
+
+### Open Orders Intelligence — SM Take-Profit Targets
+
+Najciekawsze odkrycie sesji: Hyperliquid API `openOrders` endpoint ujawnia **dokladne ceny** na jakich SM planuja zamykac pozycje lub re-enterowac.
+
+**BTC Consensus Zone: $50,000-$53,500:**
+- **58bro.eth**: 26 BTC bids rozlozonych $50,000-$62,500 (łącznie **$17.76M**)
+- **Pulkownik**: 150 BTC bids na $50,525-$53,525 (**$7.73M**) — zamknal WSZYSTKIE shorty i czeka na re-entry
+- **October f62ede**: BTC bids skupione $51,139-$52,639
+
+Trzech niezaleznych traderow (rozny styl, rozne adresy, zero powiazań) ustawia bidy w tej samej strefie $50-53K. To silny consensus.
+
+**October f62ede — Apocalyptic Targets:**
+```
+ETH bids: $521 - $1,563   (vs current ~$2,800)
+SOL bids: $21 - $50        (vs current ~$150)
+XRP bids: $0.11 - $0.63    (vs current ~$2.50)
+```
+
+Ten trader oczekuje totalnego market wipeout — ETH do $500, SOL do $20. Albo jest geniuszem albo szalehcem. Ale patrzac na jego +$2.4M uPnL z BTC shorta... moze nie jest szaloncem.
+
+**Kraken B**: 247 (!) orders across ETH/SOL/XRP/HYPE/ZEC (~$9.1M) — przygotowany na masowa przecene.
+
+**Kluczowy wniosek:** `openOrders` to **okno do strategii** SM. Nie tylko widzimy co robia (pozycje), ale tez **co planuja** (ordery). To jak czytanie notatek z posiedzenia zarzadu przed ogłoszeniem decyzji.
+
+### Zaktualizowane podsumowanie
+
+```
+PO (wersja 3 — full expansion):
+  Fasanara:          0.0 (wyłączony — nie jest traderem)
+  7 diamond hands:   💎 pelna waga ($110M, +$44M uPnL)
+  2 stale losers:    💤 ×0.25 (ZEC -$3.8M, Arrington -$402K)
+  OG Shorter:        0.85 × 0.95 = 0.808 (6x boost)
+  2 October traders: 0.80 × 1.0 = 0.80 (Nansen verified, +$4.7M)
+  Mega Shorter:      0.75 × 0.30 = 0.225 ($25.6M BTC SHORT)
+  Algo Shorter:      0.70 × 0.30 = 0.21 ($20.9M BTC SHORT)
+  Total tracked:     55 adresow
+```
+
 ### Lekcje
 
 **1. Garbage in, garbage out — nawet w "prostych" systemach.** Nasz system wazenia (signal_weight × credibility) jest elegancki. Ale jesli karmisz go bledna klasyfikacja (Fasanara = Fund zamiast MM) albo brakujacymi danymi (OG Shorter bez nansen_label), to nawet najlepszy algorytm da zle wyniki. **Audyt danych jest wazniejszy niz ulepszanie algorytmu.**
@@ -3014,3 +3076,5 @@ SM agregat jest teraz **czystszy i madrzejszy** — odroznia "zombie pozycje" (t
 **6. Diamond Hands to prawdziwa strategia.** 7 adresow ktore shortowaly i nie ruszaly pozycji przez 2-3 tygodnie maja lacznie +$44M uPnL. To nie jest lenistwo — to CONVICTION. W swiecie gdzie 99% traderow robi overtrading, ktos kto wchodzi i czeka jest statystycznie lepszy. Nasz system teraz to rozumie — `💎 [DIAMOND_HANDS]` to nie ozdoba, to informacja ze ten trader wie co robi.
 
 **7. Cross-reference to najlepsza metoda odkrywania.** Nansen ma leaderboard "kto shortuje BTC". My mamy liste 40 adresow. Porownanie tych dwoch zrodel dalo 11 nowych kandydatow, z ktorych 2 okazali sie swietni (+$4.7M combined uPnL). To jak porownywanie list gosci na dwoch imprezach — kto jest na obu, tego warto poznac. Ale klucz to **weryfikacja** — z 11 nowych, 9 to dust/puste konta. Bez sprawdzenia equity i pozycji na Hyperliquid API, dodalibyśmy smieci do systemu. **Odkrywaj szeroko, weryfikuj wasko.**
+
+**8. Open orders to okno do przyszlosci.** Pozycje mowia co SM **robi teraz**. Ale open orders mowia co SM **planuje zrobic**. Kiedy trzech niezaleznych traderow (rozny styl, zero powiazań) ustawia bidy w tej samej strefie $50-53K na BTC, to jest consensus — nie przypadek. A kiedy jeden z nich ustawia ETH bidy na $521 i SOL na $21, to albo szaleniec, albo widzi cos czego inni nie widza. Przy +$2.4M uPnL z BTC shorta, raczej to drugie. **Nie patrz tylko na co ktos robi — patrz na co sie przygotowuje.** `openOrders` to najlepszy darmowy edge na Hyperliquid.

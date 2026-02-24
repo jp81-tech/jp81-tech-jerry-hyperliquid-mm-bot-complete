@@ -90,7 +90,21 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - Oba adresy z "October 2025 BTC short cohort" — shortowali BTC przy $105-113K i trzymają od miesięcy. Combined +$4.7M uPnL.
 - finalWeight: 0.80 × 1.0 = **0.80** (Nansen-verified = credibility 1.0)
 
-**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 51→53 adresami), `pm2 restart mm-bot`
+**E) Nansen Leaderboard Top BTC Shorters (24.02):**
+- Rozszerzenie trackera o top shorterów z Nansen BTC Short leaderboard — adresy z ogromnym conviction i profit
+- **Mega Shorter 218a65** (`0x218a65e2...`): CONVICTION, weight 0.75. MANUAL TRADER. $3.4M equity, BTC SHORT $25.6M (358 BTC, entry $71.2K, +$3M, +186% ROI, 14x lev). Funded from Coinbase — individual trader. Liq $71.6K (tight! $5.8M DeFi collateral). Brak nansen_label → finalWeight 0.75×0.30 = **0.225**
+- **Algo Shorter d62d48** (`0xd62d484b...`): CONVICTION, weight 0.70. ALGO BOT (14,996 trades/30d). $8.6M equity, BTC SHORT $20.9M (279 BTC, entry $75.2K, +$3.4M, +778% ROI, 40x lev). Liq $92.5K. #16 BTC PnL leaderboard (+$5.1M/30d). Brak nansen_label → finalWeight 0.70×0.30 = **0.21**
+- Niski finalWeight (0.21-0.23) bo brak Nansen label — jeśli user dostarczy labele, credibility skoczy do 0.95-1.0
+
+**Open Orders Intelligence (24.02):**
+- Hyperliquid API `openOrders` ujawnia take-profit/re-entry levels SM traderów
+- **Consensus BTC target zone: $50,000-$53,500** (3 niezależni traderzy):
+  - 58bro.eth: 26 BTC bids $50,000-$62,500 ($17.76M total)
+  - Pulkownik: 150 BTC bids $50,525-$53,525 ($7.73M) — zamknął shorty, czeka na re-entry
+  - October f62ede: BTC bids $51,139-$52,639 + apocalyptic alt targets (ETH $521-$1,563, SOL $21-$50)
+- Kraken B: 247 orders across ETH/SOL/XRP/HYPE/ZEC (~$9.1M)
+
+**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 53→55 adresami), `pm2 restart mm-bot`
 
 ### 38. VIP Flash Override — szybsze wykrywanie flipow SM (24.02)
 
@@ -1910,3 +1924,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Dormant Decay (24.02, updated)**: PnL-aware — dormant + profitable = `💎 [DIAMOND_HANDS]` (full weight), dormant + losing = `💤 [DORMANT]` (decay: 7-14d=0.50, 14-21d=0.25, 21d+=0.10). `/tmp/whale_activity.json` tracks last change per address. 7 diamond hands addresses (+$44M uPnL) keep full weight: Kapitan BTC, Kraken A, Kapitan feec, Porucznik SOL2, Abraxas Capital, Kraken B, Kapitan 99b1. Only stale losers (ZEC Conviction -$3.8M, Arrington XRP -$402K) get decayed.
 - **Manual Trader Boost (24.02)**: OG Shorter upgraded: ACTIVE→CONVICTION, weight 0.65→0.85, nansen_label "All Time Smart Trader" → finalWeight 0.13→0.81 (6x). Kapitan fce0: weight 0.80→0.85 → finalWeight 0.80→0.85. MANUAL traderzy (2 fills/7d) mają najwyższy conviction — rzadko tradują ale z ogromną dokładnością.
 - **October 2025 Manual Traders (24.02)**: Nansen BTC Short leaderboard cross-ref → 2 nowe adresy dodane. October Shorter f62ede (`0xf62ede...`, CONVICTION 0.80, BTC SHORT $3.5M +67%, ZEREBRO +2503%). October Shorter c1471d (`0xc1471d...`, CONVICTION 0.80, BTC SHORT $2.9M +80%, ETH +106%, SOL +75%). Oba MANUAL (nie boty), Nansen "Smart HL Perps Trader" verified. Combined +$4.7M uPnL.
+- **Nansen Leaderboard Shorters (24.02)**: Top BTC shorters z Nansen leaderboard. Mega Shorter 218a65 (`0x218a65...`, CONVICTION 0.75, MANUAL, BTC SHORT $25.6M, +186% ROI). Algo Shorter d62d48 (`0xd62d48...`, CONVICTION 0.70, ALGO BOT 15K trades/30d, BTC SHORT $20.9M, +778% ROI). Brak nansen_label → niski finalWeight (0.21-0.23). Łącznie +$6.4M uPnL, combined $46.5M SHORT exposure.
+- **Open Orders Intelligence (24.02)**: SM take-profit targets z Hyperliquid openOrders API. Consensus BTC zone: $50,000-$53,500 (58bro.eth $17.76M bids, Pulkownik $7.73M bids, October f62ede bids $51-53K). October f62ede apocalyptic alt targets: ETH $521-$1,563, SOL $21-$50.
