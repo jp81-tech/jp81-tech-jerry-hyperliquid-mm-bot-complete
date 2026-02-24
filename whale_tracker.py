@@ -1121,6 +1121,41 @@ WHALES = {
         "notes": "ALGO BOT (14,996 trades/30d). $8.6M equity, BTC SHORT $20.9M (279 BTC, entry $75.2K, +$3.4M, +778% ROI, 40x lev). Liq $92.5K (comfortable). Ranked #16 BTC PnL leaderboard (+$5.1M/30d). $10.7M DeFi collateral. Anonymous — no related addresses. Added 24.02 from Nansen BTC Short leaderboard."
     },
 
+    # --- Selini Capital (fresh directional, re-added 24.02) ---
+    # Previously removed (22.02) as MM spam (5 accounts flipping constantly).
+    # These 2 accounts opened FRESH BTC shorts at $62,940 — directional, not MM behavior.
+    # Low weight because of MM history — trust only if they hold.
+
+    "0x39475d17bcd20adc540e647dae6781b153fbf3b1": {
+        "name": "Selini Capital #1",
+        "emoji": "🏦",
+        "tier": "FUND",
+        "signal_weight": 0.40,
+        "nansen_label": "Fund",
+        "min_change": 0.10,
+        "notes": "Selini Capital — known quant fund. BTC SHORT $3.4M (53.6 BTC, entry $62,940, 20x cross). Fresh short opened 24.02. Previously removed as MM (22.02) — re-added because this is directional, not hedging. Low weight because MM history. Watch for quick flip = revert to 0.0."
+    },
+    "0x621c5551678189b9a6c94d929924c225ff1d63ab": {
+        "name": "Selini Capital #2",
+        "emoji": "🏦",
+        "tier": "FUND",
+        "signal_weight": 0.40,
+        "nansen_label": "Fund",
+        "min_change": 0.10,
+        "notes": "Selini Capital second account. BTC SHORT $1.3M (20.1 BTC, entry $62,949, 20x cross). Fresh short opened 24.02. Same caveat as #1 — directional now, but could flip anytime."
+    },
+
+    # --- Contrarian tracker (24.02) ---
+    "0x015354106478dda69c4aae3c0cf801290b738052": {
+        "name": "Contrarian Long 015354",
+        "emoji": "🟢",
+        "tier": "WATCH",
+        "signal_weight": 0.15,
+        "nansen_label": "Smart HL Perps Trader",
+        "min_change": 0.10,
+        "notes": "ONLY notable SM BTC LONG ($12M, 191 BTC, entry $65,849, 2x isolated, -$597K underwater). Contrarian vs entire SM SHORT consensus. Low weight — useful as negative confirmation (when he's losing, SHORT thesis confirmed). Added 24.02."
+    },
+
     # ================================================================
     # ❌ TIER 4: MARKET MAKERS (signal_weight: 0.0 - IGNORE!)
     # These flip constantly and should NOT influence bias calculations
