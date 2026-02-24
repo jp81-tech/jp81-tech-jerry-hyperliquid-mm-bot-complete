@@ -13,6 +13,7 @@ import requests
 import json
 import os
 import sys
+import time
 import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,6 +36,7 @@ HISTORY_FILE = CACHE_DIR / "daily_history.json"  # 7-day trend analysis
 HOURLY_HISTORY_FILE = CACHE_DIR / "hourly_history.json"  # 24h granular history for bottom detection
 BOT_DATA_FILE = Path("/tmp/smart_money_data.json")
 BOT_BIAS_FILE = Path("/tmp/nansen_bias.json")
+WHALE_ACTIVITY_FILE = Path("/tmp/whale_activity.json")
 
 # Bottom detection settings
 HOURLY_HISTORY_HOURS = 48  # Keep 48 hours of hourly data
@@ -856,11 +858,11 @@ WHALES = {
     "0x7fdafde5cfb5465924316eced2d3715494c517d1": {
         "name": "Fasanara Capital",
         "emoji": "🏦",
-        "tier": "FUND",
-        "signal_weight": 0.85,
-        "nansen_label": "Fund",  # Fasanara Capital: Aave Arc Whitelisted
+        "tier": "MARKET_MAKER",
+        "signal_weight": 0.0,
+        "nansen_label": "Market Maker",
         "min_change": 0.05,
-        "notes": "$30.6M equity, $94.5M notional. ETH SHORT $50.2M, BTC SHORT $24M, HYPE SHORT $14M, AVAX SHORT $4.9M, FARTCOIN SHORT $1.3M. London hedge fund. First Funder: Fasanara Capital Aave Arc (0x177876). DeFi: $43.2M. 🟢 OCT_CRASH: LEGIT_EDGE_20% — fundusz instytucjonalny, shortuje cały rynek (70+ pozycji), macro hedge."
+        "notes": "$30.6M equity, $94.5M notional. ETH SHORT $50.2M, BTC SHORT $24M, HYPE SHORT $14M, AVAX SHORT $4.9M, FARTCOIN SHORT $1.3M. London hedge fund. First Funder: Fasanara Capital Aave Arc (0x177876). DeFi: $43.2M. 🟢 OCT_CRASH: LEGIT_EDGE_20%. RECLASSIFIED 24.02: 100% maker fills, 100% CLOID = pure MM, not directional."
     },
     "0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36": {
         "name": "Abraxas Capital",
@@ -898,7 +900,7 @@ WHALES = {
         "name": "Kapitan fce0 ⭐",
         "emoji": "🔴",
         "tier": "ACTIVE",
-        "signal_weight": 0.80,
+        "signal_weight": 0.85,  # UPGRADED from 0.80: MANUAL trader, high conviction
         "nansen_label": "Smart HL Perps Trader",  # VERIFIED by Nansen 2026-01-19!
         "min_change": 0.08,
         "notes": "$3.34M equity, +$6.79M total. BTC SHORT $8.5M (entry $90,472 - najnizsze wejscie z Kapitanow), ETH SHORT $3.47M (+$2.51M). MEGA LONG $3.9K. Opened BTC short 15 sty 2026. Nansen verified. DeFi: sent 1.4M USDC to Aave, 400K to Pendle Finance. Received 1.8M USDC from Hyperithm USDC. Sophisticated DeFi trader."
@@ -915,10 +917,11 @@ WHALES = {
     "0xc7290b4b308431a985fa9e3e8a335c2f7650517c": {
         "name": "OG Shorter c7290b",
         "emoji": "🔴",
-        "tier": "ACTIVE",
-        "signal_weight": 0.65,
+        "tier": "CONVICTION",
+        "signal_weight": 0.85,
+        "nansen_label": "All Time Smart Trader",
         "min_change": 0.10,
-        "notes": "$6.3M equity, shortuje od lis 2025. BTC SHORT $5M (entry $97K, +$2.4M), ETH SHORT $1.4M (entry $3070, +$851K), HYPE SHORT $661K. Closed PnL +$2.48M. Łącznie ~$5.76M profit."
+        "notes": "$6.3M equity, shortuje od lis 2025. BTC SHORT $5M (entry $97K, +$2.4M), ETH SHORT $1.4M (entry $3070, +$851K), HYPE SHORT $661K. Closed PnL +$2.48M. Łącznie ~$5.76M profit. UPGRADED 24.02: MANUAL trader (2 fills/7d), +$15.5M uPnL, highest conviction."
     },
     "0xea6670ebdb4a388a8cfc16f6497bf4f267b061ee": {
         "name": "Porucznik ea66",
@@ -1238,6 +1241,19 @@ def update_freshness():
     ensure_cache_dir()
     with open(FRESHNESS_FILE, 'w') as f:
         f.write(datetime.now().isoformat())
+
+def load_activity() -> dict:
+    """Load whale activity tracker (address → last_change_epoch)"""
+    try:
+        with open(WHALE_ACTIVITY_FILE, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_activity(activity: dict):
+    """Save whale activity tracker"""
+    with open(WHALE_ACTIVITY_FILE, 'w') as f:
+        json.dump(activity, f, indent=2)
 
 # ============================================================
 # HISTORY & TREND ANALYSIS
@@ -1653,6 +1669,10 @@ def aggregate_sm_positions(all_data: dict) -> dict:
     aggregated = {coin: {'longs': 0, 'shorts': 0, 'longs_upnl': 0, 'shorts_upnl': 0,
                          'longs_count': 0, 'shorts_count': 0} for coin in TRACKED_COINS}
 
+    # Load activity for dormant decay
+    activity = load_activity()
+    now_epoch = int(time.time())
+
     for address, data in all_data.items():
         # Pobierz info dla tego adresu
         whale_info = WHALES.get(address.lower(), {})
@@ -1664,8 +1684,23 @@ def aggregate_sm_positions(all_data: dict) -> dict:
         nansen_label = whale_info.get('nansen_label', 'Unknown')
         credibility = CREDIBILITY_MULTIPLIERS.get(nansen_label, 0.2)  # Default to Unknown
 
-        # Final weight = size × credibility
-        final_weight = signal_weight * credibility
+        # Dormant decay: reduce weight for addresses with no changes
+        days_since_change = (now_epoch - activity.get(address.lower(), now_epoch)) / 86400
+        if days_since_change > 21:
+            dormant_factor = 0.10   # Almost ignored
+        elif days_since_change > 14:
+            dormant_factor = 0.25
+        elif days_since_change > 7:
+            dormant_factor = 0.50
+        else:
+            dormant_factor = 1.0    # Active — full weight
+
+        # Final weight = size × credibility × dormant_factor
+        final_weight = signal_weight * credibility * dormant_factor
+
+        if dormant_factor < 1.0:
+            name = whale_info.get('name', address[:10])
+            print(f"  💤 [DORMANT] {name}: {days_since_change:.0f}d inactive → weight ×{dormant_factor}")
 
         # Market makers (credibility=0) są ignorowane
         if final_weight == 0:
@@ -1952,6 +1987,29 @@ def run_tracker():
             print("[INFO] No significant changes detected")
     else:
         print("[INFO] First run - no previous data to compare")
+
+    # Update activity tracker for dormant decay
+    activity = load_activity()
+    now_epoch = int(time.time())
+
+    if previous:
+        # Mark addresses with position changes as active
+        for address in WHALES.keys():
+            addr_lower = address.lower()
+            curr_positions = current.get(addr_lower, {}).get('positions', [])
+            prev_positions = previous.get(addr_lower, {}).get('positions', [])
+            curr_map = {p['coin']: (p['side'], p['position_value']) for p in curr_positions}
+            prev_map = {p['coin']: (p['side'], p['position_value']) for p in prev_positions}
+            if curr_map != prev_map:
+                activity[addr_lower] = now_epoch
+
+    # Initialize unknown addresses with current time (first run)
+    for address in WHALES.keys():
+        addr_lower = address.lower()
+        if addr_lower not in activity:
+            activity[addr_lower] = now_epoch
+
+    save_activity(activity)
 
     # Zapisz cache
     save_cache(current)

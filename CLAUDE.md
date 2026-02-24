@@ -39,11 +39,49 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/nansen_mm_signal_state.json` - stan sygnałów MM (GREEN/YELLOW/RED)
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
+- `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
 
 ---
 
 ## Zmiany 24 lutego 2026
+
+### 41. Whale Tracker Quality Fixes — Fasanara MM, Dormant Decay, Manual Boost (24.02)
+
+**Problem:** Audyt BOT vs MANUAL ujawnił 3 problemy z agregacją SM w whale_tracker.py:
+1. Fasanara Capital ($83.9M, 100% maker, 100% CLOID) to market maker — ich shorty to hedges, signal_weight=0.85 zawyżał SM SHORT consensus
+2. 9 dormant adresów (brak fills 7-21 dni) trzyma $66.7M pozycji liczonych jak aktywne sygnały
+3. OG Shorter (MANUAL, $23M, +$15.5M) miał finalWeight=0.13 bo brak nansen_label
+
+**Plik:** `whale_tracker.py` (jedyny zmieniony plik)
+
+**A) Fasanara Capital → MARKET_MAKER (weight 0.0):**
+- `tier`: FUND → MARKET_MAKER
+- `signal_weight`: 0.85 → 0.0
+- `nansen_label`: Fund → Market Maker
+- **Efekt:** `final_weight = 0.0` → kompletnie wyłączony z agregatu. Usunięcie ~$64M phantom SHORT.
+
+**B) Dormant Decay — obniżanie wagi stałych pozycji:**
+- Nowy plik aktywności: `/tmp/whale_activity.json` (`{address: last_change_epoch}`)
+- `load_activity()` / `save_activity()` helpers
+- Update w `run_tracker()`: po `detect_changes()`, porównuje current vs previous pozycje per adres, aktualizuje timestamps
+- Decay w `aggregate_sm_positions()`:
+
+| Dni bez zmian | Decay factor | Przykład |
+|---------------|-------------|----------|
+| 0-7 | 1.0 (full) | Generał, Major — aktywni |
+| 7-14 | 0.50 | Kapitan 99b1 |
+| 14-21 | 0.25 | Kraken A, SOL2, Kraken B |
+| 21+ | 0.10 | Kapitan BTC |
+
+- Logi: `💤 [DORMANT] {name}: {days}d inactive → weight ×{factor}`
+- Pierwszy run po deploy ustawia `now_epoch` dla wszystkich (baseline). Decay startuje od kolejnych runów.
+
+**C) Manual Trader Boost:**
+- **OG Shorter**: tier ACTIVE→CONVICTION, signal_weight 0.65→0.85, dodano `nansen_label: "All Time Smart Trader"`. Efekt: 0.13 → **0.81** (6x boost)
+- **Kapitan fce0**: signal_weight 0.80→0.85. Efekt: 0.80 → **0.85**
+
+**Deploy:** SCP → server, `python3 whale_tracker.py` (syntax OK, activity file created z 51 adresami), `pm2 restart mm-bot`
 
 ### 38. VIP Flash Override — szybsze wykrywanie flipow SM (24.02)
 
@@ -77,6 +115,51 @@ analysis.mode = FOLLOW_SM_SHORT + Generał is LONG $192K
 **Kompilacja:** `tsc --noEmit` czysto (jedyny pre-existing error w mm_alert_bot.ts)
 
 **Deploy:** SCP → server, `pm2 restart mm-bot` — działa, zero VIP_FLASH logów bo LIT już w PURE_MM (SignalEngine WAIT zone). Override zadziała gdy whale_tracker da FOLLOW_SM_SHORT a VIP wciąż będzie LONG.
+
+### 40. VIP Address Classification — BOT vs MANUAL audit (24.02)
+
+**Metoda:** Analiza fills z Hyperliquid API (userFillsByTime, userFills) — sub-1s fill %, maker %, CLOID %, fill frequency.
+
+**Wyniki (22 adresów w vip_spy):**
+
+| Alias | Typ | Fills 24h | Sub-1s% | Maker% | CLOID% | Notional | uPnL |
+|-------|-----|-----------|---------|--------|--------|----------|------|
+| **Generał** | ALGO BOT | 1,977 | 45% | 58% | 99.9% | $2.5M | +$1.9M |
+| **Wice-Generał** | ALGO BOT | 190 | 52% | 0% | 0% | $25.7M | +$16.2M |
+| **Major** | ALGO BOT | 948 | 54% | 0% | 100% | $25.1M | +$9.0M |
+| **Fasanara Capital** | MM BOT | 1,958 | 34% | 100% | 100% | $83.9M | +$14.1M |
+| **Laurent Zeimes** | ALGO BOT | 2,000 | 65% | 0% | 0% | $35.8M | +$2.1M |
+| **Abraxas Capital** | ALGO BOT | 2,000 | 68% | 8% | 100% | $3.2M | +$2.1M |
+| **donkstrategy.eth** | ALGO BOT | 2,000 | 66% | 6% | 100% | $4.7M | +$2.6M |
+| **Porucznik SOL3** | MM BOT | 1,516 | 55% | 76% | 100% | $16.1M | +$206K |
+| **0x880ac4 (donkstrat#2)** | MM BOT | 695 | 61% | 97% | 0% | $17.4M | +$4.1M |
+| **58bro.eth** | TAKER | 609 | 13% | 4% | 0% | $25.8M | +$9.3M |
+| **BTC/LIT Trader** | MM BOT | 39 | 79% | 100% | 0% | $445K | +$3.7K |
+| **OG Shorter** | **MANUAL** | 0 (7d: 2) | 55%* | 42%* | 100%* | $23.1M | +$15.5M |
+| **Kapitan fce0** | **MANUAL** | 0 (7d: 35) | 68%* | 74%* | 0%* | $11.5M | +$6.2M |
+| **Kapitan BTC** | DORMANT 21d | 0 | - | - | - | $20.3M | +$14.8M |
+| **Kapitan feec** | DORMANT | 0 | - | - | - | $13.7M | +$8.3M |
+| **Kraken A** | DORMANT 15d | 0 | - | - | - | $14.2M | +$12.8M |
+| **Porucznik SOL2** | DORMANT 16d | 0 | - | - | - | $6.9M | +$4.9M |
+| **Kraken B** | DORMANT 18d | 0 | - | - | - | $1.4M | +$1.0M |
+| **Kapitan 99b1** | DORMANT 15d | 0 | - | - | - | $1.2M | +$332K |
+| **ETH Whale** | DORMANT 18d | 0 | - | - | - | $2.8M | -$376K |
+| **Porucznik ea66** | DORMANT | 0 | - | - | - | $4.2M | -$2.0M |
+| **ZEC Conviction** | DORMANT 2d | 0 | - | - | - | $6.6M | -$3.8M |
+
+**Podsumowanie:** 6 ALGO BOT, 4 MM BOT, 1 TAKER, 2 MANUAL, 9 DORMANT, 4 EMPTY
+
+**CLOID = Custom Order ID** — smoking gun dla programmatic trading. Generał (99.9%), Major (100%), donkstrategy (100%), Fasanara (100%), Abraxas (100%).
+
+**9 DORMANT adresów trzyma $66.7M pozycji (+$60M uPnL)** — to "set and forget" lub crashnięte boty. whale_tracker liczy je w agregacie jako aktywne sygnały, co **zawyża SM SHORT consensus**.
+
+**⚠️ KRYTYCZNY WNIOSEK:** Fasanara Capital ($83.9M, 100% maker, 100% CLOID) to **pure market maker**, nie directional trader. Ich SHORT pozycje mogą być delta-neutral hedges, nie directional bets. Liczenie ich jako "SM SHORT" w agregacie jest **potencjalnie mylące**.
+
+**Implikacje dla bota:**
+1. **Dormant inflation** — $66.7M dormant SHORT pozycji zawyża agregat. Prawdziwy "live" sentiment aktywnych traderów może być bardziej neutral.
+2. **Fasanara filtr** — rozważyć oznaczenie Fasanara jako MM (weight 0.0) zamiast CONVICTION. Ich 100% maker profile = nie directional.
+3. **Najcenniejsze sygnały** — OG Shorter (MANUAL, $23M, +$15.5M) i Kapitan fce0 (MANUAL, $11.5M, +$6.2M). Rzadko tradują ale z ogromną conviction.
+4. **Generał to bot** — flip na LIT LONG to decyzja algorytmu, nie człowieka. Może reagować na quantitative signals które my nie widzimy.
 
 ### 39. LIT Vesting Distribution Alert (24.02, intel)
 
@@ -1701,6 +1784,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować dormant decay — logi `💤 [DORMANT]` po kolejnych runach whale_tracker (od 2. runu), sprawdzić czy 9 dormant adresów dostaje obniżone wagi
+- [ ] Sprawdzić SM agregat po dormant decay — BTC/ETH SHORT powinien spaść (Fasanara usunięta + dormant decay), porównać `/tmp/smart_money_data.json` przed/po
+- [ ] Monitorować `/tmp/whale_activity.json` — czy timestamps aktualizują się dla aktywnych traderów
 - [ ] Monitorować VIP Flash Override — logi `🕵️ [VIP_FLASH]`, sprawdzić czy triggeruje gdy VIP disagrees
 - [ ] LIT vesting monitoring — $17.5M unlock 24.02, obserwować presję sprzedażową i reakcję ceny
 - [ ] Monitorować FibGuard — logi `🏛️ [FIB_GUARD]`, czy guard aktywuje się blisko Fib support levels
@@ -1756,6 +1842,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] War Room dashboard expanded to 8 tokens + w1/m1 horizons, 4x2 grid layout, shrunk UI for smaller panels (DONE 23.02)
 - [x] Fix ai-executor v1 systemd conflict — Telegram 409, stub + TS_NODE_TRANSPILE_ONLY fix (DONE 23.02)
 - [x] Nansen Spot Alerts diagnoza — zero SM activity na spot dla LIT/FARTCOIN/VIRTUAL, pipeline działa ale nic do alertowania (DONE 23.02)
+- [x] Fasanara Capital reklasyfikacja — MARKET_MAKER, weight 0.0, usunięty z agregatu (~$64M phantom SHORT) (DONE 24.02)
+- [x] Dormant decay — `/tmp/whale_activity.json`, 4-tier decay (7d/14d/21d+), logi `💤 [DORMANT]` (DONE 24.02)
+- [x] Manual trader boost — OG Shorter 0.13→0.81 (6x), Kapitan fce0 0.80→0.85 (DONE 24.02)
 
 ## Notatki
 - **Fib Guard**: Redukuje askMultiplier blisko Fib support levels (0.618, 0.786, 1.0). Trzy sygnały: fibProximity (50%), pseudo-RSI (25%), drawdown (25%). SM Override: conf>=70% → guard OFF, conf>=50% → guard×0.5. Per-token overrides: BTC/ETH tighter, LIT/FARTCOIN wider. Pipeline: po bounce filter, przed dip filter. Config w `short_only_config.ts`. Logi: `🏛️ [FIB_GUARD]`.
@@ -1789,7 +1878,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **BTC SHORT Deep Dive (21.02)**: 10 portfeli shortuje BTC, 0 longuje. Łącznie 1,410 BTC ($96M), uPnL +$32M. Top entries: Kraken A $108K (-1% od ATH), Kapitan BTC $106K (-2.6%), Galaxy Digital $104K (-5%). Dwa klastry wejść: 1 paź (SOL2+fce0 tego samego dnia) i 12-13 paź (feec+Kapitan BTC dzień po dniu). Galaxy Digital jedyny kto redukuje (kupuje 37 BTC w lutym). 58bro.eth BTC SHORT $18.4M na 40x — liquidation $90,658.
 - **5 podwójnie zweryfikowanych (Smart HL + Consistent Winner)**: Major (3 poz, $30.6M), Pułkownik (0 poz, $5.5M cash, 331% ROI), Wice-Generał (45 poz, $30.8M, HYPE $16.6M underwater), 58bro.eth (7 poz, $31.4M, +$17.6M DeFi), Kapitan 99b1 (5 poz, $1.35M, mid-cap shorter)
 - **October 2025 BTC Crash ($126K→$103K, -18% w 11 dni)**: Top 8 traderów zarobiło $355M. Bitcoin OG (+$165M z 2 adresów), Abraxas Capital (+$37.9M), Galaxy Digital (+$31.4M), Fasanara Capital (+$30.8M), Generał (+$30.3M z 2 adresów), Silk Capital/Token Millionaire (+$29.9M), Wintermute (+$29.6M, market maker — pomijamy).
-- **Fasanara Capital** (`0x7fdafde5cfb5465924316eced2d3715494c517d1`): London hedge fund, tier1, +$30.8M Oct crash. Obecne: ETH SHORT $49M, BTC SHORT $25M, HYPE SHORT $14.6M = **$94.5M notional** (największy trackowany portfel). Dodany 21.02.
+- **Fasanara Capital** (`0x7fdafde5cfb5465924316eced2d3715494c517d1`): London hedge fund, +$30.8M Oct crash. $94.5M notional. **RECLASSIFIED 24.02: MARKET_MAKER, weight=0.0** — 100% maker fills, 100% CLOID = pure MM, not directional. Wyłączony z agregatu SM.
 - **Abraxas Capital** (`0xb83de012dba672c76a7dbbbf3e459cb59d7d6e36`): tier2, +$37.9M Oct crash, wypłacił $144M na Binance. Obecne: XRP $3.6M + HYPE $3.4M SHORT = $7.2M. Dodany 21.02.
 - **Bitcoin OG pełny cykl**: +$165M na BTC shorts paź 2025 → zlikwidowany -$128M na ETH LONG sty 2026. Konto zamknięte.
 - **VIP Spy (po update 21.02)**: 25 VIPów (tier1=10, tier2=10, fund=5), 25 watched coins (dodano AVAX). Bitcoin OG #2 dodany jako "watching for return". vip-spy zrestartowany.
@@ -1808,3 +1897,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **sm-short-monitor**: Nansen API 403 "Insufficient credits" — 62% success rate (5165 errors / 8212 successes). Proces działa, częściowo fetchuje dane. Fix wymaga dokupienia kredytów Nansen.
 - **VIP Flash Override (24.02)**: Czyta `/tmp/vip_spy_state.json` po `analyzeTokenSm()`. VIP (signalWeight >= 0.90) z pozycją >= $50K disagrees z directional mode → downgrade do PURE_MM. Nie flip — za agresywne. Logi: `🕵️ [VIP_FLASH]`. Stałe: `VIP_FLASH_MIN_WEIGHT=0.90`, `VIP_FLASH_MIN_POSITION_USD=50000`.
 - **LIT Vesting (24.02)**: $17.5M unlock z `Lighter: LIT Distributor` → Lightspeed Fund VC + Token Millionaires. Nie organiczny popyt. Dominacja Lighter 60%→8.1%. Cena ATH $3+ → $1.35. Buyback program $30-40M (bullish long-term).
+- **VIP Classification (24.02)**: 6 ALGO BOT (Generał, Wice-Generał, Major, Laurent Zeimes, Abraxas, donkstrategy), 4 MM BOT (Fasanara 100% maker, SOL3, 0x880ac4, BTC/LIT Trader), 1 TAKER (58bro.eth), 2 MANUAL (OG Shorter, Kapitan fce0), 9 DORMANT ($66.7M stale positions), 4 EMPTY. CLOID = custom order ID = programmatic trading.
+- **Dormant Decay (24.02)**: `/tmp/whale_activity.json` tracks last position change per address. `aggregate_sm_positions()` applies decay: 0-7d=1.0, 7-14d=0.50, 14-21d=0.25, 21d+=0.10. Pierwszy run ustawia baseline — decay zaczyna działać od 2. runu. Logi `💤 [DORMANT]`.
+- **Manual Trader Boost (24.02)**: OG Shorter upgraded: ACTIVE→CONVICTION, weight 0.65→0.85, nansen_label "All Time Smart Trader" → finalWeight 0.13→0.81 (6x). Kapitan fce0: weight 0.80→0.85 → finalWeight 0.80→0.85. MANUAL traderzy (2 fills/7d) mają najwyższy conviction — rzadko tradują ale z ogromną dokładnością.
