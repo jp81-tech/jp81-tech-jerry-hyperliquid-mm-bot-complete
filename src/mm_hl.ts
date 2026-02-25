@@ -7493,7 +7493,13 @@ class HyperliquidMMBot {
     })
 
     // Institutional Trade Permissions (Regime Gating)
-    const permissions = this.marketVision!.getTradePermissions(pair);
+    // 🧠 PURE_MM BYPASS: Regime is for directional trading (SM_FOLLOWER), not market making.
+    // MM must quote BOTH sides. Skip regime entirely for PURE_MM pairs.
+    const signalEngineResultRegime = getSignalEngineForPair(pair);
+    const isPureMmRegimeBypass = signalEngineResultRegime?.signalEngineOverride && signalEngineResultRegime?.mode === MmMode.PURE_MM;
+    const permissions = isPureMmRegimeBypass
+      ? { allowLongs: true, allowShorts: true, reason: 'PURE_MM_REGIME_BYPASS' }
+      : this.marketVision!.getTradePermissions(pair);
 
     // 🛑 EMERGENCY MON GUARD (Hard Coded Safety)
     if (pair === 'MON') {

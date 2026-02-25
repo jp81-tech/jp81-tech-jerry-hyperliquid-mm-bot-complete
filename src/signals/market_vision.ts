@@ -952,7 +952,9 @@ export class MarketVisionService {
 
     // 3. TRAIN WRECK PROTECTION (Don't short parabolic pumps)
     // If Trend is Bullish on 4h OR 15m has Golden Ticket (Bullish Cross), do not stand in front of the train.
-    const isBullishTrend = analysis.trend4h === 'bull' || (analysis.trend15m === 'bull' && analysis.rsi15m < 80);
+    // FIX: 15m bull in 4h bear = dead cat bounce, NOT bullish trend.
+    // Don't block shorts based on 15m bounce when 4h anchor is bearish.
+    const isBullishTrend = analysis.trend4h === 'bull' || (analysis.trend4h !== 'bear' && analysis.trend15m === 'bull' && analysis.rsi15m < 80);
 
     if (isBullishTrend) {
       // TACTICAL OVERRIDE: 15m Momentum Cross (The "Golden Ticket" for Shorting)
