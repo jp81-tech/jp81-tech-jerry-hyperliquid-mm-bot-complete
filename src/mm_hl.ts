@@ -3271,6 +3271,13 @@ class LiveTrading implements TradingInterface {
    */
   async closePositionForPair(pair: string, reason: string = 'rotation_cleanup'): Promise<void> {
     try {
+      // 🔒 BOT_MODE guard: only close pairs that belong to THIS bot process
+      const myBotPairs = IS_SM_FOLLOWER_BOT ? SM_ONLY_PAIRS : IS_PURE_MM_BOT ? MM_ONLY_PAIRS : []
+      if (myBotPairs.length > 0 && !myBotPairs.includes(pair)) {
+        console.log(`🔒 [BOT_MODE] ${pair}: Skipping close (${reason}) — not managed by this ${BOT_MODE} process`)
+        return
+      }
+
       // 🚫 MANUAL_POSITIONS — positions managed manually, bot should NOT touch them
       const manualPositions = (process.env.MANUAL_POSITIONS ?? '').split(',').map(s => s.trim().toUpperCase()).filter(Boolean)
       if (manualPositions.includes(pair.toUpperCase())) {
@@ -3401,6 +3408,13 @@ class LiveTrading implements TradingInterface {
    * Used by rotation cleanup to get better fills like the Generał.
    */
   async closePositionTwap(pair: string, reason: string = 'rotation_cleanup', configOverride?: Partial<TwapConfig>): Promise<void> {
+    // BOT_MODE guard: only close pairs that belong to THIS bot process
+    const myBotPairs = IS_SM_FOLLOWER_BOT ? SM_ONLY_PAIRS : IS_PURE_MM_BOT ? MM_ONLY_PAIRS : []
+    if (myBotPairs.length > 0 && !myBotPairs.includes(pair)) {
+      console.log(`🔒 [BOT_MODE] ${pair}: skipping TWAP close — not managed by this ${BOT_MODE} process`)
+      return
+    }
+
     // If TWAP not initialized or already active for this pair, fall back to IOC
     if (!this.twapExecutor || this.twapExecutor.isActive(pair)) {
       return this.closePositionForPair(pair, reason)
@@ -5251,9 +5265,15 @@ class HyperliquidMMBot {
       )
 
       // 4. Determine which pairs to close (in current positions BUT NOT in desired list)
+      // BOT_MODE guard: only close pairs that belong to THIS bot process
+      const myBotPairs = IS_SM_FOLLOWER_BOT ? SM_ONLY_PAIRS : IS_PURE_MM_BOT ? MM_ONLY_PAIRS : []
       const pairsToClose: string[] = []
       for (const pair of currentPairs) {
         if (!allowedSet.has(pair)) {
+          if (myBotPairs.length > 0 && !myBotPairs.includes(pair)) {
+            this.notifier.info(`🔒 [BOT_MODE] Skipping ${pair} cleanup — not managed by this ${BOT_MODE} process`)
+            continue
+          }
           pairsToClose.push(pair)
         }
       }
