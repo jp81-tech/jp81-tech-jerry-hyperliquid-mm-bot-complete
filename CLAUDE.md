@@ -1,11 +1,11 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-24
+- Data: 2026-02-25
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
-- PM2 zarządza botem: `pm2 restart mm-bot`
+- PM2 zarządza botem: `pm2 restart mm-follower mm-pure`
 - GitHub: `jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete`
 
 ## Nad czym pracujemy
@@ -28,7 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
-- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard)
+- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
@@ -41,6 +41,78 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 25 lutego 2026
+
+### 42. Pump Shield — ochrona shortów przed pumpami (25.02)
+
+**Problem:** Bot trzyma SHORT pozycje (zgodnie z SM consensus), ale podczas gwałtownych pompek grid BID ordery zostają wypełnione — bot KUPUJE na szczycie, zamykając shorta ze stratą.
+
+**Realne straty:**
+- **MON 13.02**: Short @ $0.0171-0.0188, pump +26% do $0.0225. Bot zamknął CAŁY short w 1 sekundzie (20 BUYs @ $0.0225). Strata: **-$2,130**
+- **LIT 06.02**: Short @ $1.49-1.50, pump +10% do $1.65. Bot zamknął short (7 BUYs @ $1.65). Strata: **-$570**
+
+**Wzorzec 58bro.eth:** Przy pumpie DODAJE do shorta (scale-in SELL orders), a TP grid ma niżej. Pump Shield naśladuje ten pattern.
+
+**Pliki:** `src/config/short_only_config.ts`, `src/mm_hl.ts`
+
+**A) PumpShieldConfig (short_only_config.ts):**
+- Interface + defaults + 8 per-token overrides + getter
+- 3 levele detekcji: light (bid×0.50), moderate (bid×0.10), aggressive (bid×0.00)
+- Scale-in: opcjonalne zwiększenie asks podczas pumpa (×1.30)
+- Cooldown: 3 ticki po pumpie z 50% bidami
+- SM integration: smMinConfidence 40% (nawet niski SM SHORT aktywuje)
+
+**Per-token progi (% rise over 5 ticks):**
+
+| Token | Light | Moderate | Aggressive | Scale-in |
+|-------|-------|----------|------------|----------|
+| BTC | 0.5% | 1.0% | 2.0% | yes |
+| ETH | 0.6% | 1.2% | 2.5% | yes |
+| SOL | 0.8% | 1.5% | 3.0% | yes |
+| HYPE | 1.0% | 2.0% | 3.5% | yes |
+| LIT/FARTCOIN/MON | 1.5% | 3.0% | 5.0% | yes |
+| kPEPE | 2.0% | 4.0% | 6.0% | **no** |
+
+kPEPE: wyższe progi (wysoka vol), scale-in wyłączony (PURE_MM, nie kierunkowy).
+
+**B) Price History Tracking (mm_hl.ts):**
+- `pumpShieldHistory: Map<string, {price, ts}[]>` — last 10 ticks per pair
+- `pumpShieldCooldowns: Map<string, number>` — ticks remaining per pair
+- Updated every tick after midPrice calculation
+
+**C) detectPump() (mm_hl.ts):**
+- Sprawdza max rise % w oknie N ticków (windowTicks=5)
+- Porównuje też single-tick change (nagłe spiki)
+- Zwraca PumpState: {isPump, level, changePct, windowTicks}
+
+**D) Grid Pipeline Filter (mm_hl.ts, przed BounceFilter):**
+- SM check: aktywny gdy smDir=SHORT + confidence>=40%, LUB gdy ma SHORT position
+- Przy pumpie: redukuje/blokuje bidy, opcjonalnie scale-in asks (cap 2.5x)
+- Cooldown: po pumpie 3 ticki z bid×0.50
+- Log: `🛡️ [PUMP_SHIELD] PAIR: LEVEL pump +X.X% → bid×Y.YY ask×Z.ZZ | SM: DIR XX%`
+
+**E) Nuclear Level (mm_hl.ts, po PROFIT_FLOOR):**
+- Aggressive pump: usuwa bid orders z grida
+- Aggressive pump: cancelluje istniejące bid orders na giełdzie
+- Log: `🛡️ [PUMP_SHIELD] PAIR: Removed N bid orders (AGGRESSIVE pump protection)`
+
+**SM Integration:**
+
+| SM Dir | Confidence | Pump | Action |
+|--------|-----------|------|--------|
+| SHORT | >= 40% | YES | Shield ACTIVE |
+| SHORT | < 40% | YES | ACTIVE only if has SHORT pos |
+| LONG | any | YES | Shield OFF (pump aligned) |
+| any | any | NO | Shield OFF |
+
+**Czego NIE robimy:** Nie blokujemy Anaconda SL. Nie zmieniamy HOLD_FOR_TP. Nie tworzymy nowych plików. Nie dodajemy nowych API calls.
+
+**Deploy:** SCP → server, `pm2 restart mm-follower mm-pure --update-env`. Oba online, zero crash.
+
+**Monitoring:** `pm2 logs mm-pure | grep PUMP_SHIELD`
 
 ---
 
@@ -1828,6 +1900,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować Pump Shield — logi `🛡️ [PUMP_SHIELD]`, sprawdzić czy triggeruje przy price spikach na kPEPE i SM-following pairs
+- [ ] Sprawdzić Pump Shield na kPEPE — progi 2/4/6%, czy nie blokuje normalnych ruchów cenowych
+- [ ] Sprawdzić scale-in na SM pairs — czy ask×1.30 działa poprawnie podczas pumpa (nie dotyczy kPEPE)
+- [ ] Sprawdzić cooldown — czy 3 ticki z bid×0.50 przywraca normalność po pumpie
 - [ ] Monitorować dormant decay — logi `💤 [DORMANT]` po kolejnych runach whale_tracker (od 2. runu), sprawdzić czy 9 dormant adresów dostaje obniżone wagi
 - [ ] Sprawdzić SM agregat po dormant decay — BTC/ETH SHORT powinien spaść (Fasanara usunięta + dormant decay), porównać `/tmp/smart_money_data.json` przed/po
 - [ ] Monitorować `/tmp/whale_activity.json` — czy timestamps aktualizują się dla aktywnych traderów
@@ -1956,3 +2032,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **LIT SM landscape (24.02)**: Generał #1 PnL (+$2.8M realized). Wice-Generał SHORT $370K. Laurent Zeimes SHORT $1.3M. Manifold SHORT $1.6M. "ghostofsonora" aktywny — net LONG 221K LIT ($310K). Token Millionaire 0x687fed zamknął LONG 500K LIT. Zero SM spot activity na Ethereum.
 - **Contrarian Long tracker (24.02)**: 0x015354 — jedyny notable SM BTC LONG ($12M, 191 BTC, entry $65,849, 2x isolated, -$597K underwater). WATCH tier, weight 0.15. Negative confirmation: gdy traci, SHORT thesis potwierdzona. nansen_label "Smart HL Perps Trader".
 - **SM Live Activity (24.02)**: 58bro.eth reduced ~49 BTC ($3.1M) @ $63K (take profit, still 212 BTC SHORT). OG Shorter reduced 20 BTC ($1.3M) @ $66,130. Selini Capital fresh entry $4.7M. ETH: 58bro $9.3M SHORT, Galaxy $6.2M (+$8.8M uPnL). Fasanara $45M ETH SHORT (MM, ignored). Abraxas +$14.1M realized ETH PnL 7d.
+- **Pump Shield (25.02)**: Ochrona shortów przed pumpami. 3 levele: light (bid×0.50), moderate (bid×0.10), aggressive (bid×0.00 + cancel exchange bids). Per-token progi: BTC 0.5/1/2%, kPEPE 2/4/6%, LIT/FARTCOIN 1.5/3/5%. Scale-in asks×1.30 podczas pumpa (wyłączone dla kPEPE). SM integration: aktywny gdy SM SHORT + confidence>=40%. Cooldown 3 ticki. Config w `short_only_config.ts`. Pipeline: przed BounceFilter + po PROFIT_FLOOR. Logi: `🛡️ [PUMP_SHIELD]`.
+- **PM2 naming (25.02)**: Bot działa jako `mm-follower` (id 45) i `mm-pure` (id 48), NIE `mm-bot`. Restart: `pm2 restart mm-follower mm-pure`.

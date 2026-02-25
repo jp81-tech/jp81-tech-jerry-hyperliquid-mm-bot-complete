@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -371,6 +371,49 @@ function getKpepeTimeDecayMult(actualSkew: number): number {
   if (durationMin > 15) return 1.25
   if (durationMin > 5)  return 1.10
   return 1.0
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUMP SHIELD — detect rapid price rises over N ticks
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PumpState {
+  isPump: boolean
+  level: 'none' | 'light' | 'moderate' | 'aggressive'
+  changePct: number
+  windowTicks: number
+}
+
+function detectPump(
+  history: { price: number; ts: number }[],
+  currentPrice: number,
+  config: PumpShieldConfig
+): PumpState {
+  if (history.length < 2) return { isPump: false, level: 'none', changePct: 0, windowTicks: 0 }
+
+  // Look at last N ticks (windowTicks)
+  const window = history.slice(-config.windowTicks)
+  const minPrice = Math.min(...window.map(p => p.price))
+  const changePct = ((currentPrice - minPrice) / minPrice) * 100
+
+  // Also check single-tick change (last tick vs now)
+  const lastPrice = history[history.length - 1].price
+  const tickChangePct = ((currentPrice - lastPrice) / lastPrice) * 100
+
+  // Use the larger of window change and tick change
+  const maxChange = Math.max(changePct, tickChangePct)
+
+  let level: PumpState['level'] = 'none'
+  if (maxChange >= config.aggressivePumpPct) level = 'aggressive'
+  else if (maxChange >= config.moderatePumpPct) level = 'moderate'
+  else if (maxChange >= config.lightPumpPct) level = 'light'
+
+  return {
+    isPump: level !== 'none',
+    level,
+    changePct: maxChange,
+    windowTicks: window.length,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3548,6 +3591,10 @@ class HyperliquidMMBot {
   // Bounce Peak Tracker: stores highest price seen during a bounce per pair
   private bounceHighs: Map<string, { price: number, ts: number }> = new Map()
 
+  // 🛡️ PUMP SHIELD — price history & cooldown tracking
+  private pumpShieldHistory: Map<string, { price: number; ts: number }[]> = new Map()
+  private pumpShieldCooldowns: Map<string, number> = new Map()
+
   // Risk Management (Hard Stop Protection)
   private riskManager?: RiskManager
   private currentRiskState?: RiskCheckResult
@@ -3754,7 +3801,7 @@ class HyperliquidMMBot {
       .split(',')
       .map((s) => s.trim().toUpperCase())
       .filter((s) => s.length > 0)
-    const dynamicConfigEnabled = process.env.DYNAMIC_CONFIG_ENABLED !== 'false'
+    const dynamicConfigEnabled = process.env.DYNAMIC_CONFIG_ENABLED !== 'false' && !IS_PURE_MM_BOT
     if (dynamicConfigEnabled && dynamicConfigTokens.length > 0) {
       this.dynamicConfigManager = new DynamicConfigManager({
         tokens: dynamicConfigTokens,
@@ -4175,8 +4222,10 @@ class HyperliquidMMBot {
         this.checkFillWatchdog()
 
         // 🐋 Load whale tracker data into SmAutoDetector cache (refreshes every 30s)
+        // 🤖 BOT_MODE: Only analyze tokens relevant to this bot process
         if (!IS_PURE_MM_BOT) {
-          await loadAndAnalyzeAllTokens()
+          const smFilter = IS_SM_FOLLOWER_BOT && SM_ONLY_PAIRS.length > 0 ? SM_ONLY_PAIRS : undefined
+          await loadAndAnalyzeAllTokens(false, smFilter)
         }
 
         // 🔔 NANSEN ALERT QUEUE: Process alerts from Telegram (via ai-executor)
@@ -4352,7 +4401,8 @@ class HyperliquidMMBot {
           activePairs = manualPairs
         } else if (rotationMode === 'sm' && !IS_PURE_MM_BOT) {
           // Auto-select top 3 by Engine score (force reload to avoid stale cache from dynamic_config)
-          await loadAndAnalyzeAllTokens(true)
+          const smFilter = IS_SM_FOLLOWER_BOT && SM_ONLY_PAIRS.length > 0 ? SM_ONLY_PAIRS : undefined
+          await loadAndAnalyzeAllTokens(true, smFilter)
           const smPairs = getTopSmPairs(3)
           if (smPairs.length > 0) {
             activePairs = smPairs
@@ -4489,17 +4539,23 @@ class HyperliquidMMBot {
 
         // 🚀 IMMEDIATE SIGNAL: Check if AlphaEngine has high-priority signals
         // If so, reduce sleep time for faster reaction to whale moves
+        // 🤖 BOT_MODE: Only process signals for coins in our activePairs
         const hasImmediateSignal = alphaEngineIntegration.hasImmediateSignals()
         if (hasImmediateSignal) {
           const immediateSignal = alphaEngineIntegration.popImmediateSignal()
           if (immediateSignal) {
-            this.notifier.info(
-              `🚀 [GRID] FORCE UPDATE: Processing IMMEDIATE signal for ${immediateSignal.coin}! ` +
-              `Action=${immediateSignal.action} Conf=${immediateSignal.confidence}%`
-            )
-            // Fast cycle - only 5s delay instead of normal 60s
-            await this.sleep(5000)
-            continue // Skip to next iteration immediately
+            if (!activePairs.includes(immediateSignal.coin)) {
+              // Signal is for a coin we don't trade — discard silently
+              console.log(`🤖 [BOT_MODE] Discarding IMMEDIATE signal for ${immediateSignal.coin} — not in activePairs (${activePairs.join(',')})`)
+            } else {
+              this.notifier.info(
+                `🚀 [GRID] FORCE UPDATE: Processing IMMEDIATE signal for ${immediateSignal.coin}! ` +
+                `Action=${immediateSignal.action} Conf=${immediateSignal.confidence}%`
+              )
+              // Fast cycle - only 5s delay instead of normal 60s
+              await this.sleep(5000)
+              continue // Skip to next iteration immediately
+            }
           }
         }
 
@@ -6301,6 +6357,13 @@ class HyperliquidMMBot {
 
     const midPrice = Number(pairData.midPx || 0)
     const funding = Number(pairData.funding || 0)
+
+    // --- PUMP SHIELD: track price history ---
+    const psHistory = this.pumpShieldHistory.get(pair) || []
+    psHistory.push({ price: midPrice, ts: Date.now() })
+    if (psHistory.length > 10) psHistory.shift()
+    this.pumpShieldHistory.set(pair, psHistory)
+
     if (midPrice === 0) {
       this.notifier.warn(`⚠️  Invalid mid price for ${pair}`)
       return
@@ -7603,6 +7666,62 @@ class HyperliquidMMBot {
     // 🔍 DEBUG: Track FINAL capitalPerPair right before grid generation
     console.log(`[DEBUG GRID] ${pair}: capitalPerPair=$${capitalPerPair.toFixed(0)} midPrice=$${midPrice.toFixed(4)}`)
 
+    // === 🛡️ PUMP SHIELD: block/reduce bids during rapid price rise ===
+    const pumpShieldConfig = getPumpShieldConfig(pair)
+    let pumpShieldActive = false
+
+    if (pumpShieldConfig.enabled) {
+      const psHist = this.pumpShieldHistory.get(pair) || []
+      const pumpState = detectPump(psHist, midPrice, pumpShieldConfig)
+
+      // Check cooldown
+      const cooldownLeft = this.pumpShieldCooldowns.get(pair) || 0
+
+      // SM check: only activate when SM direction is SHORT with sufficient confidence
+      const smConf = (signalEngineResultFso?.convictionScore ?? 0) * 100
+      const smIsBearish = smDir === 'SHORT' && smConf >= pumpShieldConfig.smMinConfidence
+
+      // Also activate for any pair with SHORT position (protect existing shorts)
+      const hasShortPos = position && position.size < 0
+      const shouldActivate = smIsBearish || (hasShortPos && pumpState.level !== 'none')
+
+      if (pumpState.isPump && shouldActivate) {
+        pumpShieldActive = true
+
+        // Reduce/block bids
+        if (pumpState.level === 'aggressive') {
+          sizeMultipliers.bid *= pumpShieldConfig.aggressiveBidMult  // 0.00
+        } else if (pumpState.level === 'moderate') {
+          sizeMultipliers.bid *= pumpShieldConfig.moderateBidMult    // 0.10
+        } else {
+          sizeMultipliers.bid *= pumpShieldConfig.lightBidMult       // 0.50
+        }
+
+        // Scale-in: increase asks (add to short like 58bro)
+        if (pumpShieldConfig.scaleInEnabled && smIsBearish) {
+          sizeMultipliers.ask = Math.min(sizeMultipliers.ask * pumpShieldConfig.scaleInAskMult, 2.5)
+        }
+
+        // Set cooldown
+        this.pumpShieldCooldowns.set(pair, pumpShieldConfig.cooldownTicks)
+
+        console.log(
+          `🛡️ [PUMP_SHIELD] ${pair}: ${pumpState.level.toUpperCase()} pump +${pumpState.changePct.toFixed(1)}% ` +
+          `→ bid×${sizeMultipliers.bid.toFixed(2)}` +
+          (pumpShieldConfig.scaleInEnabled && smIsBearish ? ` ask×${sizeMultipliers.ask.toFixed(2)} (scale-in)` : '') +
+          ` | SM: ${smDir} ${smConf.toFixed(0)}%`
+        )
+      } else if (cooldownLeft > 0) {
+        // Pump subsided but still in cooldown — keep reduced bids
+        sizeMultipliers.bid *= 0.50  // 50% bids during cooldown
+        this.pumpShieldCooldowns.set(pair, cooldownLeft - 1)
+
+        if (cooldownLeft === 1) {
+          console.log(`🛡️ [PUMP_SHIELD] ${pair}: Cooldown expired, restoring full bids`)
+        }
+      }
+    }
+
     // 🎯 LOW-LIQ GRID EXPANSION (expand grid to allow orders to fit)
     // Problem: rebucket logic was zeroing out layers due to tight spread
     // Fix: widen the grid by increasing gridAskMult to 5.0x
@@ -7945,6 +8064,31 @@ class HyperliquidMMBot {
         if (removed > 0) {
           console.log(`🛡️ [PROFIT_FLOOR] ${pair}: LONG entry $${entryPx.toFixed(6)} → removed ${removed} asks below entry (mid: $${midPrice.toFixed(6)})`)
         }
+      }
+    }
+
+    // 🛡️ PUMP SHIELD: Remove bid orders when aggressive pump detected
+    if (pumpShieldActive && sizeMultipliers.bid === 0 && Array.isArray(gridOrders)) {
+      const bidsBefore = gridOrders.filter((o: any) => o.side === 'bid').length
+      gridOrders = gridOrders.filter((o: any) => o.side !== 'bid')
+      if (bidsBefore > 0) {
+        console.log(`🛡️ [PUMP_SHIELD] ${pair}: Removed ${bidsBefore} bid orders (AGGRESSIVE pump protection)`)
+      }
+    }
+
+    // 🛡️ PUMP SHIELD: Cancel existing bid orders on exchange during aggressive pump
+    if (pumpShieldActive && sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading) {
+      try {
+        const existingOrders = await this.trading.getOpenOrders(pair)
+        const bidOrders = existingOrders.filter((o: any) => o.side === 'B' || o.side === 'buy')
+        if (bidOrders.length > 0) {
+          for (const bid of bidOrders) {
+            await this.trading.cancelOrder(bid.oid?.toString() || bid.orderId?.toString())
+          }
+          console.log(`🛡️ [PUMP_SHIELD] ${pair}: Cancelled ${bidOrders.length} existing bid orders on exchange`)
+        }
+      } catch (e) {
+        // Non-critical — next tick will clean up
       }
     }
 

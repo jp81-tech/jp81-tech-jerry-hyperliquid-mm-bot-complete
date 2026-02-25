@@ -175,3 +175,68 @@ export const FIB_GUARD_OVERRIDES: Record<string, Partial<FibGuardConfig>> = {
 export function getFibGuardConfig(token: string): FibGuardConfig {
   return { ...FIB_GUARD_DEFAULTS, ...(FIB_GUARD_OVERRIDES[token.toUpperCase()] || {}) }
 }
+
+// ============================================================
+// PUMP SHIELD — bid protection during rapid price rises
+// Blocks/reduces bids when price pumps while holding SHORT
+// Prevents grid bids from closing shorts at the top of a pump
+// Scale-in: optionally increases asks during pump (like 58bro)
+// ============================================================
+
+export interface PumpShieldConfig {
+  enabled: boolean
+
+  // Detection: % price rise over N ticks to trigger
+  lightPumpPct: number          // e.g., 1.0% — light bid reduction
+  moderatePumpPct: number       // e.g., 2.0% — heavy bid reduction
+  aggressivePumpPct: number     // e.g., 3.5% — block all bids
+
+  // Reaction: bid multiplier per level
+  lightBidMult: number          // 0.50 — reduce 50%
+  moderateBidMult: number       // 0.10 — reduce 90%
+  aggressiveBidMult: number     // 0.00 — block all bids
+
+  // Scale-in: increase asks during pump (like 58bro)
+  scaleInEnabled: boolean
+  scaleInAskMult: number        // 1.30 — increase asks 30%
+
+  // Detection window
+  windowTicks: number           // 5 ticks (5 min at 60s interval)
+
+  // Cooldown: ticks after pump before restoring bids
+  cooldownTicks: number         // 3 ticks (3 min)
+
+  // SM integration: only activate when SM confidence >= this
+  smMinConfidence: number       // 40% — even low SM SHORT confidence activates
+}
+
+const PUMP_SHIELD_DEFAULTS: PumpShieldConfig = {
+  enabled: true,
+  lightPumpPct: 1.0,
+  moderatePumpPct: 2.0,
+  aggressivePumpPct: 3.5,
+  lightBidMult: 0.50,
+  moderateBidMult: 0.10,
+  aggressiveBidMult: 0.00,
+  scaleInEnabled: true,
+  scaleInAskMult: 1.30,
+  windowTicks: 5,
+  cooldownTicks: 3,
+  smMinConfidence: 40,
+}
+
+const PUMP_SHIELD_OVERRIDES: Record<string, Partial<PumpShieldConfig>> = {
+  'BTC':      { lightPumpPct: 0.5, moderatePumpPct: 1.0, aggressivePumpPct: 2.0 },
+  'ETH':      { lightPumpPct: 0.6, moderatePumpPct: 1.2, aggressivePumpPct: 2.5 },
+  'SOL':      { lightPumpPct: 0.8, moderatePumpPct: 1.5, aggressivePumpPct: 3.0 },
+  'HYPE':     { lightPumpPct: 1.0, moderatePumpPct: 2.0, aggressivePumpPct: 3.5 },
+  'LIT':      { lightPumpPct: 1.5, moderatePumpPct: 3.0, aggressivePumpPct: 5.0 },
+  'FARTCOIN': { lightPumpPct: 1.5, moderatePumpPct: 3.0, aggressivePumpPct: 5.0 },
+  'kPEPE':    { lightPumpPct: 2.0, moderatePumpPct: 4.0, aggressivePumpPct: 6.0, scaleInEnabled: false },
+  'MON':      { lightPumpPct: 1.5, moderatePumpPct: 3.0, aggressivePumpPct: 5.0 },
+}
+
+export function getPumpShieldConfig(pair: string): PumpShieldConfig {
+  const overrides = PUMP_SHIELD_OVERRIDES[pair] || {}
+  return { ...PUMP_SHIELD_DEFAULTS, ...overrides }
+}

@@ -27,7 +27,8 @@
 19. [VIP Flash Override — szpieg ratuje sytuacje](#vip-flash-override--szpieg-ratuje-sytuacje)
 20. [LIT Vesting — anatomia Nansen alertu](#lit-vesting--anatomia-nansen-alertu)
 21. [Czyszczenie danych — Fasanara, Dormant Decay, Manual Boost](#czyszczenie-danych--fasanara-dormant-decay-manual-boost)
-22. [Slowniczek](#slowniczek)
+22. [Pump Shield — ochrona shortow przed pumpami](#pump-shield--ochrona-shortow-przed-pumpami)
+23. [Slowniczek](#slowniczek)
 23. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
 
 ---
@@ -3187,3 +3188,148 @@ Nie wymaga bazy danych, IPC, czy lockfile — plik JSON w `/tmp` wystarczy.
 Gdybysmy od poczatku zaprojektowali bota z myśla o dwoch trybach, mielibysmy czyste interfejsy. Zamiast tego musielismy "operowac na otwartym sercu" — dodawac flagi do dzialajacego systemu produkcyjnego. To dzialalo, ale byloby latwiejsze gdybysmy pomysleli o tym wczesniej.
 
 **Zasada dobrej inzynierii:** Gdy widzisz ze jeden modul robi dwie fundamentalnie rozne rzeczy — rozdziel go zanim stanie sie zbyt skomplikowany. Im dluzej czekasz, tym wiecej branchy i wyjatkow musisz ogarniać.
+
+---
+
+## Pump Shield — ochrona shortow przed pumpami
+
+### Problem: zolnierz ucieka z okopow
+
+Wyobraz sobie zolnierza w okopie. Ma rozkaz od generala: "Trzymaj pozycje SHORT". Wszystkie dane — whale tracker, Signal Engine, Smart Money consensus — mowia: "trzymaj shorta, ten token pojdzie w dol".
+
+I nagle — BAM. Cena wyskakuje w gore o 25% w ciagu kilku minut. To nie zmiana trendu — to krotkoterminowa pompka (fake pump). Moze to likwidacje shortow, moze manipulacja, moze po prostu szum rynkowy.
+
+Bot mial rozstawione ordery kupna (bidy) w gridzie — standardowa czesc market-makingu. Kiedy cena poszla w gore, gielda wypelnila te bidy. Bot KUPIL na samym szczycie pompki, zamykajac shorta ze strata.
+
+**Realne straty:**
+- **MON 13 lutego**: Bot mial shorta @ ~$0.018. Pump +26% do $0.0225. Bot kupil CALY short w 1 sekundzie (20 transakcji BUY). **Strata: -$2,130.**
+- **LIT 6 lutego**: Bot mial shorta @ ~$1.50. Pump +10% do $1.65. Bot kupil 7 razy. **Strata: -$570.**
+
+To tak jakby zolnierz panicznie uciekal na widok flar oswietleniowych — zamiast trzymac pozycje, porzucil ja w najgorszym mozliwym momencie.
+
+### Wzorzec 58bro.eth — profesjonalista robi odwrotnie
+
+58bro.eth to jeden z naszych sledzonych wielorybow — $31.4M w pozycjach, +$9.3M zysku. Robi dokladnie **odwrotnie** od naszego bota:
+
+Kiedy cena pumpa w gore, 58bro **DODAJE do shorta**. Ma SELL ordery na $66K-$69.75K — to nie stop-lossy, to **scale-in levels**. Cena rosnie? Super, sprzedaje wiecej po lepszej cenie. Ma tez BUY ordery na $50K-$62K — to jego take-profit grid, gdzie zamyka shorta z zyskiem.
+
+**Analogia z pokerem:** Amator majacy AK-suited panikuje gdy na flopie wypadaja same karty blotki. 58bro z tym samym ukladem podnosi stawke — wie ze statystycznie wygra, a chwilowe blotki to szum. Pump Shield uczy naszego bota reagowac jak 58bro: **blokuj kupno na pumpie, opcjonalnie dodawaj do shorta**.
+
+### Architektura — 5 krokow na kazdy tick
+
+```
+KAZDY TICK (co ~60 sekund):
+
+1. TRACK    → Zapisz cene do historii (last 10 ticks)
+2. DETECT   → Sprawdz czy cena rosnie za szybko (min w oknie 5 tickow)
+3. SM CHECK → Czy SM mowi SHORT? Czy mamy SHORT pozycje?
+4. REACT    → Redukuj/blokuj bidy + opcjonalnie zwieksz aski
+5. NUCLEAR  → Usun bidy z grida + anuluj bidy na gieldzie
+```
+
+**Detekcja:** Znajdujemy minimum ceny w oknie 5 tickow, obliczamy % wzrostu od minimum do aktualnej ceny. Porownujemy z progami per-token.
+
+**Trzy levele:**
+
+| Level | Co robi | Kiedy |
+|-------|---------|-------|
+| LIGHT | bid × 0.50 (polowa bidow) | Maly pump (np. BTC +0.5%) |
+| MODERATE | bid × 0.10 (90% mniej bidow) | Sredni pump (np. BTC +1%) |
+| AGGRESSIVE | bid × 0.00 + usun z grida + cancel na gieldzie | Duzy pump (np. BTC +2%) |
+
+### Dlaczego per-token progi?
+
+1% wzrost na BTC to zupelnie co innego niz 1% na kPEPE:
+
+| Token | Typowa 5-min vol | Light | Moderate | Aggressive |
+|-------|-------------------|-------|----------|------------|
+| BTC | 0.1-0.3% | 0.5% | 1.0% | 2.0% |
+| ETH | 0.2-0.4% | 0.6% | 1.2% | 2.5% |
+| SOL | 0.3-0.6% | 0.8% | 1.5% | 3.0% |
+| LIT/FARTCOIN/MON | 0.5-1.5% | 1.5% | 3.0% | 5.0% |
+| kPEPE | 0.5-2.0% | 2.0% | 4.0% | 6.0% |
+
+**Zasada kciuka:** Light prog = ~2x normalnej 5-minutowej zmiennosci. Chcemy lapac prawdziwe pumpy, nie normalny szum.
+
+**kPEPE ma `scaleInEnabled: false`** — bo jest w trybie PURE_MM (symetryczny market making). Nie chcemy dodawac kierunkowych pozycji na kPEPE. Na BTC/LIT/FARTCOIN (FOLLOW_SM_SHORT) scale-in ma sens — dodajesz do shorta na pumpie, jak 58bro.
+
+### SM Integration — nie blokuj "prawdziwych" pumpow
+
+Kluczowa inteligencja: Shield NIE blokuje bidow gdy SM mowi LONG i cena rosnie. Bo wtedy pump jest "prawdziwy" — aligned z fundamentami. Blokuje TYLKO gdy SM mowi SHORT (pump to false move).
+
+| SM Dir | Pump | Shield | Dlaczego |
+|--------|------|--------|----------|
+| SHORT | YES | ACTIVE | Pump to trap — nie kupuj |
+| LONG | YES | OFF | Pump aligned z SM — pozwol zamknac |
+| any | NO | OFF | Normalny rynek |
+
+### Gdzie siedzi w pipeline
+
+```
+sizeMultipliers = { bid: 1.0, ask: 1.0 }
+       |
+       v
+  PUMP SHIELD          ← NOWE (modyfikuje bid/ask)
+  BOUNCE FILTER        (modyfikuje ask)
+  FIB GUARD            (modyfikuje ask)
+  DIP FILTER           (modyfikuje bid)
+  FUNDING FILTER       (blokuje gdy funding crowded)
+       |
+       v
+  === GENEROWANIE GRIDA ===
+       |
+       v
+  PROFIT_FLOOR         (usun ordery zamykajace ze strata)
+  PUMP SHIELD NUCLEAR  ← NOWE (usun bidy + cancel na gieldzie)
+  ZEC TREND STOP
+  HOLD_FOR_TP
+  EMERGENCY
+```
+
+Shield jest **addytywny** — mnozy istniejace multipliers (`bid *= 0.50`), nie nadpisuje. Jesli HOLD_FOR_TP juz ustawilo bid=0, to 0 × 0.50 = 0 — bez zmian. Shield nie walczy z innymi filtrami, tylko je wzmacnia.
+
+**Kluczowe:** Pump Shield NIE blokuje Anaconda SL. Jesli strata przekroczy 7-12%, pozycja MUSI sie zamknac. Shield chroni tylko przed zamknieciem przez GRID bidy.
+
+### Symulacja — MON 13 lutego z Pump Shield
+
+```
+Tick 1: $0.0180 (short entry)
+Tick 2: $0.0182 (+1.1%)
+Tick 3: $0.0190 (+5.6% od min) ← AGGRESSIVE (>5%)
+  → bid x 0.00, usuwam bidy, cancelluje na gieldzie
+  → Bot NIE KUPUJE. Short bezpieczny.
+Tick 4: $0.0225 (+25% od min) ← AGGRESSIVE
+  → Shield nadal aktywny. Zero bidow na gieldzie.
+  → BEZ shield: 20 BUYs @ $0.0225 = -$2,130
+  → Z shield:  zero kupna. Short trzymany.
+Tick 5-7: cena wraca... cooldown...
+Tick 8: $0.0175 → full bids restored, short w zysku
+```
+
+**Oszczednosc: $2,130.**
+
+### Dwa pliki, ~140 linii
+
+**`src/config/short_only_config.ts`** — konfiguracja (interface + defaults + overrides + getter). Ten sam wzorzec co BounceFilter, DipFilter, FundingFilter, FibGuard — juz go znasz. Chcesz zmienic prog dla kPEPE? Edytujesz jedna linijke w overrides.
+
+**`src/mm_hl.ts`** — logika:
+1. **pumpShieldHistory** — mapa cen per pair (last 10 ticks)
+2. **detectPump()** — funkcja detekcji (window + single-tick)
+3. **Grid filter** — przed BounceFilter, redukuje bidy
+4. **Nuclear level** — po PROFIT_FLOOR, usuwa bidy z grida + cancel na gieldzie
+
+### Lekcje
+
+**1. Naśladuj najlepszych, nie wymyslaj od nowa.** 58bro.eth ma $31.4M w pozycjach i zarabia na pumpach zamiast tracic. Zamiast wymyslac teorie, po prostu skopiowalismy jego zachowanie: blokuj kupno, zwieksz sprzedaz. Inzynieria to nie innowacja za wszelka cene — to implementacja sprawdzonych rozwiazan.
+
+**2. Config-driven > hardcoded.** Interface → defaults → per-token overrides → getter. Ten pattern pozwala zmienic zachowanie bez dotykania logiki. Chcesz dodac nowy token? Jedna linijka. Chcesz wylaczyc shield? `enabled: false`. Zero ryzyka regresji.
+
+**3. Additive filters > destructive overrides.** `bid *= 0.50` jest bezpieczniejsze niz `bid = 0.50`. Pierwsze wspolpracuje z innymi filtrami, drugie je nadpisuje. W systemie z 6+ filtrami w pipeline, mnozenie gwarantuje ze zaden filtr nie "zje" zmian innego.
+
+**4. Cooldown zapobiega whipsaw.** Pumpy czesto maja druga fale. Gdybys natychmiast przywrocil 100% bidow, moglbys oberwac dead cat bounce. 3 ticki (3 minuty) z 50% bidami to bufor bezpieczenstwa.
+
+**5. Nuclear level to ostatnia linia obrony.** Dwa poziomy ochrony: (a) modyfikacja multiplikatorow w pipeline, (b) fizyczne usuwanie orderow z grida i giedly. Gdyby (a) nie zadzialalo z jakiegos powodu (bug, race condition), (b) i tak ochroni pozycje. **Defense in depth** — nie polegaj na jednym mechanizmie.
+
+**6. Defensive error handling.** `try/catch` wokol cancel orderow na gieldzie — cancel moze failnac (order juz wypelniony, API timeout). To NIE jest powod zeby crashowac caly tick. Nastepny tick za 60 sekund sprobieje ponownie. **Fail gracefully, retry next tick.**
+
+**7. Weryfikacja przez porownanie.** Najlepszy sposob zeby sprawdzic czy shield dziala: odtworz scenariusze z przeszlosci (MON -$2,130, LIT -$570) i policz co by sie stalo z shieldem. Jesli odpowiedz to "zero straty" — dziala. Nie potrzebujesz 100 testow — potrzebujesz 2 realne przypadki ktore mowia "to by zadziałało".
