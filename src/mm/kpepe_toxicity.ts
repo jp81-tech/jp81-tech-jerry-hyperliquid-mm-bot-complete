@@ -79,6 +79,11 @@ export class KpepeToxicityEngine {
 
   private output: KpepeToxicityOutput = this.defaultOutput()
 
+  // VPIN health monitoring
+  private tickCount = 0
+  private vpinNormalCount = 0  // consecutive ticks with VPIN = NORMAL (0.5)
+  private lastVpinAlertTime = 0
+
   private defaultOutput(): KpepeToxicityOutput {
     return {
       spreadMult: 1.0,
@@ -135,6 +140,27 @@ export class KpepeToxicityEngine {
     const now = Date.now()
     const out = this.defaultOutput()
     const reasons: string[] = []
+    this.tickCount++
+
+    // ── VPIN HEALTH CHECK ──────────────────────────────────────────
+    // Alert if VPIN stuck at NORMAL for >120 ticks (~2h at 60s/tick)
+    if (vpinLevel === 'NORMAL') {
+      this.vpinNormalCount++
+    } else {
+      this.vpinNormalCount = 0
+    }
+
+    // Periodic status log every 20 ticks (~20 min)
+    if (this.tickCount % 20 === 0) {
+      const fillCount = this.state.recentFills.length
+      console.log(`🐸 [kPEPE TOXICITY] tick=${this.tickCount} level=${this.state.toxicityLevel} VPIN=${vpinLevel} fills5m=${fillCount} consec=${this.state.consecutiveToxicFills} skew=${(actualSkew * 100).toFixed(1)}% spread×${this.output.spreadMult.toFixed(2)}`)
+    }
+
+    // VPIN stuck alert — 120 ticks = ~2 hours at 60s/tick
+    if (this.vpinNormalCount >= 120 && now - this.lastVpinAlertTime > 2 * 60 * 60 * 1000) {
+      console.warn(`⚠️ [kPEPE VPIN_STUCK] VPIN has been NORMAL for ${this.vpinNormalCount} ticks (~${(this.vpinNormalCount / 60).toFixed(1)}h). Bucket may be misconfigured or no trades flowing. Toxicity detection degraded!`)
+      this.lastVpinAlertTime = now
+    }
 
     // Check if we're in cooldown pause
     if (this.state.cooldownUntil > now) {

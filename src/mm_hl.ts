@@ -124,10 +124,12 @@ const IS_SM_FOLLOWER_BOT = BOT_MODE === 'SM_FOLLOWER'
 const MM_ONLY_PAIRS = (process.env.MM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
 const SM_ONLY_PAIRS = (process.env.SM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
 
+const botModeSuffix = BOT_MODE !== 'UNIFIED' ? `_${BOT_MODE.toLowerCase()}` : ''
 console.log(`\n🤖 BOT_MODE=${BOT_MODE}`)
-if (IS_PURE_MM_BOT) console.log(`📊 PURE_MM pairs: ${MM_ONLY_PAIRS.join(', ') || '(all)'}`)
-else if (IS_SM_FOLLOWER_BOT) console.log(`🐋 SM_FOLLOWER pairs: ${SM_ONLY_PAIRS.join(', ') || '(all)'}`)
-else console.log(`🔄 UNIFIED mode (legacy)`)
+console.log(`💾 State file: data/bot_state${botModeSuffix}.json`)
+if (IS_PURE_MM_BOT) console.log(`📊 PURE_MM pairs: ${MM_ONLY_PAIRS.join(', ') || '(all)'} | PnL filter: ${MM_ONLY_PAIRS.join(', ') || 'none'}`)
+else if (IS_SM_FOLLOWER_BOT) console.log(`🐋 SM_FOLLOWER pairs: ${SM_ONLY_PAIRS.join(', ') || '(all)'} | PnL filter: ${SM_ONLY_PAIRS.join(', ') || 'none'}`)
+else console.log(`🔄 UNIFIED mode (legacy) | PnL filter: all pairs`)
 
 /**
  * Wrapper around getAutoEmergencyOverrideSync that forces PURE_MM
@@ -928,15 +930,21 @@ class StateManager {
   async syncPnLFromHyperliquid(
     infoClient: hl.InfoClient,
     walletAddress: string,
-    onFill?: (pair: string, notionalUsd: number, fillTime: Date) => void
+    onFill?: (pair: string, notionalUsd: number, fillTime: Date) => void,
+    filterPairs?: string[]  // Only count fills for these pairs (per-BOT_MODE isolation)
   ): Promise<{ newFills: number, pnlDelta: number }> {
     try {
       // Fetch fills from last 24h using paginated fetcher (handles 2000-fill API limit)
       const startTime = Date.now() - 24 * 60 * 60 * 1000
-      const fills = await fetchAllFillsByTime(walletAddress, startTime)
+      let fills = await fetchAllFillsByTime(walletAddress, startTime)
 
       if (!fills || fills.length === 0) {
         return { newFills: 0, pnlDelta: 0 }
+      }
+
+      // Per-BOT_MODE: only count fills for our pairs
+      if (filterPairs && filterPairs.length > 0) {
+        fills = fills.filter(f => filterPairs.includes(f.coin))
       }
 
       const today = new Date()
@@ -3678,7 +3686,10 @@ class HyperliquidMMBot {
       rotationThreshold: 1.5
     })
     this.marketVision = new MarketVisionService(this.api)
-    this.stateManager = new StateManager()
+    // Per-BOT_MODE state file: separate daily PnL tracking for each bot
+    const stateFileSuffix = BOT_MODE !== 'UNIFIED' ? `_${BOT_MODE.toLowerCase()}` : ''
+    const stateFilePath = path.join(process.cwd(), `data/bot_state${stateFileSuffix}.json`)
+    this.stateManager = new StateManager(stateFilePath)
     this.lastFillTimestamp =
       this.stateManager.getLastProcessedFillTime() ??
       this.stateManager.getLastTradeTimestamp() ??
@@ -4233,13 +4244,20 @@ class HyperliquidMMBot {
         // Note: syncPnLFromHyperliquid() handles daily PnL reset automatically
         // when it detects a new day (lastResetDate !== today)
         if (this.trading instanceof LiveTrading) {
+          // Per-BOT_MODE: only count fills for our pairs
+          const pnlFilterPairs = IS_PURE_MM_BOT && MM_ONLY_PAIRS.length > 0
+            ? MM_ONLY_PAIRS
+            : IS_SM_FOLLOWER_BOT && SM_ONLY_PAIRS.length > 0
+              ? SM_ONLY_PAIRS
+              : undefined  // UNIFIED: count all fills
           const syncResult = await this.stateManager.syncPnLFromHyperliquid(
             (this.trading as any).infoClient,
             (this.trading as any).walletAddress,
             (pair: string, notionalUsd: number, fillTime: Date) => {
               // Track daily notional for cap enforcement
               (this.trading as LiveTrading).addDailyNotional(pair, notionalUsd, fillTime)
-            }
+            },
+            pnlFilterPairs
           )
           if (syncResult.newFills > 0) {
             this.lastFillTimestamp = this.stateManager.getLastProcessedFillTime() ?? Date.now()

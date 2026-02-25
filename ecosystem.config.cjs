@@ -38,6 +38,7 @@ module.exports = {
         FORCE_MM_PAIRS: "kPEPE",
         ROTATION_MODE: "manual",
         MANUAL_ACTIVE_PAIRS: "kPEPE",
+        kPEPE_LEVERAGE: "5",
         TELEMETRY_PORT: "8083",
       },
       max_memory_restart: "300M",
