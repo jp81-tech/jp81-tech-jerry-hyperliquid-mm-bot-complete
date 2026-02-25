@@ -317,14 +317,16 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // kPEPE CUSTOM 4-LAYER GRID
-// L1 Scalping (5bps) → L2 Core (14bps) → L3 Buffer (28bps) → L4 Sweep (55bps)
-// 16% reserve unallocated for rebalancing headroom
+// L1 Core (18bps) → L2 Buffer (30bps) → L3 Wide (45bps) → L4 Sweep (65bps)
+// FIX 25.02: Old L1 was 5bps — way too tight for kPEPE volatility (20-30bps/min).
+// Grid re-centering every 60s was creating adverse selection: new bids above old asks → guaranteed loss.
+// New minimum 18bps gives enough buffer to survive 1-tick re-centering.
 // ─────────────────────────────────────────────────────────────────────────────
 const KPEPE_GRID_LAYERS: GridLayer[] = [
-  { level: 1, offsetBps: 5,  capitalPct: 10, ordersPerSide: 2, isActive: true },  // Scalping
-  { level: 2, offsetBps: 14, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Core
-  { level: 3, offsetBps: 28, capitalPct: 30, ordersPerSide: 2, isActive: true },  // Buffer
-  { level: 4, offsetBps: 55, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep
+  { level: 1, offsetBps: 18, capitalPct: 12, ordersPerSide: 2, isActive: true },  // Core (was 5bps Scalping — killed by adverse selection)
+  { level: 2, offsetBps: 30, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Buffer (was 14bps Core)
+  { level: 3, offsetBps: 45, capitalPct: 28, ordersPerSide: 2, isActive: true },  // Wide (was 28bps Buffer)
+  { level: 4, offsetBps: 65, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep (was 55bps)
   // 16% reserve (not allocated = available for rebalancing)
 ]
 
