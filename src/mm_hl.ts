@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -7973,6 +7973,68 @@ class HyperliquidMMBot {
 
         sizeMultipliers.bid *= toxOut.sizeMultBid * toxSizeMult
         sizeMultipliers.ask *= toxOut.sizeMultAsk * toxSizeMult
+
+        // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
+        // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
+        const momGuardConfig = getMomentumGuardConfig(pair)
+        if (momGuardConfig.enabled) {
+          const change1h = momentum1h  // already fetched above for toxicity engine
+          const mvAnalysis = this.marketVision?.getPairAnalysis(pair)
+          const mgRsi = mvAnalysis?.rsi ?? 50
+          const mgResistance = mvAnalysis?.resistance4h ?? 0
+          const mgSupport = mvAnalysis?.support4h ?? 0
+
+          // 1. Momentum signal (50% weight): change1h normalized to [-1, +1]
+          const momentumNorm = Math.max(-1, Math.min(1, change1h / momGuardConfig.pumpThresholdPct))
+
+          // 2. RSI signal (30% weight): overbought → positive, oversold → negative
+          const mgRsiSignal = mgRsi > momGuardConfig.rsiOverboughtThreshold
+            ? (mgRsi - momGuardConfig.rsiOverboughtThreshold) / (100 - momGuardConfig.rsiOverboughtThreshold)
+            : mgRsi < momGuardConfig.rsiOversoldThreshold
+              ? (mgRsi - momGuardConfig.rsiOversoldThreshold) / momGuardConfig.rsiOversoldThreshold
+              : 0
+
+          // 3. Proximity to resistance/support (20% weight)
+          const mgResistDist = mgResistance > 0 ? (mgResistance - midPrice) / midPrice : 1
+          const mgSupportDist = mgSupport > 0 ? (midPrice - mgSupport) / midPrice : 1
+          const mgProxSignal = mgResistDist < 0.01 ? 0.8
+            : mgResistDist < 0.02 ? 0.4
+            : mgSupportDist < 0.01 ? -0.8
+            : mgSupportDist < 0.02 ? -0.4
+            : 0
+
+          const momentumScore = momentumNorm * 0.50 + mgRsiSignal * 0.30 + mgProxSignal * 0.20
+
+          // Apply asymmetric multipliers (positive score = pump → reduce bids, negative = dump → reduce asks)
+          if (momentumScore >= momGuardConfig.strongThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.strongBidMult
+            sizeMultipliers.ask *= momGuardConfig.strongAskMult
+          } else if (momentumScore >= momGuardConfig.moderateThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.moderateBidMult
+            sizeMultipliers.ask *= momGuardConfig.moderateAskMult
+          } else if (momentumScore >= momGuardConfig.lightThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.lightBidMult
+            sizeMultipliers.ask *= momGuardConfig.lightAskMult
+          } else if (momentumScore <= -momGuardConfig.strongThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.strongAskMult
+            sizeMultipliers.ask *= momGuardConfig.strongBidMult
+          } else if (momentumScore <= -momGuardConfig.moderateThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.moderateAskMult
+            sizeMultipliers.ask *= momGuardConfig.moderateBidMult
+          } else if (momentumScore <= -momGuardConfig.lightThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.lightAskMult
+            sizeMultipliers.ask *= momGuardConfig.lightBidMult
+          }
+
+          if (this.tickCount % 20 === 0 || Math.abs(momentumScore) >= momGuardConfig.moderateThreshold) {
+            console.log(
+              `📈 [MOMENTUM_GUARD] ${pair}: score=${momentumScore.toFixed(2)} ` +
+              `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
+              `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
+              `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)}`
+            )
+          }
+        }
 
         gridOrders = this.gridManager!.generateGridOrdersCustom(
           pair,

@@ -240,3 +240,53 @@ export function getPumpShieldConfig(pair: string): PumpShieldConfig {
   const overrides = PUMP_SHIELD_OVERRIDES[pair] || {}
   return { ...PUMP_SHIELD_DEFAULTS, ...overrides }
 }
+
+// ============================================================
+// MOMENTUM GUARD — asymetryczny grid na podstawie trendu
+// "Nie kupuj szczytów, nie shortuj dna"
+// Redukuje bidy gdy cena rośnie (overbought / near resistance)
+// Redukuje aski gdy cena spada (oversold / near support)
+// Applied to PURE_MM tokens (kPEPE) — SM tokens use HOLD_FOR_TP
+// ============================================================
+
+export interface MomentumGuardConfig {
+  enabled: boolean
+  pumpThresholdPct: number        // change1h % for max score (e.g. 3.0 for kPEPE)
+  rsiOverboughtThreshold: number  // RSI above this → reduce bids (default 65)
+  rsiOversoldThreshold: number    // RSI below this → reduce asks (default 35)
+  // Multipliers at each momentum level (pump side shown, dump is mirrored)
+  strongBidMult: number           // bid mult when strong pump (default 0.10)
+  strongAskMult: number           // ask mult when strong pump (default 1.30)
+  moderateBidMult: number         // bid mult when moderate pump (default 0.40)
+  moderateAskMult: number         // ask mult when moderate pump (default 1.15)
+  lightBidMult: number            // bid mult when light pump (default 0.70)
+  lightAskMult: number            // ask mult when light pump (default 1.05)
+  // Score thresholds
+  strongThreshold: number         // |score| >= this → strong (default 0.7)
+  moderateThreshold: number       // |score| >= this → moderate (default 0.4)
+  lightThreshold: number          // |score| >= this → light (default 0.2)
+}
+
+export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
+  enabled: true,
+  pumpThresholdPct: 2.0,
+  rsiOverboughtThreshold: 65,
+  rsiOversoldThreshold: 35,
+  strongBidMult: 0.10,
+  strongAskMult: 1.30,
+  moderateBidMult: 0.40,
+  moderateAskMult: 1.15,
+  lightBidMult: 0.70,
+  lightAskMult: 1.05,
+  strongThreshold: 0.7,
+  moderateThreshold: 0.4,
+  lightThreshold: 0.2,
+}
+
+export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
+  'kPEPE': { pumpThresholdPct: 3.0 },  // Memecoin: wider threshold (higher normal vol)
+}
+
+export function getMomentumGuardConfig(token: string): MomentumGuardConfig {
+  return { ...MOMENTUM_GUARD_DEFAULTS, ...(MOMENTUM_GUARD_OVERRIDES[token] || {}) }
+}
