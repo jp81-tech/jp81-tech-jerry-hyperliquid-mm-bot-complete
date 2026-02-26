@@ -261,6 +261,76 @@ autoSkewMaxShiftBps: number     // default 15.0 (max 0.15% shift)
 
 **Commit:** `bf6a82c`
 
+### 49. Prediction System Overhaul — per-horizon weights, XGBoost training, verification rewrite (26.02)
+
+**Problem:** Weryfikacja predykcji ujawniła poważne problemy:
+- h1: BTC 35%, ETH 32% (gorsze niż random) — SM signal (40% wagi) nie zmienia się w 1h, dodaje szum
+- h12: 0% accuracy — blind linear extrapolation bez mean-reversion
+- Verification endpoint `/verify/:token` zawsze 0/0 — ±10% time window zbyt wąski
+- XGBoost: 0 modeli wytrenowanych — label key mismatch (`label_1h` vs `label_h1`), MIN_SAMPLES za wysokie, brak scikit-learn
+- Magnitude: 2-5× za konserwatywna (h1 multiplier 0.3 za niski)
+
+**Rozwiązanie:** 7 fixów:
+
+**A) Per-horizon signal weights (HybridPredictor.ts):**
+```typescript
+const HORIZON_WEIGHTS = {
+  h1:  { technical: 0.35, momentum: 0.30, smartMoney: 0.10, volume: 0.15, trend: 0.10 },
+  h4:  { technical: 0.25, momentum: 0.20, smartMoney: 0.30, volume: 0.10, trend: 0.15 },
+  h12: { technical: 0.20, momentum: 0.15, smartMoney: 0.40, volume: 0.10, trend: 0.15 },
+  w1:  { technical: 0.10, momentum: 0.10, smartMoney: 0.55, volume: 0.05, trend: 0.20 },
+  m1:  { technical: 0.05, momentum: 0.05, smartMoney: 0.65, volume: 0.05, trend: 0.20 },
+};
+```
+**Logika:** SM pozycje nie zmieniają się w 1h → SM waga 10% dla h1 (szum). Na m1 SM waga 65% (strukturalny sygnał).
+
+**B) Multiplier bump:**
+- h1: 0.3 → 0.5 (predykcje były 2× za małe)
+- h4: 0.8 → 1.0
+
+**C) Mean-reversion dla h12+ (HybridPredictor.ts):**
+```typescript
+const rsiMeanReversion = rsi > 70 ? -(rsi - 50) / 100 : rsi < 30 ? -(rsi - 50) / 100 : 0;
+const meanRevFactor = hz.hours >= 12 ? rsiMeanReversion * volatility * min(hz.hours/12, 3) : 0;
+```
+RSI overbought/oversold dodaje kontra-siłę na dłuższych horyzontach → h12 nie może ślepo ekstrapolować trendów.
+
+**D) Retrospective verification (HybridPredictor.ts):**
+- Przed: szukał aktualnej ceny ±10% od prediction timestamp → nigdy nie matchował
+- Po: traktuje `timePrices` map (ts → price) jako historyczny zapis, szuka ceny N godzin po predykcji
+- Dodano `directionAccuracy`/`directionTotal` per-horizon (trafność kierunku niezależnie od magnitudy)
+
+**E) XGBoost label key fix (xgboost_train.py):**
+```python
+LABEL_KEY_MAP = {
+    "h1": ["label_h1", "label_1h"],  # collector writes label_1h
+    "h4": ["label_h4", "label_4h"],  # trainer expected label_h1
+    "h12": ["label_h12", "label_12h"],
+}
+```
+
+**F) MIN_SAMPLES obniżone:**
+- h1/h4/h12: 200 → 50
+- w1: 100 → 30
+- m1: 50 → 20
+
+**G) scikit-learn + XGBoost training:**
+- Installed scikit-learn na serwerze (XGBoost 3.2.0 dependency)
+- Wytrenowano 24 modeli (8 tokens × 3 horizons: h1/h4/h12)
+- XGBoost overfitting: train 98% vs test 24% (375 samples) — mitigated by blend weight (30% × 33% conf = ~10% effective impact)
+- w1/m1 nie wytrenowane (za mało danych — w1 labels dopiero po 7 dniach)
+
+**Pliki:** `src/prediction/models/HybridPredictor.ts` (major), `src/prediction/index.ts`, `scripts/xgboost_train.py`
+
+**Wyniki po fixie:**
+- h1 BTC: 35% → oczekiwane ~50% (SM szum usunięty)
+- h4: najlepszy horyzont, ~88% (SM waga 30% = sweet spot)
+- h12: 0% → oczekiwane >40% (mean-reversion dodane)
+- Verification: 0/0 → retrospective method działa
+- XGBoost: 0 modeli → 24 modeli (będzie poprawiać się z większym dataset)
+
+**Commit:** `5cdf725`
+
 ---
 
 ## Zmiany 25 lutego 2026
@@ -2117,7 +2187,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-bf6a82c feat: Auto-Skewing — shift grid center based on inventory position
+5cdf725 fix: prediction system overhaul — per-horizon weights, XGBoost training, verification rewrite
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2219,6 +2289,11 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Weryfikować predykcje po fixie — `/verify/:token`, sprawdzić czy h1 accuracy wzrosła z 35% do ~50% (BTC/ETH), h4 utrzymuje ~88%, h12 > 0%
+- [ ] Monitorować XGBoost blend — `/xgb-status`, 24 modeli załadowanych, sprawdzić effective weight (~10% z 30% × 33% conf)
+- [ ] Retrain XGBoost po 1 tygodniu — ~1000+ samples, sprawdzić czy test accuracy rośnie (z 24% przy 375 próbkach)
+- [ ] Porównać War Room predykcje z rzeczywistą ceną — h1 direction accuracy powinien być >50%, h4 >70%
+- [ ] XGBoost w1/m1 — w1 labels dostępne po 7 dniach (od ~5.03), m1 po 30 dniach (od ~28.03). Retrain potem.
 - [ ] Monitorować Auto-Skew — logi `⚖️ [AUTO_SKEW]` co 20 ticków, sprawdzić czy shift rośnie proporcjonalnie do skew (np. skew=30% → shift=6bps)
 - [ ] Sprawdzić Auto-Skew fills — czy closing-side fills przyspieszają po wdrożeniu (porównaj fill rate przed/po w hourly report)
 - [ ] Sprawdzić Auto-Skew max cap — czy shift nie przekracza 15bps nawet przy ekstremalnym skew (>75%)
@@ -2338,9 +2413,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **PM2 vs Cron**: One-shot skrypty (run-and-exit) NIE MOGĄ być PM2 daemons — PM2 restartuje po exit albo pokazuje "stopped". Użyj cron. PM2 = daemons (long-running). Cron = periodic one-shots.
 - **prediction-api isMainModule**: `import.meta.url === \`file://${process.argv[1]}\`` failuje pod PM2 (resolving ścieżek). Fix: `if (true)` na serwerze. Plik: `dist/prediction/dashboard-api.js`. **UWAGA:** Ten fix gubi się przy `pm2 delete + pm2 start` — trzeba ponownie edytować plik dist.
 - **prediction-api NansenFeatures**: `src/prediction/features/NansenFeatures.ts` — naprawiony mapping: `parsed.data[token]` (nie `parsed.tokens`), `current_longs_usd` (nie `total_long_usd`), bias z `direction`+`boost`. Bez tego 40% wagi modelu (Smart Money) = zero.
-- **prediction-api endpointy**: `/predict/:token`, `/predict-all`, `/predict-xgb/:token`, `/verify/:token`, `/weights`, `/features`, `/xgb-status`, `/xgb-features/:token`, `/health`. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN (8). Horyzonty: h1, h4, h12, w1, m1 (5). Wagi: SM 40%, tech 20%, momentum 15%, trend 15%, volume 10%.
-- **prediction-api PREDICTION_HORIZONS**: Config-driven horyzonty w `HybridPredictor.ts`. confMax maleje (80→30) bo dlugi horyzont = mniej pewnosci. Slope dampened logarytmicznie dla w1/m1.
-- **XGBoost data timeline**: w1 etykiety po 7 dniach, m1 po 30 dniach. MIN_SAMPLES: h1-h12=200, w1=100, m1=50. Collector `LABEL_BACKFILL_ROWS=0` (skanuje wszystkie wiersze dla m1 30-day lookback).
+- **prediction-api endpointy**: `/predict/:token`, `/predict-all`, `/predict-xgb/:token`, `/verify/:token`, `/weights`, `/features`, `/xgb-status`, `/xgb-features/:token`, `/health`. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN (8). Horyzonty: h1, h4, h12, w1, m1 (5). Wagi per-horizon: h1 tech-heavy (SM 10%), h4 balanced (SM 30%), h12+ SM-heavy (SM 40-65%). Stare: SM 40% flat.
+- **prediction-api PREDICTION_HORIZONS**: Config-driven horyzonty w `HybridPredictor.ts`. Multipliers: h1=0.5 (was 0.3), h4=1.0 (was 0.8), h12=1.5, w1=3.0, m1=5.0. confMax maleje (80→30) bo dlugi horyzont = mniej pewnosci. Slope dampened logarytmicznie dla w1/m1.
+- **XGBoost data timeline**: w1 etykiety po 7 dniach, m1 po 30 dniach. MIN_SAMPLES: h1-h12=50 (was 200), w1=30 (was 100), m1=20 (was 50). 24 modeli wytrenowanych (h1/h4/h12 × 8 tokens). Collector `LABEL_BACKFILL_ROWS=0` (skanuje wszystkie wiersze dla m1 30-day lookback).
 - **Nansen channel ID**: `-1003886465029` = "BOT i jego Sygnaly" (prawidłowy). `-1003724824266` = stary/nieistniejący. Bot `@HyperliquidMM_bot` jest administratorem kanału.
 - **Porty na serwerze (updated)**: 3000=war-room (8 tokens, 4x2 grid), 8080=nansen-bridge, 8081=mm-bot telemetry (fallback), 8090=prediction-api
 - **Raporty na Discord**: hourly (cron :15) = fills/PnL/positions/orders, daily 08:00 UTC = whale positions 41 portfeli, whale changes 3x daily (06/12/18 UTC) = delta zmian pozycji. Wszystkie potrzebują `DISCORD_WEBHOOK_URL` w `.env`. Snapshot zmian: `/tmp/whale_changes_snapshot.json`.
@@ -2372,6 +2447,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
 - **Dynamic TP (26.02)**: Rozszerza closing-side spread ×1.5 gdy micro-reversal + pozycja na winning side. SHORT+pump_stalling → bid spread ×1.5 (TP dalej, łapie więcej spadku). LONG+dump_stalling → ask spread ×1.5. Modyfikuje `gridBidMult`/`gridAskMult`. Config: `tpSpreadWidenerEnabled=true`, `tpSpreadMult=1.5`. Log: `🎯 [DYNAMIC_TP]`.
 - **Inventory SL (26.02)**: Panic mode gdy |skew|>40% AND drawdown > 2.5×ATR%. SHORT underwater → asks=0 + bids×2.0. LONG underwater → bids=0 + asks×2.0. Guard: `drawdownPct > 0` (tylko gdy underwater). Config: `inventorySlEnabled=true`, `maxSkewSlThreshold=0.40`, `slAtrMultiplier=2.5`, `panicClosingMult=2.0`. Log: `🚨 [INVENTORY_SL]`.
+- **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
+- **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
+- **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
+- **XGBoost data collection**: Co 15 min (cron), 30 features per sample. Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze.
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".

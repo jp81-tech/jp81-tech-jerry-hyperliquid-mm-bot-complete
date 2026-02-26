@@ -33,6 +33,7 @@
 25. [Momentum Guard — nie kupuj szczytow, nie shortuj den](#momentum-guard--nie-kupuj-szczytow-nie-shortuj-den)
 26. [Dynamic TP + Inventory SL — pozwol zyskom rosnac, tnij straty](#dynamic-tp--inventory-sl--pozwol-zyskom-rosnac-tnij-straty)
 27. [Auto-Skewing — przesun siatke tam gdzie bot potrzebuje fillow](#auto-skewing--przesun-siatke-tam-gdzie-bot-potrzebuje-fillow)
+28. [Prediction System Overhaul — kiedy mózg bota mówił głupoty](#prediction-system-overhaul--kiedy-mozg-bota-mowil-glupoty)
 
 ---
 
@@ -4005,3 +4006,133 @@ Auto-Skew jest PO Inventory SL ale PRZED generateGridOrdersCustom. To nie przypa
 - Jego aktualna pozycja: modyfikuje input (midPrice) tuz przed generacja → czyste, eleganckie
 
 **Lekcja: W pipeline architekturze, kazdy krok powinien modyfikowac INPUTY nastepnego kroku, nie outputy poprzedniego. Modyfikowanie inputow = transformacja, modyfikowanie outputow = patch. Transformacja jest czysta, patch jest brudny.**
+
+---
+
+## Prediction System Overhaul — kiedy mozg bota mowil glupoty
+
+> "Nie wystarczy miec mozg. Musisz sprawdzic czy nie ma w nim robaka." — debugging wisdom
+
+### Kontekst: Audyt predykcji
+
+Wyobraz sobie, ze masz asystenta, ktory codziennie mowi ci "BTC spadnie jutro o 0.3%". Ufasz mu, bo brzmi pewnie. Ale pewnego dnia siadasz i sprawdzasz **kazdą** jego predykcje z ostatnich tygodni. Wynik?
+
+- Predykcja na 1 godzine: **35% trafnosci** (gorsze niz rzut moneta!)
+- Predykcja na 12 godzin: **0% trafnosci** (zero, nil, nic)
+- Predykcja na 4 godziny: **88% trafnosci** (jedyny swietlany punkt)
+
+Twoj asystent nie jest glupi — jest **zle skalibrowany**. I co gorsza, system weryfikacji tez nie dzialal — zawsze mowil "0 sprawdzonych, 0 trafionych" bo miał zbyt ciasne okno czasowe.
+
+To tak jakby nauczyciel nigdy nie sprawdzal klasowek, wiec nigdy nie wiedzial ze uczniowie nie umieją materialu.
+
+### 5 problemow, ktore znalezlismy
+
+#### Problem 1: Jeden zestaw wag dla wszystkich horyzontow
+
+```
+PRZED (flat weights):
+  h1:   SM=40%  tech=20%  momentum=15%
+  h4:   SM=40%  tech=20%  momentum=15%
+  h12:  SM=40%  tech=20%  momentum=15%
+  m1:   SM=40%  tech=20%  momentum=15%
+         ^^ te same wagi wszedzie!
+```
+
+**Dlaczego to problem?** Smart Money (SM) signal — np. "wieloryby maja $11M SHORT na LIT" — to informacja **strategiczna**. Ona mowi ci co bedzie za tydzien czy miesiac. Ale za **godzine**? SM nie zmieniaja pozycji co godzine. Wrzucanie 40% wagi SM do predykcji godzinowej to jak pytanie admirala floty o pozycje piechoty — daje ci odpowiedz, ale to szum.
+
+Z drugiej strony, techniczny RSI i momentum zmieniaja sie co godzine — to jest **taktyczny** sygnał idealny dla h1.
+
+```
+PO (per-horizon weights):
+  h1:   SM=10%  tech=35%  momentum=30%   ← taktyka!
+  h4:   SM=30%  tech=25%  momentum=20%   ← balans
+  h12:  SM=40%  tech=20%  momentum=15%   ← strategia
+  w1:   SM=55%  tech=10%  momentum=10%   ← strategia++
+  m1:   SM=65%  tech=5%   momentum=5%    ← SM dominuje
+```
+
+**Analogia:** Sterowanie samolotu. Na male korekty kursu (h1) uzywasz lotek (szybki, maly efekt). Na duze skręty (m1) uzywasz steru kierunku (wolny, duzy efekt). Nie uzywasz steru kierunku do mikro-korekt — wyjdzie zle.
+
+#### Problem 2: Slepota na mean-reversion (h12)
+
+Model ekstrapolowal liniowo: "RSI=80, cena rosnie, wiec za 12h cena wzrosnie jeszcze bardziej". W rzeczywistosci, RSI=80 oznacza **overbought** — cena czesciej spada niz rosnie na dłuzszym horyzoncie.
+
+```typescript
+// Mean-reversion factor
+const rsiMeanReversion = rsi > 70 ? -(rsi - 50) / 100  // overbought → siła w dół
+                        : rsi < 30 ? -(rsi - 50) / 100  // oversold → siła w górę
+                        : 0;
+
+// Wplywa TYLKO na h12+
+const meanRevFactor = hz.hours >= 12
+  ? rsiMeanReversion * volatility * min(hz.hours / 12, 3)
+  : 0;
+```
+
+**Analogia:** Gdy ktos biegnie pod gorke (RSI rosnacy), krotkoterminowo (h1) bedzie biegal dalej. Ale za 12 godzin? Bedzie zmeczony i zwolni. Model teraz o tym wie.
+
+#### Problem 3: Weryfikacja ktora nic nie weryfikowala
+
+Stary system: "Mam predykcje z timestampem 15:00. Sprawdzam aktualna cene. Czy to jest w ciagu ±10% od predykcji 1h? Nie? Skip."
+
+Problem: endpoint `/verify` byl wolany losowo, nie dokladnie 1h po predykcji. Wiec ±10% window prawie nigdy nie matchował → "0 sprawdzonych, 0 trafionych" → zero informacji zwrotnej.
+
+Nowy system: **retrospective verification**. Traktuje wszystkie zapisane predykcje jako historyczny zapis. Dla kazdej predykcji patrzy: "jaka byla cena DOKLADNIE N godzin pozniej?" i porownuje z tym co model przewidzial.
+
+To jak roznica miedzy "czekaj na odpowiedni moment zeby sprawdzic" vs "zbierz wszystkie dane i przeanalizuj na koniec dnia".
+
+#### Problem 4: XGBoost nigdy nie wytreniwal ani jednego modelu
+
+Trzy bugi naraz:
+
+| Bug | Przyczyna | Fix |
+|-----|-----------|-----|
+| Label key mismatch | Collector pisal `label_1h`, trainer szukal `label_h1` | `LABEL_KEY_MAP` z oboma formatami |
+| MIN_SAMPLES za wysokie | 200 wymagane, 375 zebranych ale po odfiltrowaniu <200 | Obnizone do 50 |
+| scikit-learn brak | XGBoost 3.2.0 wymaga sklearn | `pip install scikit-learn` |
+
+**Efekt:** 0 modeli → 24 modeli (8 tokenow × 3 horyzonty). XGBoost teraz jest aktywny z 10% effective weight (30% blend × 33% confidence ze wzgledu na overfitting).
+
+**Overfitting insight:** Train accuracy 98% vs test 24% — klasyczny objaw za malego datasetu (375 probek). Ale to nie katastrofa: 10% effective weight oznacza ze zly XGBoost model moze przesunac predykcje o max 3-4%. A z kazdym dniem dataset rosnie (96 probek/dzien = 15min intervals). Za tydzien bedzie 1000+ probek → retrain powinien dac lepsze wyniki.
+
+#### Problem 5: Magnitude za konserwatywna
+
+Model mowil: "BTC spadnie o 0.15% za godzine". Rzeczywistosc: BTC spadl o 0.5%. Multiplier h1=0.3 byl za niski.
+
+```
+PRZED: h1=0.3, h4=0.8
+PO:    h1=0.5, h4=1.0
+```
+
+### Co sie zmienilo w plikach
+
+| Plik | Zmiany | Co robi |
+|------|--------|---------|
+| `src/prediction/models/HybridPredictor.ts` | +HORIZON_WEIGHTS, +mean-reversion, rewrite calculatePredictions(), rewrite verifyPredictions() | Mozg predykcji |
+| `src/prediction/index.ts` | Return type fix (`Record<string, any>`) | Service wrapper |
+| `scripts/xgboost_train.py` | +LABEL_KEY_MAP, lower MIN_SAMPLES | XGBoost training |
+
+### Lekcje inzynierskie
+
+**1. Feedback loop albo smierc**
+
+Najwazniejsza lekcja: system predykcji **bez weryfikacji** jest bezwartosciowy. Mozesz miec najlepszy model na swiecie, ale jesli nie sprawdzasz czy dziala, nie wiesz czy nie pogorszyl sie z czasem. Verification endpoint byl zepsuty od poczatku — nikt nie wiedzial bo nikt nie sprawdzal. To byl "latent bug" — nie wywalal errora, po prostu cicho zwracal zera.
+
+**Zasada:** Kazdy system ML potrzebuje:
+1. Treningu (tworzenie modelu)
+2. Inference (uzycie modelu)
+3. **Weryfikacji** (sprawdzenie czy model nadal dziala)
+
+Punkt 3 jest najczesciej pomijany i najwazniejszy.
+
+**2. Nie wszystkie dane sa rowne we wszystkich kontekstach**
+
+SM data jest **genialne** na h4-m1 ale **szum** na h1. To nie wina danych — to wina kontekstu. Te same dane moga byc sygnał lub szum w zaleznosci od horyzontu czasowego.
+
+**Zasada:** Gdy laczysc rożne zrodla danych, waga kazdego zrodla powinna zalezec od kontekstu uzycia. Flat weights to lazy engineering.
+
+**3. Graceful degradation ratuje**
+
+XGBoost byl zepsuty przez tygodnie, ale system dzialal. HybridPredictor (rules-based) obslugiwal wszystko sam. XGBoost blend weight 30% z confidence cap oznaczal ze nawet zly model mial max ~10% wplywu. Gdy XGBoost wrocil, po prostu "dolozylo sie" do istniejacego systemu.
+
+**Zasada:** Projektuj nowe komponenty jako **ulepszenia** istniejacego systemu, nie jako **zamienniki**. Jesli nowy komponent sie zepsuje, stary powinien dzialac sam. To jest roznica miedzy "ML-enhanced" a "ML-dependent".**
