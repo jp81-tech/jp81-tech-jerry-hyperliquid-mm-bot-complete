@@ -7981,11 +7981,21 @@ class HyperliquidMMBot {
           const change1h = momentum1h  // already fetched above for toxicity engine
           const mvAnalysis = this.marketVision?.getPairAnalysis(pair)
           const mgRsi = mvAnalysis?.rsi ?? 50
+          const mgAtr = mvAnalysis?.atr ?? 0
           const mgResistance = mvAnalysis?.resistance4h ?? 0
           const mgSupport = mvAnalysis?.support4h ?? 0
 
           // 1. Momentum signal (50% weight): change1h normalized to [-1, +1]
-          const momentumNorm = Math.max(-1, Math.min(1, change1h / momGuardConfig.pumpThresholdPct))
+          // ATR-based threshold adapts to current volatility regime
+          const atrPct = mgAtr > 0 && midPrice > 0 ? (mgAtr / midPrice) * 100 : 0
+          const pumpThreshold = momGuardConfig.useAtrThreshold && atrPct > 0
+            ? atrPct * momGuardConfig.atrThresholdMult
+            : momGuardConfig.pumpThresholdPct
+          // Asymmetric: dumps use tighter threshold (crypto crashes faster than it pumps)
+          const dumpThreshold = pumpThreshold * momGuardConfig.dumpSensitivityMult
+          const momentumNorm = change1h >= 0
+            ? Math.min(1, change1h / pumpThreshold)
+            : Math.max(-1, change1h / dumpThreshold)
 
           // 2. RSI signal (30% weight): overbought → positive, oversold → negative
           const mgRsiSignal = mgRsi > momGuardConfig.rsiOverboughtThreshold
@@ -7995,43 +8005,95 @@ class HyperliquidMMBot {
               : 0
 
           // 3. Proximity to resistance/support (20% weight)
-          const mgResistDist = mgResistance > 0 ? (mgResistance - midPrice) / midPrice : 1
-          const mgSupportDist = mgSupport > 0 ? (midPrice - mgSupport) / midPrice : 1
-          const mgProxSignal = mgResistDist < 0.01 ? 0.8
-            : mgResistDist < 0.02 ? 0.4
-            : mgSupportDist < 0.01 ? -0.8
-            : mgSupportDist < 0.02 ? -0.4
-            : 0
+          // Use body-based S/R (filters wick noise from flash crashes)
+          const mgResistBody = mvAnalysis?.resistanceBody4h ?? 0
+          const mgSupportBody = mvAnalysis?.supportBody4h ?? 0
+          // Dynamic thresholds: ATR-based (adapts to volatility regime)
+          // Strong zone = 1×ATR from level, moderate zone = 2×ATR
+          const mgStrongZone = mgAtr > 0 && midPrice > 0 ? mgAtr / midPrice : 0.01
+          const mgModerateZone = mgStrongZone * 2
+
+          const mgResistDist = mgResistBody > 0 ? (mgResistBody - midPrice) / midPrice : 1
+          const mgSupportDist = mgSupportBody > 0 ? (midPrice - mgSupportBody) / midPrice : 1
+
+          // Explicit breakout handling: price ABOVE resistance or BELOW support = max signal
+          let mgProxSignal = 0
+          if (mgResistDist <= 0) {
+            // Price at or above resistance body → max overbought signal
+            mgProxSignal = 1.0
+          } else if (mgResistDist < mgStrongZone) {
+            mgProxSignal = 0.8
+          } else if (mgResistDist < mgModerateZone) {
+            mgProxSignal = 0.4
+          } else if (mgSupportDist <= 0) {
+            // Price at or below support body → max oversold signal
+            mgProxSignal = -1.0
+          } else if (mgSupportDist < mgStrongZone) {
+            mgProxSignal = -0.8
+          } else if (mgSupportDist < mgModerateZone) {
+            mgProxSignal = -0.4
+          }
 
           const momentumScore = momentumNorm * 0.50 + mgRsiSignal * 0.30 + mgProxSignal * 0.20
 
+          // Position-aware guard: don't block position-CLOSING orders
+          // SHORT position (actualSkew < -0.10) + pump (score > 0) → bids CLOSE the short → don't reduce bids
+          // LONG position (actualSkew > 0.10) + dump (score < 0) → asks CLOSE the long → don't reduce asks
+          const hasShortPos = actualSkew < -0.10
+          const hasLongPos = actualSkew > 0.10
+          const pumpAgainstShort = momentumScore > 0 && hasShortPos
+          const dumpAgainstLong = momentumScore < 0 && hasLongPos
+
+          // Micro-reversal detection: override 1h momentum lag using recent tick prices
+          // If 1h says "pump" but price dropped >0.3% from recent peak → pump stalling, unblock closing orders
+          const mgPsHistory = this.pumpShieldHistory.get(pair) || []
+          let microReversal = false
+          if (mgPsHistory.length >= 3) {
+            const recentPeak = Math.max(...mgPsHistory.map(p => p.price))
+            const recentTrough = Math.min(...mgPsHistory.map(p => p.price))
+            const dropFromPeak = recentPeak > 0 ? (recentPeak - midPrice) / recentPeak : 0
+            const riseFromTrough = recentTrough > 0 ? (midPrice - recentTrough) / recentTrough : 0
+            // Pump stalling: 1h says pump but price dropped >0.3% from recent peak
+            if (momentumScore > 0 && dropFromPeak > 0.003) microReversal = true
+            // Dump stalling: 1h says dump but price rose >0.3% from recent trough
+            if (momentumScore < 0 && riseFromTrough > 0.003) microReversal = true
+          }
+
           // Apply asymmetric multipliers (positive score = pump → reduce bids, negative = dump → reduce asks)
+          // Skip reducing CLOSING side when: (a) position against momentum, OR (b) micro-reversal detected
+          const skipBidReduce = pumpAgainstShort || (microReversal && momentumScore > 0)
+          const skipAskReduce = dumpAgainstLong || (microReversal && momentumScore < 0)
+
           if (momentumScore >= momGuardConfig.strongThreshold) {
-            sizeMultipliers.bid *= momGuardConfig.strongBidMult
+            if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.strongBidMult
             sizeMultipliers.ask *= momGuardConfig.strongAskMult
           } else if (momentumScore >= momGuardConfig.moderateThreshold) {
-            sizeMultipliers.bid *= momGuardConfig.moderateBidMult
+            if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.moderateBidMult
             sizeMultipliers.ask *= momGuardConfig.moderateAskMult
           } else if (momentumScore >= momGuardConfig.lightThreshold) {
-            sizeMultipliers.bid *= momGuardConfig.lightBidMult
+            if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.lightBidMult
             sizeMultipliers.ask *= momGuardConfig.lightAskMult
           } else if (momentumScore <= -momGuardConfig.strongThreshold) {
             sizeMultipliers.bid *= momGuardConfig.strongAskMult
-            sizeMultipliers.ask *= momGuardConfig.strongBidMult
+            if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.strongBidMult
           } else if (momentumScore <= -momGuardConfig.moderateThreshold) {
             sizeMultipliers.bid *= momGuardConfig.moderateAskMult
-            sizeMultipliers.ask *= momGuardConfig.moderateBidMult
+            if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.moderateBidMult
           } else if (momentumScore <= -momGuardConfig.lightThreshold) {
             sizeMultipliers.bid *= momGuardConfig.lightAskMult
-            sizeMultipliers.ask *= momGuardConfig.lightBidMult
+            if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.lightBidMult
           }
 
           if (this.tickCount % 20 === 0 || Math.abs(momentumScore) >= momGuardConfig.moderateThreshold) {
+            const posFlag = pumpAgainstShort ? ' ⚠️SHORT+PUMP→bids_protected'
+              : dumpAgainstLong ? ' ⚠️LONG+DUMP→asks_protected'
+              : microReversal ? ' 🔄MICRO_REVERSAL→closing_protected'
+              : ''
             console.log(
               `📈 [MOMENTUM_GUARD] ${pair}: score=${momentumScore.toFixed(2)} ` +
               `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
               `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
-              `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)}`
+              `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}`
             )
           }
         }

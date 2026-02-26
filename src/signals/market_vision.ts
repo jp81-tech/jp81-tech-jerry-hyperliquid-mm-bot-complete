@@ -289,6 +289,8 @@ export type PairAnalysis = {
   ema200_4h: number; // Value of 200 EMA on 4h
   support4h: number; // HTF Support Price (Low of last 30 4h candles)
   resistance4h: number; // HTF Resistance Price (High of last 30 4h candles)
+  supportBody4h: number; // HTF Support from candle bodies (min of O/C) — wick-filtered
+  resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — wick-filtered
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -407,6 +409,8 @@ export class MarketVisionService {
         let ema200_4h = 0;
         let support4h = 0;
         let resistance4h = 999999;
+        let supportBody4h = 0;
+        let resistanceBody4h = 999999;
 
         if (candles4h && candles4h.length >= 200) {
           const ema200Series = Technicals.calculateEMA(candles4h, 200);
@@ -421,6 +425,9 @@ export class MarketVisionService {
           const last30_4h = candles4h.slice(-30);
           support4h = Math.min(...last30_4h.map(c => c.l));
           resistance4h = Math.max(...last30_4h.map(c => c.h));
+          // Body-based S/R — filters out wick noise (flash crash spikes)
+          supportBody4h = Math.min(...last30_4h.map(c => Math.min(c.o, c.c)));
+          resistanceBody4h = Math.max(...last30_4h.map(c => Math.max(c.o, c.c)));
         }
 
         // B. MTF Context: 1h Candles for volatility and tactical bias
@@ -684,6 +691,8 @@ export class MarketVisionService {
           ema200_4h,
           support4h,
           resistance4h,
+          supportBody4h,
+          resistanceBody4h,
           supportDist: distSup,
           resistanceDist: distRes,
           activeCandlePattern,

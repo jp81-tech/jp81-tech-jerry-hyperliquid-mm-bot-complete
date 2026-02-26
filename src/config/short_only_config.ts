@@ -251,7 +251,10 @@ export function getPumpShieldConfig(pair: string): PumpShieldConfig {
 
 export interface MomentumGuardConfig {
   enabled: boolean
-  pumpThresholdPct: number        // change1h % for max score (e.g. 3.0 for kPEPE)
+  pumpThresholdPct: number        // change1h % for max score — fallback when ATR unavailable (e.g. 3.0 for kPEPE)
+  useAtrThreshold: boolean        // true = derive pumpThreshold from 1.5×ATR% (adapts to vol regime)
+  atrThresholdMult: number        // multiplier for ATR-based threshold (default 1.5 = threshold at 1.5×ATR)
+  dumpSensitivityMult: number     // asymmetry: dump threshold = pumpThreshold × this (default 0.7 = react 30% faster to dumps)
   rsiOverboughtThreshold: number  // RSI above this → reduce bids (default 65)
   rsiOversoldThreshold: number    // RSI below this → reduce asks (default 35)
   // Multipliers at each momentum level (pump side shown, dump is mirrored)
@@ -270,6 +273,9 @@ export interface MomentumGuardConfig {
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   enabled: true,
   pumpThresholdPct: 2.0,
+  useAtrThreshold: true,          // Use ATR-derived threshold (adapts to vol regime)
+  atrThresholdMult: 1.5,          // Threshold = 1.5 × ATR% (1h)
+  dumpSensitivityMult: 0.7,       // Dumps react 30% faster (crypto falls faster than it rises)
   rsiOverboughtThreshold: 65,
   rsiOversoldThreshold: 35,
   strongBidMult: 0.10,
@@ -284,7 +290,7 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
-  'kPEPE': { pumpThresholdPct: 3.0 },  // Memecoin: wider threshold (higher normal vol)
+  'kPEPE': { pumpThresholdPct: 3.0, atrThresholdMult: 2.0 },  // Memecoin: wider ATR mult (higher normal vol)
 }
 
 export function getMomentumGuardConfig(token: string): MomentumGuardConfig {
