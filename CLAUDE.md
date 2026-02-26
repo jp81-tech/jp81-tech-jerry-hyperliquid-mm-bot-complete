@@ -146,6 +146,68 @@ resistanceBody4h: number        // Body-based HTF resistance
 
 **Commit:** `dc578dc`
 
+### 47. Dynamic TP (Spread Widener) + Inventory SL (Panic Mode) (26.02)
+
+**Cel:** Dwa nowe ATR-oparte mechanizmy zarządzania pozycją dla kPEPE PURE_MM. Rozszerzenie Momentum Guard o aktywne zarządzanie TP i awaryjne zamykanie.
+
+**A) Dynamic TP (Spread Widener):**
+
+**Problem:** Gdy micro-reversal wykryty i pozycja jest na zwycięskiej stronie, grid TP zamyka pozycję zbyt blisko mid price — nie łapie pełnego ruchu odwrócenia.
+
+**Rozwiązanie:** Przy micro-reversal + pozycja na winning side → rozszerz spread na closing side o `tpSpreadMult` (domyślnie ×1.5 = 50% szerzej).
+
+| Scenariusz | Closing side | Efekt |
+|-----------|-------------|-------|
+| SHORT + pump stalling (cena spada od peak) | Bidy | Bid spread ×1.5 → TP dalej od mid → łapie więcej spadku |
+| LONG + dump stalling (cena rośnie od trough) | Aski | Ask spread ×1.5 → TP dalej od mid → łapie więcej wzrostu |
+
+**Logika:** "Let it run" — gdy odwrócenie potwierdzone, nie zamykaj od razu. Daj pozycji więcej miejsca.
+
+**Log:** `🎯 [DYNAMIC_TP] kPEPE: SHORT+micro_reversal → bid spread ×1.50 (ATR=X.XX%)`
+
+**B) Inventory SL (Panic Mode):**
+
+**Problem:** Bot może utknąć z dużą underwater pozycją (|skew| > 40%) gdy cena mocno ruszyła przeciwko. Bez mechanizmu awaryjnego kontynuuje market-making w obie strony, potencjalnie powiększając stratę.
+
+**Rozwiązanie:** Gdy `|skew| > maxSkewSlThreshold (40%)` AND drawdown od entry > `slAtrMultiplier × ATR% (2.5×ATR)` → PANIC MODE:
+- Blokuj losing side (asks=0 dla SHORT, bids=0 dla LONG) → stop powiększania straty
+- Agresywne closing: closing-side size ×`panicClosingMult` (2.0) → szybsze wyjście
+
+| Warunek | Reakcja SHORT | Reakcja LONG |
+|---------|-------------|-------------|
+| Panic triggered | asks=0, bids×2.0 | bids=0, asks×2.0 |
+| Drawdown < threshold | normalne MG działanie | normalne MG działanie |
+| skew < 40% | nie armed | nie armed |
+
+**Guard: `drawdownPct > 0`** — panic TYLKO gdy pozycja jest underwater (drawdown dodatni). Jeśli pozycja jest w zysku, nie triggeruje nawet przy wysokim skew.
+
+**Log:** `🚨 [INVENTORY_SL] kPEPE: PANIC SHORT — skew=55% drawdown=4.2% > 3.8% (2.5×ATR) → asks=0 bids×2.0`
+
+**Nowe pola w MomentumGuardConfig:**
+```typescript
+tpSpreadWidenerEnabled: boolean   // default true
+tpSpreadMult: number              // default 1.5 (50% wider closing spread)
+inventorySlEnabled: boolean       // default true
+maxSkewSlThreshold: number        // default 0.40 (40% skew)
+slAtrMultiplier: number           // default 2.5 (drawdown > 2.5×ATR)
+panicClosingMult: number          // default 2.0 (2× closing size)
+```
+
+**Pipeline position:** Wewnątrz bloku Momentum Guard, po scoring + multipliers, przed `generateGridOrdersCustom()`.
+- Dynamic TP modyfikuje `gridBidMult`/`gridAskMult` (spread width)
+- Inventory SL modyfikuje `sizeMultipliers` (order size) — overriduje wcześniejsze MG multipliers
+
+**Pliki:** `src/config/short_only_config.ts` (+14), `src/mm_hl.ts` (+58)
+
+**Dodatkowe zmiany w tym commicie:**
+- `ecosystem.config.cjs` — `DYNAMIC_CONFIG_ENABLED=false` dla mm-pure, `RISK_TOTAL_CAPITAL_USD=9000`, `DYNAMIC_CONFIG_TOKENS` dla mm-follower
+- `src/mm/SmAutoDetector.ts` — `filterTokens` param w `loadAndAnalyzeAllTokens()` (optymalizacja: skip tokenów nie w BOT_MODE)
+- `whale_tracker.py` — frankfrankbank.eth dodany (ETH $9.3M SHORT, MANUAL trader, CONVICTION 0.80)
+
+**Deploy:** SCP 2 pliki → server, `pm2 restart mm-pure --update-env`. Confirmed: `score=-0.16 prox=-0.80 skew=-8%` (oba features armed, czekają na trigger).
+
+**Commit:** `698379b`
+
 ---
 
 ## Zmiany 25 lutego 2026
@@ -2002,7 +2064,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-dc578dc feat: Momentum Guard v2 — 7 fixes for position-aware, ATR-adaptive grid protection
+698379b feat: Dynamic TP (Spread Widener) + Inventory SL (Panic Mode) for kPEPE
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2104,6 +2166,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować Dynamic TP — logi `🎯 [DYNAMIC_TP]`, sprawdzić czy triggeruje przy micro-reversal + position (wymaga: microReversal=true + hasShortPos/hasLongPos + momentumScore odpowiedni)
+- [ ] Monitorować Inventory SL — logi `🚨 [INVENTORY_SL]`, sprawdzić czy triggeruje gdy |skew|>40% i drawdown > 2.5×ATR% (wymaga: duża pozycja + ruch cenowy przeciwko)
+- [ ] Sprawdzić Dynamic TP spread widening — czy L1 bid/ask jest faktycznie dalej od mid po triggerze (porównaj z normalnym logiem [SPREAD])
+- [ ] Sprawdzić Inventory SL panic closing — czy asks=0 i bids×2.0 skutecznie zamyka pozycję (obserwuj skew reduction w kolejnych tickach)
 - [ ] Monitorować Momentum Guard v2 — logi `📈 [MOMENTUM_GUARD]`, czekać na większy ruch kPEPE żeby zobaczyć score != 0
 - [ ] Sprawdzić position-aware guard w akcji — flaga `⚠️SHORT+PUMP→bids_protected` gdy bot ma SHORT i cena pompuje
 - [ ] Sprawdzić micro-reversal detection — flaga `🔄MICRO_REVERSAL→closing_protected` gdy 1h laguje ale cena odbiła
@@ -2248,3 +2314,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Momentum Guard (26.02)**: Asymetryczny grid dla kPEPE PURE_MM. 3 sygnały: 1h momentum (50%), RSI (30%), proximity S/R (20%). Score -1.0 do +1.0. Pozytywny (pump) → redukuj bidy, zwiększ aski. Negatywny (dump) → mirror. 3 levele: strong (0.7), moderate (0.4), light (0.2). Config w `short_only_config.ts`, logika w kPEPE sekcji `mm_hl.ts`. Logi: `📈 [MOMENTUM_GUARD]` co 20 ticków lub przy |score| >= 0.4.
 - **Momentum Guard v2 (26.02)**: 7 fixów: (1) Body-based S/R (`resistanceBody4h`/`supportBody4h`) filtruje wick noise, (2) Explicit breakout: price>resistance=+1.0, price<support=-1.0, (3) ATR-based proximity zones zamiast static 1%/2%, (4) ATR-based pumpThreshold (`useAtrThreshold=true`, `atrThresholdMult=1.5`, kPEPE=2.0), (5) Dump asymmetry (`dumpSensitivityMult=0.7` = 30% szybsza reakcja na dumpy), (6) Position-aware guard: nie blokuj bidów gdy SHORT+PUMP (bidy zamykają pozycję!), mirror dla LONG+DUMP, (7) Micro-reversal: 0.3% drop od peak w pumpShieldHistory → odblokuj closing mimo lagging 1h. Flagi: `⚠️SHORT+PUMP→bids_protected`, `⚠️LONG+DUMP→asks_protected`, `🔄MICRO_REVERSAL→closing_protected`.
 - **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
+- **Dynamic TP (26.02)**: Rozszerza closing-side spread ×1.5 gdy micro-reversal + pozycja na winning side. SHORT+pump_stalling → bid spread ×1.5 (TP dalej, łapie więcej spadku). LONG+dump_stalling → ask spread ×1.5. Modyfikuje `gridBidMult`/`gridAskMult`. Config: `tpSpreadWidenerEnabled=true`, `tpSpreadMult=1.5`. Log: `🎯 [DYNAMIC_TP]`.
+- **Inventory SL (26.02)**: Panic mode gdy |skew|>40% AND drawdown > 2.5×ATR%. SHORT underwater → asks=0 + bids×2.0. LONG underwater → bids=0 + asks×2.0. Guard: `drawdownPct > 0` (tylko gdy underwater). Config: `inventorySlEnabled=true`, `maxSkewSlThreshold=0.40`, `slAtrMultiplier=2.5`, `panicClosingMult=2.0`. Log: `🚨 [INVENTORY_SL]`.
+- **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
+- **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".

@@ -31,6 +31,7 @@
 23. [Slowniczek](#slowniczek)
 24. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
 25. [Momentum Guard — nie kupuj szczytow, nie shortuj den](#momentum-guard--nie-kupuj-szczytow-nie-shortuj-den)
+26. [Dynamic TP + Inventory SL — pozwol zyskom rosnac, tnij straty](#dynamic-tp--inventory-sl--pozwol-zyskom-rosnac-tnij-straty)
 
 ---
 
@@ -3700,3 +3701,150 @@ Wiekszosci botow gridowych uzywa statycznych reguł: "spread 20bps, ordery po $1
 - **Asymetrie rynku** (dump = szybszy prog)
 
 To 7 wymiarow adaptacji zamiast 0. Roznica miedzy botem ktory przezywa memecoin volatility a botem ktory oddaje pieniadze rynkowi.
+
+---
+
+## Dynamic TP + Inventory SL — pozwol zyskom rosnac, tnij straty
+
+> "Cut your losses short, let your profits run." — Jesse Livermore, 1923
+
+To jest prawdopodobnie najstarsza i najbardziej powtarzana zasada tradingu w historii. Problem? **Ludzie (i boty) robia dokladnie odwrotnie** — zamykaja zyski za wczesnie (strach przed utrata zysku) i trzymaja straty za dlugo (nadzieja na odbicie). Nasz bot mial dokladnie ten sam problem.
+
+### Analogia: restauracja z obrotowymi drzwiami
+
+Wyobraz sobie restauracje. Kelner (bot) przynosi dania (ordery) na stoly (grid levels). Gdy klient (rynek) zblizy sie do wyjscia (micro-reversal), kelner natychmiast zabiera talerz (zamyka TP). Ale jesli klient chce jeszcze jeść (ruch trwa) — powinien poczekac!
+
+**Dynamic TP** to jak kelner ktory mowi: "Widze ze Pan jeszcze je. Przyniosę rachunek pozniej" — przesuwa talerz dalej od klienta.
+
+A jesli klient zaczyna demolowac restauracje (pozycja mocno pod woda)? **Inventory SL** to alarm przeciwpozarowy — natychmiast evakuuj, blokuj wejscia, wszyscy na wyjscie.
+
+### Problem 1: "Papierowe rece" na TP
+
+Momentum Guard v2 dodal **micro-reversal detection** — wykrywa gdy pump/dump zaczyna sie odwracac. Ale co potem? Bot wykrywal odwrocenie i... zachowywal normalny grid. TP zamykal sie na pierwszym poziomie (L1 = 18bps od mid). W memecoinie ktory potrafi spasc o 2% w 10 minut, zamkniecie na 0.18% to jak uciekanie z kasyna po wygraniu $5 na automacie — technicznie zysk, ale zostawiasz fortune na stole.
+
+**Scenariusz:**
+```
+Tick 1: kPEPE SHORT -20% skew, cena pompuje +3%
+Tick 2: Pump stalls — cena spada 0.5% od peak → MICRO-REVERSAL detected!
+Tick 3: Normalny grid → L1 bid na 18bps od mid → fill natychmiast
+Tick 4: Cena spada jeszcze 1.5% → ale juz zamknelismy...
+
+STRACONY ZYSK: ~1.5% na pozycji ktora mogla brac wiecej
+```
+
+### Rozwiazanie: Dynamic TP (Spread Widener)
+
+Gdy micro-reversal wykryty i pozycja na **winning side**:
+- Rozszerz closing-side spread o `tpSpreadMult` (domyslnie ×1.5)
+- Normalny L1 bid = 18bps → po Dynamic TP = 27bps od mid
+- Pozycja ma 50% wiecej miejsca zeby "oddychac" zanim TP sie zamknie
+
+```
+SHORT + pump stalling → bid spread ×1.5 → TP dalej → lapie wiecej spadku
+LONG + dump stalling  → ask spread ×1.5 → TP dalej → lapie wiecej wzrostu
+```
+
+**Klucz: warunek "winning side"**. Dynamic TP TYLKO gdy pozycja jest na DOBREJ stronie odwrocenia:
+- SHORT i cena spada od peak? → Swietnie, daj jej spasc dalej
+- LONG i cena rośnie od trough? → Swietnie, daj jej rosnac dalej
+- SHORT i cena rośnie? → To NIE jest TP — to SL! Dynamic TP nie triggeruje
+
+### Problem 2: Brak "hamulca recznego"
+
+Przed Inventory SL bot mial Momentum Guard (redukuje ordery w trendzie) i Pump Shield (blokuje bidy przy pompie). Ale zadne z nich nie adresowal sytuacji: **duza pozycja + duzy ruch przeciwko + brak poprawy**.
+
+```
+Tick 1:  SHORT -45% skew, entry 0.004500
+Tick 5:  cena 0.004700 (+4.4% nad entry)
+Tick 10: cena 0.004750 (+5.6% nad entry)
+Tick 20: cena nadal rosnie — MG redukuje aski ale NIE zamyka pozycji
+Tick 50: cena 0.005000 (+11.1% nad entry) — bot nadal ma SHORT
+```
+
+Bot kontynuowal market-making (moze z mniejszymi askam) ale **nigdy aktywnie nie zamykal** przegrywajacej pozycji. Jak kierowca ktory widzi mur przed soba ale zamiast hamowac, po prostu zwalnia.
+
+### Rozwiazanie: Inventory SL (Panic Mode)
+
+Dwa warunki musza byc spelnione JEDNOCZESNIE:
+
+1. **|skew| > 40%** — duza pozycja (nie malutki imbalance)
+2. **Drawdown od entry > 2.5 × ATR%** — cena ruszyla sie znaczaco PRZECIWKO nam
+
+Gdy oba = **PANIC MODE**:
+- **Blokuj losing side** (asks=0 dla SHORT) → stop powieksza straty
+- **Agresywne closing** (bids×2.0) → szybkie wyjscie
+
+```
+PANIC SHORT:  asks = 0 (nie shortuj wiecej!)  +  bids × 2.0 (zamykaj szybko!)
+PANIC LONG:   bids = 0 (nie kupuj wiecej!)    +  asks × 2.0 (zamykaj szybko!)
+```
+
+### Dlaczego ATR a nie procenty?
+
+Proste pytanie: "4% drawdown to duzo czy malo?"
+
+- Dla BTC: **DUZO** — BTC rzadko rusza sie o 4% w godzine
+- Dla kPEPE: **NORMALNE** — memecoin potrafi ruszyc o 4% w 10 minut
+
+Odpowiedz zalezy od **zmiennosci instrumentu**. ATR (Average True Range) mierzy typowy ruch cenowy. `2.5 × ATR%` znaczy "2.5 razy wiecej niz typowy ruch". To adaptuje sie automatycznie:
+
+| Rezim | ATR% | SL threshold (2.5×) | Interpretacja |
+|-------|------|---------------------|---------------|
+| Spokojna noc | 0.8% | 2.0% | Maly ruch juz jest alarmujacy |
+| Normalny dzien | 1.5% | 3.75% | Standardowy prog |
+| Szalony US open | 2.5% | 6.25% | Wiekszy margines — vol jest normalna |
+
+**Lekcja: ATR-based thresholds sa jak termostat — same sie dostosowuja do pogody. Static thresholds sa jak wlacznik on/off — albo za zimno albo za goraco.**
+
+### Bezpiecznik: `drawdownPct > 0`
+
+Subtelny ale krytyczny guard. Inventory SL TYLKO gdy pozycja jest **underwater** (drawdown pozytywny = cena przeciwko nam). Jesli mamy SHORT -50% skew ale jestesmy $200 w zysku — **nie triggeruj panic**. To jest diamond hands, nie problem.
+
+```
+skew=-50%, drawdown=-3% (w zysku) → NIE PANIKUJ (pozycja zdrowa)
+skew=-50%, drawdown=+4% (strata)  → sprawdz vs 2.5×ATR → moze PANIC
+```
+
+Bez tego guardu, kazda duza pozycja (nawet zdrowa, w zysku) trigerowala by panic zamykanie. To by zniszczylo calego Momentum Guarda i position-aware protection.
+
+### Pelny pipeline kPEPE (po zmianach)
+
+```
+1. Toxicity Engine      → wykrywa toksyczny flow, dostosowuje spread/size
+2. TimeZone Profile     → 10-zone time-of-day adjustment
+3. Momentum Guard       → 3-signal score → asymetryczne bid/ask multipliers
+4. Position-Aware Guard → chroni closing orders (nie blokuj TP!)
+5. Micro-Reversal       → wykrywa odwrocenia mimo lagging 1h
+6. 🎯 DYNAMIC TP       → rozszerza closing spread gdy reversal + winning ← NOWE
+7. 🚨 INVENTORY SL     → panic close gdy duza strata + wysoki skew     ← NOWE
+8. Grid Generation      → generateGridOrdersCustom z finalnym spread/size
+9. Layer Removal        → toxicity-driven + skew-based layer pruning
+10. Hedge Trigger       → IOC gdy skew >50% przez 30min
+```
+
+To jest 10 warstw inteligencji na jednym instrumencie. Kazda warstwa patrzy na cos innego: flow toksycznosc, pora dnia, momentum rynku, pozycje bota, mikro-odwrocenia, potencjal zysku, ryzyko straty, strukture grida, brak rownowagi, ekstremalny skew.
+
+### Lekcje inzynierskie
+
+**1. Dual-threshold gating (AND nie OR)**
+
+Inventory SL wymaga DWOCH warunkow: skew > 40% **AND** drawdown > 2.5×ATR. Kazdy z osobna to normalny stan — bot czesto ma 40% skew (normalna pozycja), czesto widzi 2.5×ATR ruchy (normalna zmiennosc). Dopiero KOMBINACJA obu jest niebezpieczna. To jak alarm pozarowy ktory wymaga DYMU i TEMPERATURY — sam dym (ktos pali papierosa) nie wlacza tryskawki.
+
+**Lekcja: Mechanizmy awaryjne powinny wymagac wielu niezaleznych potwierdzen. Im bardziej destrukcyjna akcja, tym wiecej warunkow powinno byc spelnione.**
+
+**2. Spread vs Size — dwa rozne narzedzia**
+
+Dynamic TP modyfikuje **spread** (jak daleko od mid sa ordery), Inventory SL modyfikuje **size** (ile sztuk). To nie przypadek — sa to ortogonalne narzedzia:
+
+- Spread = "GDZIE chcesz wypelnienie?" → kontrola ceny
+- Size = "ILE chcesz sprzedac/kupic?" → kontrola ekspozycji
+
+Dynamic TP nie zwieksza pozycji (bez zmiany size) — tylko przesuwa cel cenowy. Inventory SL nie zmienia spreadu — tylko zmienia ILOSC. Kazde narzedzie robi jedna rzecz dobrze.
+
+**Lekcja: Single Responsibility Principle dziala tez w tradingu. Nie probuj jednym mechanizmem kontrolowac dwoch roznych aspektow.**
+
+**3. Override hierarchy**
+
+Inventory SL jest OSTATNI w pipeline i ustawia `sizeMultipliers.ask = 0` (hard zero). To nadpisuje WSZYSTKIE wczesniejsze multipliery — Toxicity Engine, TimeZone, Momentum Guard. Celowo. Gdy dom sie pali, nie patrzysz jaka jest pora dnia ani jaki jest momentum na RSI.
+
+**Lekcja: Mechanizmy bezpieczenstwa powinny moc nadpisac wszystko ponizej. Ale powinny byc na samym koncu pipeline — zeby mialy pelny obraz sytuacji zanim podejma decyzje.**
