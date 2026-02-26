@@ -276,6 +276,10 @@ export interface MomentumGuardConfig {
   maxSkewSlThreshold: number      // |skew| must exceed this to arm panic mode (default 0.40 = 40%)
   slAtrMultiplier: number         // drawdown threshold = slAtrMult × ATR% (default 2.5)
   panicClosingMult: number        // increase closing-side size by this mult in panic (default 2.0)
+  // Auto-Skewing (Inventory Price Shifting): shift grid center based on position
+  autoSkewEnabled: boolean        // default true
+  autoSkewShiftBps: number        // bps shift per 10% skew (default 2.0 → 30% skew = 6bps shift)
+  autoSkewMaxShiftBps: number     // max safe shift cap (default 15.0 bps = 0.15%)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -301,6 +305,9 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   maxSkewSlThreshold: 0.40,      // Arm panic when |skew| > 40%
   slAtrMultiplier: 2.5,          // Drawdown threshold = 2.5 × ATR%
   panicClosingMult: 2.0,         // 2× closing-side size in panic mode
+  autoSkewEnabled: true,
+  autoSkewShiftBps: 2.0,         // Shift 2 bps per 10% skew (30% skew → 6bps shift)
+  autoSkewMaxShiftBps: 15.0,     // Max shift 15 bps (0.15%) — safety cap
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {

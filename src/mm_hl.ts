@@ -8156,9 +8156,39 @@ class HyperliquidMMBot {
           }
         }
 
+        // === ⚖️ AUTO-SKEWING (Inventory-based Price Shifting) ===
+        // Shift the entire grid center based on position — closing side becomes aggressive,
+        // opening side becomes passive. "Bot oszukuje samego siebie" — modyfikuje mid price.
+        let skewedMidPrice = midPrice
+        let skewShiftBps = 0
+
+        if (momGuardConfig.autoSkewEnabled && position) {
+          // SHORT (skew < 0) → shift UP → bids closer to market (aggressive buy to close)
+          // LONG (skew > 0) → shift DOWN → asks closer to market (aggressive sell to close)
+          const skewTenPercents = actualSkew * 10  // e.g., -0.30 → -3.0
+          const rawShiftBps = -(skewTenPercents * momGuardConfig.autoSkewShiftBps)  // -(-3.0 × 2.0) = +6.0
+
+          // Cap shift to safe maximum
+          const maxBps = momGuardConfig.autoSkewMaxShiftBps
+          skewShiftBps = Math.max(-maxBps, Math.min(maxBps, rawShiftBps))
+
+          if (Math.abs(skewShiftBps) > 0.01) {
+            skewedMidPrice = midPrice * (1 + skewShiftBps / 10000)
+
+            if (this.tickCount % 20 === 0) {
+              const dir = skewShiftBps > 0 ? 'UP (aggressive bids)' : 'DOWN (aggressive asks)'
+              console.log(
+                `⚖️ [AUTO_SKEW] ${pair}: skew=${(actualSkew * 100).toFixed(1)}% ` +
+                `→ mid shift ${skewShiftBps > 0 ? '+' : ''}${skewShiftBps.toFixed(2)}bps ${dir} ` +
+                `| real=${midPrice.toFixed(6)} skewed=${skewedMidPrice.toFixed(6)}`
+              )
+            }
+          }
+        }
+
         gridOrders = this.gridManager!.generateGridOrdersCustom(
           pair,
-          midPrice,
+          skewedMidPrice,  // ← shifted mid price instead of raw midPrice
           capitalPerPair,
           KPEPE_GRID_LAYERS,
           0.001,
