@@ -261,7 +261,7 @@ const isMainModule = import.meta.url === `file://${process.argv[1]}`;
 if (isMainModule) {
   (async () => {
     const svc = getPredictionService();
-    const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
+    const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN', 'kPEPE'];
 
     console.log('\n🔮 Price Prediction Service - Test Run\n');
 

@@ -35,7 +35,7 @@ except ImportError:
     sys.exit(1)
 
 # --- Configuration ---
-TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
+TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
 HL_API = "https://api.hyperliquid.xyz/info"
 DATASET_DIR = "/tmp"
 SM_DATA_FILE = "/tmp/smart_money_data.json"

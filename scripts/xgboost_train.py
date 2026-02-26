@@ -34,7 +34,7 @@ except ImportError:
     sys.exit(1)
 
 # --- Configuration ---
-TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
+TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
 DATASET_DIR = "/tmp"
 MODEL_DIR = "/tmp"
 

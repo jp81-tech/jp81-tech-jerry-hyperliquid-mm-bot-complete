@@ -202,7 +202,7 @@ export class XGBoostPredictor {
   private models: Map<string, Record<string, XGBModel>> = new Map();  // token -> {h1, h4, h12}
   private meta: Map<string, XGBMeta> = new Map();
   private lastReload: number = 0;
-  private tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
+  private tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN', 'kPEPE'];
 
   constructor() {
     // Initial load (fire and forget)
