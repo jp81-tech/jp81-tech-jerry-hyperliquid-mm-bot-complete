@@ -38,12 +38,21 @@ export interface ModelWeights {
 }
 
 export const PREDICTION_HORIZONS = [
-  { key: 'h1',  hours: 1,   multiplier: 0.3, confMax: 80, confBase: 50, confScale: 30 },
-  { key: 'h4',  hours: 4,   multiplier: 0.8, confMax: 70, confBase: 45, confScale: 25 },
+  { key: 'h1',  hours: 1,   multiplier: 0.5, confMax: 80, confBase: 50, confScale: 30 },
+  { key: 'h4',  hours: 4,   multiplier: 1.0, confMax: 70, confBase: 45, confScale: 25 },
   { key: 'h12', hours: 12,  multiplier: 1.5, confMax: 60, confBase: 40, confScale: 20 },
   { key: 'w1',  hours: 168, multiplier: 3.0, confMax: 45, confBase: 30, confScale: 15 },
   { key: 'm1',  hours: 720, multiplier: 5.0, confMax: 30, confBase: 20, confScale: 10 },
 ];
+
+// Per-horizon weight overrides: short horizons = technical/momentum dominant, long = SM dominant
+const HORIZON_WEIGHTS: Record<string, { technical: number; momentum: number; smartMoney: number; volume: number; trend: number }> = {
+  h1:  { technical: 0.35, momentum: 0.30, smartMoney: 0.10, volume: 0.15, trend: 0.10 },
+  h4:  { technical: 0.25, momentum: 0.20, smartMoney: 0.30, volume: 0.10, trend: 0.15 },
+  h12: { technical: 0.20, momentum: 0.15, smartMoney: 0.40, volume: 0.10, trend: 0.15 },
+  w1:  { technical: 0.10, momentum: 0.10, smartMoney: 0.55, volume: 0.05, trend: 0.20 },
+  m1:  { technical: 0.05, momentum: 0.05, smartMoney: 0.65, volume: 0.05, trend: 0.20 },
+};
 
 export class HybridPredictor {
   private technicalIndicators: TechnicalIndicators;
@@ -118,8 +127,8 @@ export class HybridPredictor {
       console.log(`[HybridPredictor] ${token} XGBoost blend: ${xgbPred.direction} (${xgbPred.confidence.toFixed(1)}%, ${xgbPred.horizon}) | signal: ${prevSignal.toFixed(3)} → ${combinedSignal.toFixed(3)}`);
     }
 
-    // 5. Calculate predictions for different timeframes
-    const predictions = this.calculatePredictions(currentPrice, combinedSignal, latestTech, ohlcvData);
+    // 5. Calculate predictions for different timeframes (pass raw signals for per-horizon weighting)
+    const predictions = this.calculatePredictions(currentPrice, combinedSignal, latestTech, ohlcvData, signals);
 
     // 6. Determine overall direction and confidence
     const direction = this.getDirection(combinedSignal);
@@ -246,12 +255,14 @@ export class HybridPredictor {
 
   /**
    * Calculate price predictions for different timeframes
+   * Uses per-horizon signal weights + mean-reversion for h12+
    */
   private calculatePredictions(
     currentPrice: number,
     signal: number,
     tech: TechnicalFeatures,
-    ohlcv: OHLCVData[]
+    ohlcv: OHLCVData[],
+    signals?: { technical: number; momentum: number; smartMoney: number; volume: number }
   ): PredictionResult['predictions'] {
     // Base volatility for scaling predictions
     const volatility = tech.volatility || 2;
@@ -260,16 +271,40 @@ export class HybridPredictor {
     const recentCloses = ohlcv.slice(-24).map(d => d.close);
     const slope = this.calculateSlope(recentCloses);
 
+    // Mean-reversion: RSI-based pull-back factor for h12+
+    // Extreme RSI values suggest price will revert, not continue
+    const rsiMeanReversion = tech.rsi > 70 ? -(tech.rsi - 50) / 100  // overbought → pull down
+                           : tech.rsi < 30 ? -(tech.rsi - 50) / 100  // oversold → pull up
+                           : 0;
+
     const predictions: Record<string, { price: number; change: number; confidence: number }> = {};
 
     for (const hz of PREDICTION_HORIZONS) {
+      // Per-horizon signal: re-combine signals with horizon-specific weights
+      let hzSignal = signal;  // fallback to combined
+      if (signals && HORIZON_WEIGHTS[hz.key]) {
+        const w = HORIZON_WEIGHTS[hz.key];
+        hzSignal = signals.technical * w.technical +
+                   signals.momentum * w.momentum +
+                   signals.smartMoney * w.smartMoney +
+                   signals.volume * w.volume +
+                   signals.momentum * w.trend;
+        hzSignal = Math.max(-1, Math.min(1, hzSignal));
+      }
+
       // Dampen slope for long horizons (linear extrapolation meaningless beyond 24h)
       const effectiveSlope = hz.hours <= 24
         ? slope * hz.hours
         : slope * 24 * Math.log2(hz.hours / 24 + 1);
-      const change = signal * volatility * hz.multiplier + effectiveSlope;
+
+      // Mean-reversion kicks in for h12+ (short-term momentum is valid, long-term reverts)
+      const meanRevFactor = hz.hours >= 12
+        ? rsiMeanReversion * volatility * Math.min(hz.hours / 12, 3)
+        : 0;
+
+      const change = hzSignal * volatility * hz.multiplier + effectiveSlope + meanRevFactor;
       const price = currentPrice * (1 + change / 100);
-      const confidence = Math.min(hz.confMax, hz.confBase + Math.abs(signal) * hz.confScale);
+      const confidence = Math.min(hz.confMax, hz.confBase + Math.abs(hzSignal) * hz.confScale);
       predictions[hz.key] = { price, change, confidence };
     }
 
@@ -369,10 +404,11 @@ export class HybridPredictor {
   }
 
   /**
-   * Verify past predictions and update accuracy
+   * Verify past predictions using retrospective method:
+   * For each prediction, find the nearest stored prediction at targetAge to get the actual price.
+   * This eliminates the ±10% window problem — ALL old predictions get verified.
    */
   async verifyPredictions(token: string, currentPrice: number): Promise<Record<string, { accuracy: number; total: number }>> {
-    const now = Date.now();
     const HOUR = 3600000;
 
     const VERIFY_CONFIG: Record<string, { ageHours: number; errorThreshold: number }> = {
@@ -391,45 +427,73 @@ export class HybridPredictor {
     try {
       const filePath = `/tmp/predictions_${token}.json`;
       const data = await fsp.readFile(filePath, 'utf-8');
-      const predictions: (PredictionResult & { verified?: Record<string, boolean> })[] = JSON.parse(data);
+      const predictions: PredictionResult[] = JSON.parse(data);
 
-      const results: Record<string, { hits: number; total: number }> = { direction: { hits: 0, total: 0 } };
+      if (predictions.length < 5) return emptyResult;
+
+      // Build time→price map from all stored predictions (each has currentPrice at time of creation)
+      const timePrices = predictions.map(p => ({ ts: p.timestamp, price: p.currentPrice }));
+      timePrices.sort((a, b) => a.ts - b.ts);
+
+      // Helper: find actual price at a target timestamp (nearest prediction within 2h tolerance)
+      const getPriceAt = (targetMs: number): number | null => {
+        let best: typeof timePrices[0] | null = null;
+        let bestDist = Infinity;
+        for (const tp of timePrices) {
+          const dist = Math.abs(tp.ts - targetMs);
+          if (dist < bestDist) { bestDist = dist; best = tp; }
+        }
+        // Also consider currentPrice for the most recent check
+        const distToNow = Math.abs(targetMs - Date.now());
+        if (distToNow < bestDist && currentPrice > 0) {
+          return currentPrice;
+        }
+        if (best && bestDist < 2 * HOUR) return best.price;
+        return null;
+      };
+
+      const results: Record<string, { hits: number; total: number; dirHits: number; dirTotal: number }> = {};
       for (const key of Object.keys(VERIFY_CONFIG)) {
-        results[key] = { hits: 0, total: 0 };
+        results[key] = { hits: 0, total: 0, dirHits: 0, dirTotal: 0 };
       }
+      results.direction = { hits: 0, total: 0, dirHits: 0, dirTotal: 0 };
 
       for (const pred of predictions) {
-        if (!pred.verified) pred.verified = {};
-        const age = now - pred.timestamp;
-
         for (const [hz, cfg] of Object.entries(VERIFY_CONFIG)) {
           const predData = pred.predictions[hz];
           if (!predData) continue;
 
-          const targetAge = cfg.ageHours * HOUR;
-          if (age >= targetAge * 0.9 && age <= targetAge * 1.1 && !pred.verified[hz]) {
-            pred.verified[hz] = true;
-            results[hz].total++;
-            const error = Math.abs(currentPrice - predData.price) / predData.price * 100;
-            if (error < cfg.errorThreshold) results[hz].hits++;
+          const targetMs = pred.timestamp + cfg.ageHours * HOUR;
+          const actualPrice = getPriceAt(targetMs);
+          if (actualPrice === null) continue;
 
-            // Direction accuracy (use first horizon verified)
-            if (hz === 'h1') {
-              results.direction.total++;
-              const predictedDir = predData.change > 0;
-              const actualDir = currentPrice > pred.currentPrice;
-              if (predictedDir === actualDir) results.direction.hits++;
-            }
+          results[hz].total++;
+          const error = Math.abs(actualPrice - predData.price) / predData.price * 100;
+          if (error < cfg.errorThreshold) results[hz].hits++;
+
+          // Direction accuracy
+          const predictedUp = predData.change > 0;
+          const actualUp = actualPrice > pred.currentPrice;
+          const actualFlat = Math.abs(actualPrice - pred.currentPrice) / pred.currentPrice < 0.001;  // <0.1% = flat
+          if (!actualFlat) {
+            results[hz].dirHits += (predictedUp === actualUp) ? 1 : 0;
+            results[hz].dirTotal++;
           }
         }
       }
 
-      // Save updated predictions with verification flags
-      await fsp.writeFile(filePath, JSON.stringify(predictions, null, 2));
+      // Aggregate direction accuracy across h1+h4 (most reliable)
+      results.direction.total = (results.h1?.dirTotal || 0) + (results.h4?.dirTotal || 0);
+      results.direction.hits = (results.h1?.dirHits || 0) + (results.h4?.dirHits || 0);
 
-      const result: Record<string, { accuracy: number; total: number }> = {};
+      const result: Record<string, { accuracy: number; total: number; directionAccuracy?: number; directionTotal?: number }> = {};
       for (const [key, r] of Object.entries(results)) {
-        result[key] = { accuracy: r.total > 0 ? r.hits / r.total * 100 : 0, total: r.total };
+        result[key] = {
+          accuracy: r.total > 0 ? r.hits / r.total * 100 : 0,
+          total: r.total,
+          directionAccuracy: r.dirTotal > 0 ? r.dirHits / r.dirTotal * 100 : 0,
+          directionTotal: r.dirTotal,
+        };
       }
       return result;
     } catch (error) {
@@ -440,13 +504,18 @@ export class HybridPredictor {
   /**
    * Update model weights based on accuracy (simple online learning)
    */
-  async updateWeights(token: string): Promise<void> {
-    const accuracy = await this.verifyPredictions(token, 0);
+  async updateWeights(token: string, currentPrice?: number): Promise<void> {
+    const price = currentPrice || 0;
+    const accuracy = await this.verifyPredictions(token, price);
 
-    // If direction accuracy is high, boost SM weight (our edge)
-    if (accuracy.direction.accuracy > 60 && accuracy.direction.total > 10) {
+    // Use direction accuracy from combined h1+h4
+    const dirEntry = accuracy.direction as any;
+    const dirAcc = dirEntry?.directionAccuracy ?? dirEntry?.accuracy ?? 0;
+    const dirTotal = dirEntry?.directionTotal ?? dirEntry?.total ?? 0;
+
+    if (dirAcc > 60 && dirTotal > 10) {
       this.weights.smartMoney = Math.min(0.5, this.weights.smartMoney + 0.02);
-    } else if (accuracy.direction.accuracy < 40 && accuracy.direction.total > 10) {
+    } else if (dirAcc < 40 && dirTotal > 10) {
       this.weights.smartMoney = Math.max(0.2, this.weights.smartMoney - 0.02);
     }
 

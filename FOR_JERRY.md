@@ -32,6 +32,7 @@
 24. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
 25. [Momentum Guard — nie kupuj szczytow, nie shortuj den](#momentum-guard--nie-kupuj-szczytow-nie-shortuj-den)
 26. [Dynamic TP + Inventory SL — pozwol zyskom rosnac, tnij straty](#dynamic-tp--inventory-sl--pozwol-zyskom-rosnac-tnij-straty)
+27. [Auto-Skewing — przesun siatke tam gdzie bot potrzebuje fillow](#auto-skewing--przesun-siatke-tam-gdzie-bot-potrzebuje-fillow)
 
 ---
 
@@ -3848,3 +3849,159 @@ Dynamic TP nie zwieksza pozycji (bez zmiany size) — tylko przesuwa cel cenowy.
 Inventory SL jest OSTATNI w pipeline i ustawia `sizeMultipliers.ask = 0` (hard zero). To nadpisuje WSZYSTKIE wczesniejsze multipliery — Toxicity Engine, TimeZone, Momentum Guard. Celowo. Gdy dom sie pali, nie patrzysz jaka jest pora dnia ani jaki jest momentum na RSI.
 
 **Lekcja: Mechanizmy bezpieczenstwa powinny moc nadpisac wszystko ponizej. Ale powinny byc na samym koncu pipeline — zeby mialy pelny obraz sytuacji zanim podejma decyzje.**
+
+---
+
+## Auto-Skewing — przesun siatke tam gdzie bot potrzebuje fillow
+
+> "Jesli masz za duzo towaru na polce, przesuniecie calego regalu blizej kasy sprawi ze ludzie latwiej go kupią."
+
+### Problem: symetryczna siatka ignoruje inwentarz
+
+Wyobraz sobie targowisko. Masz stragan z jablkami i gruszkami. Sprzedajesz po rowno obie strony — jablka po lewej, gruszki po prawej. Ale dzis z jakiegos powodu nazbierales OGROMNA gore gruszek (moze dostawca pomylil zamowienie). Co robisz?
+
+Normalny sprzedawca: **przesuwa stragan** tak, zeby strona z gruszkami byla blizej przejscia, gdzie jest najwiecej klientow. Nie zmienia cen (spread), nie zmienia ilosci (size) — zmienia **POZYCJE straganu** w przestrzeni.
+
+Dokladnie to robi Auto-Skewing z nasza siatka orderow.
+
+### Co robilismy dotychczas?
+
+Przed Auto-Skew mielismy dwa sposoby radzenia sobie z nierownowaga pozycji:
+
+| Narzedzie | Co robi | Analogia |
+|-----------|---------|----------|
+| `getInventoryAdjustment()` | Przesuwa offsety poszczegolnych warstw ±10bps | Przesuwasz pojedyncze produkty na polce |
+| Enhanced Skew (size-based) | Zmienia ILOSC orderow na kazdej stronie | Kladesz WIECEJ gruszek na wystawe |
+| **Auto-Skew (mid-price shift)** | Przesuwa CALĄ siatke (midPrice) | **Przesuwasz CALY stragan** ← NOWE |
+
+Te trzy mechanizmy sa **komplementarne** — dzialaja na roznych osiach:
+- Offset = mikro-przesuniecia poszczegolnych warstw
+- Size = ile towaru wystawiasz
+- Mid-price = gdzie stoi caly stragan
+
+### Jak to dziala?
+
+Siatka orderow ma "srodek" — `midPrice`. To jest cena rynkowa wokol ktorej bot rozmieszcza bidy i aski. Normalnie `midPrice = aktualna cena` i siatka jest wycentrowana.
+
+Auto-Skew przesuwa ten srodek na podstawie inventory skew:
+
+```
+actualSkew = -30% (mamy za duzo SHORTow)
+                    ↓
+shiftBps = -((-0.30) × 10 × 2.0) = +6.0 bps
+                    ↓
+skewedMidPrice = midPrice × (1 + 6.0 / 10000)
+                    ↓
+midPrice przesunieta W GORE o 6 bps (0.06%)
+```
+
+**Dlaczego w gore?** Bo mamy za duzo shortow = musimy KUPOWAC (zamykac shorty). Bidy (kupno) sa PONIZEJ mid. Przesuwajac mid w gore, bidy tez ida w gore = blizej rynku = wiecej fillow = szybsze zamykanie.
+
+```
+PRZED (skew=-30%, symetryczna siatka):
+                 mid
+    bid L4  bid L3  bid L2  bid L1  |  ask L1  ask L2  ask L3  ask L4
+    ----+------+------+------+------+------+------+------+----
+                                    ^ aktualna cena
+
+PO (skew=-30%, mid przesuniete +6bps):
+                         mid (shifted UP)
+    bid L4  bid L3  bid L2  bid L1  |  ask L1  ask L2  ask L3  ask L4
+    ------+------+------+------+----+----+------+------+------+----
+                                    ^ aktualna cena
+
+Bidy = BLIZEJ rynku (latwiej kupic = zamknac shorta)
+Aski = DALEJ od rynku (trudniej sprzedac = nie zwiekszaj shorta)
+```
+
+### Parametry
+
+| Parametr | Wartosc | Co robi |
+|----------|---------|---------|
+| `autoSkewShiftBps` | 2.0 | 2 bps przesuniecia na kazde 10% skew |
+| `autoSkewMaxShiftBps` | 15.0 | Maksymalne przesuniecie = 15 bps (0.15%) |
+
+**Przyklady:**
+
+| Skew | Shift | Kierunek | Efekt |
+|------|-------|----------|-------|
+| -10% (lekki SHORT) | +2 bps UP | Bidy blizej | Delikatne zamykanie |
+| -30% (sredni SHORT) | +6 bps UP | Bidy blizej | Umiarkowane zamykanie |
+| -50% (duzy SHORT) | +10 bps UP | Bidy blizej | Agresywne zamykanie |
+| -80% (ekstremalny) | +15 bps UP | **CAPPED** | Max shift, bezpieczenstwo |
+| +30% (sredni LONG) | -6 bps DOWN | Aski blizej | Zamykanie longow |
+
+Cap na 15 bps jest kluczowy — bez niego przy 100% skew bot przesunalby srodek o 20 bps, co przy malym spreadzie (18 bps L1) mogloby spowodowac ze bidy i aski sie "mijaja" (crossed market).
+
+### Dlaczego to dziala?
+
+Klucz do zrozumienia: **zmiana midPrice nie zmienia spreadu**. Warstwy L1-L4 (18/30/45/65 bps) sa relatywne do srodka. Przesuwasz srodek = przesuwasz WSZYSTKIE warstwy jednoczesnie.
+
+To jak ruszanie calym suwakiem na equaliserze — wszystkie czestotliwosci ida w gore/dol, ale proporcje miedzy nimi zostaja te same.
+
+Efekt na fills:
+- **Closing side** (bidy dla SHORT): wiecej fillow, bo ordery sa blizej rynku
+- **Opening side** (aski dla SHORT): mniej fillow, bo ordery sa dalej od rynku
+
+To jest **dokladnie** to czego chcemy: szybciej redukuj ryzyko, wolniej je zwiększaj.
+
+### Pipeline (po zmianach)
+
+```
+ 1. Toxicity Engine      → wykrywa toksyczny flow
+ 2. TimeZone Profile     → dostosowanie do pory dnia
+ 3. Momentum Guard       → 3-signal score → asymetryczne mults
+ 4. Position-Aware Guard → chroni closing orders
+ 5. Micro-Reversal       → wykrywa odwrocenia
+ 6. 🎯 Dynamic TP       → rozszerza closing spread przy reversal
+ 7. 🚨 Inventory SL     → panic close przy duzej stracie
+ 8. ⚖️ Auto-Skew        → przesuwa midPrice na podstawie skew      ← NOWE
+ 9. Grid Generation      → generateGridOrdersCustom z finalnym spread/size/mid
+10. Layer Removal        → toxicity + skew pruning
+11. Hedge Trigger        → IOC przy ekstremalnym skew
+```
+
+11 warstw inteligencji. Kazda modyfikuje inny aspekt siatki:
+- Warstwy 1-2: **kontekst** (flow quality, time)
+- Warstwy 3-5: **kierunek** (momentum, position, reversals)
+- Warstwy 6-7: **ekstrema** (TP opportunity, SL emergency)
+- Warstwa 8: **pozycja siatki** (mid-price shift)
+- Warstwa 9: **generacja** (finale ordery)
+- Warstwy 10-11: **czyszczenie** (pruning, emergency hedge)
+
+### Lekcje inzynierskie
+
+**1. Trzy ortogonalne osie kontroli**
+
+Mamy teraz 3 niezalezne "pokretla" do zarzadzania inventory:
+
+```
+Os X: OFFSET    → getInventoryAdjustment() → ±10bps per layer
+Os Y: SIZE      → Enhanced Skew            → bid×1.2 / ask×0.8
+Os Z: POSITION  → Auto-Skew               → mid-price ±15bps
+```
+
+Kazda os kontroluje cos innego. Offset = mikrostruktura warstw. Size = agresywnosc. Position = centrum siatki. Mozesz je dowolnie kombinowac bez konfliktow — nie "walcza" ze soba.
+
+**Lekcja: Projektuj mechanizmy kontroli na niezaleznych osiach. Dwa pokretla na tej samej osi to redundancja i potencjalny konflikt. Trzy pokretla na roznych osiach to precision control.**
+
+**2. Safety cap jako twardy limit**
+
+`autoSkewMaxShiftBps = 15.0` — to nie jest "sugestia", to twardy `Math.min/Math.max`. Bez niego, ekstremalny skew (100%) dal by 20 bps shift na L1 = 18 bps. 20 > 18 = bidy przekroczylyby aski = crossed market = gwarantowana strata na kazdym fillu.
+
+```
+maxShift = 15 bps   (nasz cap)
+L1 spread = 18 bps  (najwezszy layer)
+15 < 18             (zawsze bezpieczne ✅)
+```
+
+**Lekcja: Gdy mechanizm moze wygenerowac wartosci proporcjonalne do inputu, ZAWSZE dodaj twardy cap. Procentowe skalowanie bez capu to bomba zegarowa — pewnego dnia input bedzie wiekszy niz oczekiwales.**
+
+**3. Placement w pipeline ma znaczenie**
+
+Auto-Skew jest PO Inventory SL ale PRZED generateGridOrdersCustom. To nie przypadek:
+- Gdyby byl PRZED Inventory SL → panic mode moglby zresetowac midPrice (nie ma sensu)
+- Gdyby byl PO generateGridOrdersCustom → musialby modyfikowac juz wygenerowane ordery (hack)
+- Jego aktualna pozycja: modyfikuje input (midPrice) tuz przed generacja → czyste, eleganckie
+
+**Lekcja: W pipeline architekturze, kazdy krok powinien modyfikowac INPUTY nastepnego kroku, nie outputy poprzedniego. Modyfikowanie inputow = transformacja, modyfikowanie outputow = patch. Transformacja jest czysta, patch jest brudny.**

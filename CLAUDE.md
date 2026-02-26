@@ -208,6 +208,59 @@ panicClosingMult: number          // default 2.0 (2× closing size)
 
 **Commit:** `698379b`
 
+### 48. Auto-Skewing — przesunięcie siatki na podstawie pozycji (26.02)
+
+**Problem:** Bot z dużą pozycją (np. -30% SHORT) miał siatkę centrowaną na prawdziwej mid price. Bidy i aski symetrycznie rozmieszczone wokół mid → zamknięcie pozycji wymagało ruchu cenowego DO bida. Bot czekał biernie — kapitał zamrożony.
+
+**Rozwiązanie:** Przesunięcie mid price przekazanej do `generateGridOrdersCustom` proporcjonalnie do skew. Bot "oszukuje samego siebie" — widzi sztuczną cenę, więc cała siatka się przesuwa.
+
+**Mechanizm:**
+```
+SHORT heavy (skew < 0) → shift mid UP   → bidy bliżej rynku (aggressive buy-to-close)
+                                         → aski dalej od rynku (passive, mniej nowych shortów)
+LONG heavy (skew > 0)  → shift mid DOWN → aski bliżej rynku (aggressive sell-to-close)
+                                         → bidy dalej od rynku (passive, mniej nowych longów)
+```
+
+**Matematyka:**
+```
+skewTenPercents = actualSkew × 10        // -0.30 → -3.0
+rawShiftBps = -(skewTenPercents × 2.0)   // -(-3.0 × 2.0) = +6.0 bps
+shiftBps = clamp(rawShiftBps, -15, +15)  // safety cap
+skewedMidPrice = midPrice × (1 + shiftBps / 10000)
+```
+
+**Przykłady:**
+
+| Skew | Shift | Efekt |
+|------|-------|-------|
+| -10% | +2.0 bps UP | Lekko agresywne bidy |
+| -30% | +6.0 bps UP | Znacząco agresywne bidy |
+| -50% | +10.0 bps UP | Bardzo agresywne bidy |
+| -80% | +15.0 bps UP (cap) | Maximum shift — bidy ultra-aggressive |
+| +20% | -4.0 bps DOWN | Agresywne aski (zamykanie longa) |
+
+**Nowe pola w MomentumGuardConfig:**
+```typescript
+autoSkewEnabled: boolean        // default true
+autoSkewShiftBps: number        // default 2.0 (2 bps per 10% skew)
+autoSkewMaxShiftBps: number     // default 15.0 (max 0.15% shift)
+```
+
+**Pipeline position:** Po Momentum Guard + Dynamic TP + Inventory SL, bezpośrednio PRZED `generateGridOrdersCustom`. Auto-Skew modyfikuje `midPrice` → wszystkie warstwy grida (L1-L4) przesuwają się jednocześnie.
+
+**Kluczowa różnica vs obecny `getInventoryAdjustment()`:**
+- Stary: adjustuje offsety indywidualnych warstw (±10bps per 15% skew) — asymetryczny spread
+- Nowy: przesuwa CAŁĄ siatkę (mid shift) — wszystkie L1-L4 razem, zachowując strukturę grida
+
+**Pliki:** `src/config/short_only_config.ts` (+7), `src/mm_hl.ts` (+31/-1)
+
+**Deploy:** SCP → server, `pm2 restart mm-pure --update-env`.
+
+**Confirmed live:** `skew=8.5% → -1.70bps DOWN (aggressive asks) | real=0.003814 skewed=0.003813`
+
+**Commit:** `bf6a82c`
+
 ---
 
 ## Zmiany 25 lutego 2026
@@ -2064,7 +2117,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-698379b feat: Dynamic TP (Spread Widener) + Inventory SL (Panic Mode) for kPEPE
+bf6a82c feat: Auto-Skewing — shift grid center based on inventory position
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2166,6 +2219,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować Auto-Skew — logi `⚖️ [AUTO_SKEW]` co 20 ticków, sprawdzić czy shift rośnie proporcjonalnie do skew (np. skew=30% → shift=6bps)
+- [ ] Sprawdzić Auto-Skew fills — czy closing-side fills przyspieszają po wdrożeniu (porównaj fill rate przed/po w hourly report)
+- [ ] Sprawdzić Auto-Skew max cap — czy shift nie przekracza 15bps nawet przy ekstremalnym skew (>75%)
 - [ ] Monitorować Dynamic TP — logi `🎯 [DYNAMIC_TP]`, sprawdzić czy triggeruje przy micro-reversal + position (wymaga: microReversal=true + hasShortPos/hasLongPos + momentumScore odpowiedni)
 - [ ] Monitorować Inventory SL — logi `🚨 [INVENTORY_SL]`, sprawdzić czy triggeruje gdy |skew|>40% i drawdown > 2.5×ATR% (wymaga: duża pozycja + ruch cenowy przeciwko)
 - [ ] Sprawdzić Dynamic TP spread widening — czy L1 bid/ask jest faktycznie dalej od mid po triggerze (porównaj z normalnym logiem [SPREAD])
@@ -2316,5 +2372,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
 - **Dynamic TP (26.02)**: Rozszerza closing-side spread ×1.5 gdy micro-reversal + pozycja na winning side. SHORT+pump_stalling → bid spread ×1.5 (TP dalej, łapie więcej spadku). LONG+dump_stalling → ask spread ×1.5. Modyfikuje `gridBidMult`/`gridAskMult`. Config: `tpSpreadWidenerEnabled=true`, `tpSpreadMult=1.5`. Log: `🎯 [DYNAMIC_TP]`.
 - **Inventory SL (26.02)**: Panic mode gdy |skew|>40% AND drawdown > 2.5×ATR%. SHORT underwater → asks=0 + bids×2.0. LONG underwater → bids=0 + asks×2.0. Guard: `drawdownPct > 0` (tylko gdy underwater). Config: `inventorySlEnabled=true`, `maxSkewSlThreshold=0.40`, `slAtrMultiplier=2.5`, `panicClosingMult=2.0`. Log: `🚨 [INVENTORY_SL]`.
-- **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
+- **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".

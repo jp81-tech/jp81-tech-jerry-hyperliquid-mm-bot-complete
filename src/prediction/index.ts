@@ -118,16 +118,16 @@ export class PricePredictionService {
   /**
    * Verify past predictions
    */
-  async verifyPredictions(token: string): Promise<Record<string, { accuracy: number; total: number }>> {
+  async verifyPredictions(token: string): Promise<Record<string, any>> {
     const candles = await this.dataLoader.fetchCandles(token, '1h', 24);
     const currentPrice = candles[candles.length - 1]?.close || 0;
 
     if (currentPrice > 0) {
       return this.predictor.verifyPredictions(token, currentPrice);
     }
-    const result: Record<string, { accuracy: number; total: number }> = {};
+    const result: Record<string, any> = {};
     for (const key of ['h1', 'h4', 'h12', 'w1', 'm1', 'direction']) {
-      result[key] = { accuracy: 0, total: 0 };
+      result[key] = { accuracy: 0, total: 0, directionAccuracy: 0, directionTotal: 0 };
     }
     return result;
   }

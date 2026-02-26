@@ -38,13 +38,13 @@ TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN"]
 DATASET_DIR = "/tmp"
 MODEL_DIR = "/tmp"
 
-# Per-horizon minimum samples (w1/m1 have fewer labeled rows initially)
+# Per-horizon minimum samples (lowered to bootstrap — accuracy improves with more data)
 MIN_SAMPLES = {
-    "h1":  200,
-    "h4":  200,
-    "h12": 200,
-    "w1":  100,   # Fewer samples available initially
-    "m1":  50,    # Very few samples in first month
+    "h1":  50,
+    "h4":  50,
+    "h12": 50,
+    "w1":  30,
+    "m1":  20,
 }
 
 # Classification thresholds (price change %)
@@ -98,6 +98,15 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
     labels = {"h1": [], "h4": [], "h12": [], "w1": [], "m1": []}
     skipped = {"h1": 0, "h4": 0, "h12": 0, "w1": 0, "m1": 0}
 
+    # Collector uses "label_1h" format, but horizon keys are "h1" — map both
+    LABEL_KEY_MAP = {
+        "h1": ["label_h1", "label_1h"],
+        "h4": ["label_h4", "label_4h"],
+        "h12": ["label_h12", "label_12h"],
+        "w1": ["label_w1"],
+        "m1": ["label_m1"],
+    }
+
     with open(filepath) as f:
         for line in f:
             line = line.strip()
@@ -115,8 +124,11 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
             features.append(feat)
 
             for horizon in ["h1", "h4", "h12", "w1", "m1"]:
-                label_key = f"label_{horizon}"
-                val = row.get(label_key)
+                val = None
+                for label_key in LABEL_KEY_MAP[horizon]:
+                    val = row.get(label_key)
+                    if val is not None:
+                        break
                 if val is not None:
                     labels[horizon].append(val)
                 else:
