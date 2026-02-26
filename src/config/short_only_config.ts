@@ -268,6 +268,14 @@ export interface MomentumGuardConfig {
   strongThreshold: number         // |score| >= this → strong (default 0.7)
   moderateThreshold: number       // |score| >= this → moderate (default 0.4)
   lightThreshold: number          // |score| >= this → light (default 0.2)
+  // Dynamic TP (Spread Widener): widen closing-side spread during micro-reversal
+  tpSpreadWidenerEnabled: boolean // default true
+  tpSpreadMult: number            // closing-side spread multiplier during micro-reversal (default 1.5 = 50% wider)
+  // Inventory SL (Panic Mode): force-close when skew + drawdown exceed ATR-based thresholds
+  inventorySlEnabled: boolean     // default true
+  maxSkewSlThreshold: number      // |skew| must exceed this to arm panic mode (default 0.40 = 40%)
+  slAtrMultiplier: number         // drawdown threshold = slAtrMult × ATR% (default 2.5)
+  panicClosingMult: number        // increase closing-side size by this mult in panic (default 2.0)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -287,6 +295,12 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   strongThreshold: 0.7,
   moderateThreshold: 0.4,
   lightThreshold: 0.2,
+  tpSpreadWidenerEnabled: true,
+  tpSpreadMult: 1.5,             // 50% wider closing-side spread during micro-reversal
+  inventorySlEnabled: true,
+  maxSkewSlThreshold: 0.40,      // Arm panic when |skew| > 40%
+  slAtrMultiplier: 2.5,          // Drawdown threshold = 2.5 × ATR%
+  panicClosingMult: 2.0,         // 2× closing-side size in panic mode
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {

@@ -1140,7 +1140,7 @@ async function readVipSpyState(): Promise<Record<string, Record<string, VipPosit
  * Loads SM data and analyzes all tokens.
  * Results are cached for 30 seconds.
  */
-export async function loadAndAnalyzeAllTokens(forceReload = false): Promise<Map<string, TokenSmAnalysis>> {
+export async function loadAndAnalyzeAllTokens(forceReload = false, filterTokens?: string[]): Promise<Map<string, TokenSmAnalysis>> {
   const now = Date.now()
 
   // Return cached if fresh (unless forced)
@@ -1160,6 +1160,8 @@ export async function loadAndAnalyzeAllTokens(forceReload = false): Promise<Map<
     const newAnalysis = new Map<string, TokenSmAnalysis>()
 
     for (const [token, smData] of Object.entries(enrichedSmData)) {
+      // 🤖 BOT_MODE: Skip tokens not in filter (reduces noise + resource usage)
+      if (filterTokens && filterTokens.length > 0 && !filterTokens.includes(token)) continue
       const analysis = analyzeTokenSm(token, smData)
       newAnalysis.set(token, analysis)
     }

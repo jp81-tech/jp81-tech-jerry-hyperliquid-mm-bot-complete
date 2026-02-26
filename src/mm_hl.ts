@@ -8096,6 +8096,64 @@ class HyperliquidMMBot {
               `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}`
             )
           }
+
+          // === 🎯 DYNAMIC TP (Spread Widener) ===
+          // When micro-reversal detected and price moving in position's favor → widen closing-side spread
+          // "Let it run" — don't TP too early when reversal is confirmed
+          if (momGuardConfig.tpSpreadWidenerEnabled && microReversal && atrPct > 0) {
+            if (hasShortPos && momentumScore > 0) {
+              // Pump stalling → price dropping → SHORT winning → widen bid spread (let TP run lower)
+              gridBidMult *= momGuardConfig.tpSpreadMult
+              console.log(
+                `🎯 [DYNAMIC_TP] ${pair}: SHORT+micro_reversal → bid spread ×${momGuardConfig.tpSpreadMult.toFixed(2)} ` +
+                `(ATR=${atrPct.toFixed(2)}% | bids further from mid → TP catches more drop)`
+              )
+            } else if (hasLongPos && momentumScore < 0) {
+              // Dump stalling → price rising → LONG winning → widen ask spread (let TP run higher)
+              gridAskMult *= momGuardConfig.tpSpreadMult
+              console.log(
+                `🎯 [DYNAMIC_TP] ${pair}: LONG+micro_reversal → ask spread ×${momGuardConfig.tpSpreadMult.toFixed(2)} ` +
+                `(ATR=${atrPct.toFixed(2)}% | asks further from mid → TP catches more rise)`
+              )
+            }
+          }
+
+          // === 🚨 INVENTORY SL (Panic Mode) ===
+          // When |skew| > threshold AND drawdown from entry > ATR-based limit → emergency close
+          // Block losing side (stop adding), increase closing side (aggressive exit)
+          if (momGuardConfig.inventorySlEnabled && position && atrPct > 0) {
+            const absSkew = Math.abs(actualSkew)
+            if (absSkew > momGuardConfig.maxSkewSlThreshold) {
+              const entryPx = position.entryPrice || midPrice
+              // Drawdown: positive = price moved AGAINST the position
+              const drawdownPct = hasShortPos
+                ? ((midPrice - entryPx) / entryPx) * 100    // SHORT: price UP = losing
+                : ((entryPx - midPrice) / entryPx) * 100    // LONG: price DOWN = losing
+              const slThresholdPct = momGuardConfig.slAtrMultiplier * atrPct
+
+              if (drawdownPct > 0 && drawdownPct > slThresholdPct) {
+                if (hasShortPos) {
+                  // SHORT underwater → block asks (stop adding), aggressive bids (close)
+                  sizeMultipliers.ask = 0
+                  sizeMultipliers.bid *= momGuardConfig.panicClosingMult
+                  console.log(
+                    `🚨 [INVENTORY_SL] ${pair}: PANIC SHORT — skew=${(absSkew*100).toFixed(0)}% ` +
+                    `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                    `→ asks=0 bids×${momGuardConfig.panicClosingMult} | entry=${entryPx.toFixed(6)} mid=${midPrice.toFixed(6)}`
+                  )
+                } else if (hasLongPos) {
+                  // LONG underwater → block bids (stop adding), aggressive asks (close)
+                  sizeMultipliers.bid = 0
+                  sizeMultipliers.ask *= momGuardConfig.panicClosingMult
+                  console.log(
+                    `🚨 [INVENTORY_SL] ${pair}: PANIC LONG — skew=${(absSkew*100).toFixed(0)}% ` +
+                    `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                    `→ bids=0 asks×${momGuardConfig.panicClosingMult} | entry=${entryPx.toFixed(6)} mid=${midPrice.toFixed(6)}`
+                  )
+                }
+              }
+            }
+          }
         }
 
         gridOrders = this.gridManager!.generateGridOrdersCustom(

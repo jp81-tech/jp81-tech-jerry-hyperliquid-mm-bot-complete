@@ -109,6 +109,7 @@ NANSEN_SM_LABELS = {
     "0x8def9f": "All Time Smart Trader",  # Laurent Zeimes
     "0x418aa6": "Smart HL Perps Trader",  # 58bro.eth
     "0x7717a7": "Token Millionaire",  # Token Millionaire 7717a7 - LIT LONG, algo bot from Binance
+    "0x6f7d75": "Smart HL Perps Trader",  # frankfrankbank.eth - ETH $9.3M SHORT (+$3.78M)
 }
 
 def get_nansen_label(address: str) -> str:
@@ -1121,6 +1122,17 @@ WHALES = {
         "signal_weight": 0.70,
         "min_change": 0.10,
         "notes": "ALGO BOT (14,996 trades/30d). $8.6M equity, BTC SHORT $20.9M (279 BTC, entry $75.2K, +$3.4M, +778% ROI, 40x lev). Liq $92.5K (comfortable). Ranked #16 BTC PnL leaderboard (+$5.1M/30d). $10.7M DeFi collateral. Anonymous — no related addresses. Added 24.02 from Nansen BTC Short leaderboard."
+    },
+
+    # --- frankfrankbank.eth (added 25.02 from Nansen SM inflow audit) ---
+    "0x6f7d75c18e8ca7f486eb4d2690abf7b329087062": {
+        "name": "frankfrankbank 6f7d75",
+        "emoji": "🔴",
+        "tier": "CONVICTION",
+        "signal_weight": 0.80,
+        "nansen_label": "Smart HL Perps Trader",
+        "min_change": 0.10,
+        "notes": "MANUAL TRADER (nie bot). $823K equity, ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. 14 fills/7d, zero CLOIDs, zero sub-1s. Discovered from Nansen 'bullish SM inflow' audit — deposited $556K to HL as margin for massive ETH short. Added 25.02."
     },
 
     # --- Selini Capital (fresh directional, re-added 24.02) ---
