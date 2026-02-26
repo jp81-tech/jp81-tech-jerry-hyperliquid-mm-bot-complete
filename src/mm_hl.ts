@@ -3597,6 +3597,10 @@ class HyperliquidMMBot {
   private pumpShieldHistory: Map<string, { price: number; ts: number }[]> = new Map()
   private pumpShieldCooldowns: Map<string, number> = new Map()
 
+  // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
+  private predictionCache: Map<string, { direction: string; change: number; confidence: number; fetchedAt: number }> = new Map()
+  private predictionFetchInterval = 5 * 60 * 1000  // fetch every 5 minutes
+
   // Risk Management (Hard Stop Protection)
   private riskManager?: RiskManager
   private currentRiskState?: RiskCheckResult
@@ -5769,6 +5773,77 @@ class HyperliquidMMBot {
         reason += ' | DIV: SM distributing'
       }
     }
+
+    return { bidMult, askMult, reason }
+  }
+
+  /**
+   * 📊 Fetch h4 prediction from prediction-api (cached, refreshes every 5 min)
+   */
+  private async fetchPrediction(token: string): Promise<void> {
+    const cached = this.predictionCache.get(token)
+    if (cached && Date.now() - cached.fetchedAt < this.predictionFetchInterval) return
+
+    try {
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 3000)
+      const res = await fetch(`http://localhost:8090/predict/${token}`, { signal: controller.signal })
+      clearTimeout(timeout)
+
+      if (!res.ok) return
+      const data = await res.json() as any
+      const h4 = data?.prediction?.predictions?.h4
+      if (!h4) return
+
+      const direction = h4.change > 0 ? 'BULLISH' : h4.change < 0 ? 'BEARISH' : 'NEUTRAL'
+      this.predictionCache.set(token, {
+        direction,
+        change: h4.change,
+        confidence: h4.confidence,
+        fetchedAt: Date.now(),
+      })
+    } catch {
+      // prediction-api down — use stale cache or no bias
+    }
+  }
+
+  /**
+   * 📊 Get prediction bias for grid multipliers
+   * Returns soft bid/ask adjustments based on h4 prediction
+   */
+  getPredictionBias(token: string): { bidMult: number; askMult: number; reason: string } {
+    const pred = this.predictionCache.get(token)
+    if (!pred || pred.confidence < 50) {
+      return { bidMult: 1.0, askMult: 1.0, reason: '' }
+    }
+
+    // Stale prediction (> 15 min) — reduce influence
+    const age = Date.now() - pred.fetchedAt
+    const staleFactor = age > 15 * 60 * 1000 ? 0.5 : 1.0
+
+    const absChange = Math.abs(pred.change)
+    let bidMult = 1.0
+    let askMult = 1.0
+
+    if (absChange < 0.3) {
+      // Prediction too weak — no bias
+      return { bidMult: 1.0, askMult: 1.0, reason: '' }
+    }
+
+    if (pred.direction === 'BULLISH') {
+      // h4 says UP → slightly more bids, slightly less asks
+      const strength = Math.min(absChange / 3.0, 1.0)  // normalize: 3% change = max effect
+      bidMult = 1.0 + 0.15 * strength * staleFactor     // max +15%
+      askMult = 1.0 - 0.10 * strength * staleFactor     // max -10%
+    } else if (pred.direction === 'BEARISH') {
+      // h4 says DOWN → slightly less bids, slightly more asks
+      const strength = Math.min(absChange / 3.0, 1.0)
+      bidMult = 1.0 - 0.10 * strength * staleFactor
+      askMult = 1.0 + 0.15 * strength * staleFactor
+    }
+
+    const reason = `📊 h4=${pred.direction} ${pred.change >= 0 ? '+' : ''}${pred.change.toFixed(2)}% ` +
+      `conf=${pred.confidence.toFixed(0)}% → bid×${bidMult.toFixed(2)} ask×${askMult.toFixed(2)}`
 
     return { bidMult, askMult, reason }
   }
@@ -7973,6 +8048,23 @@ class HyperliquidMMBot {
 
         sizeMultipliers.bid *= toxOut.sizeMultBid * toxSizeMult
         sizeMultipliers.ask *= toxOut.sizeMultAsk * toxSizeMult
+
+        // === 📊 PREDICTION BIAS: h4 prediction from prediction-api ===
+        // Proactive signal — anticipates direction BEFORE price moves
+        // Soft bias: max ±15% on bid/ask multipliers, only when confidence >= 50%
+        try {
+          await this.fetchPrediction(symbol)
+          const predBias = this.getPredictionBias(symbol)
+          if (predBias.reason) {
+            sizeMultipliers.bid *= predBias.bidMult
+            sizeMultipliers.ask *= predBias.askMult
+            if (this.tickCount % 20 === 0) {
+              console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
+            }
+          }
+        } catch {
+          // prediction-api down — no bias applied, continue normally
+        }
 
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)

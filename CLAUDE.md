@@ -46,6 +46,51 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 26 lutego 2026
 
+### 51. Prediction Bias Integration — h4 predykcja wpływa na grid kPEPE (26.02)
+
+**Problem:** prediction-api (port 8090) i War Room (port 3000) działały jako osobne dashboardy — zero wpływu na trading bota. Oracle Vision w mm_hl.ts istniał ale był "logging only — no trading action". 100% decyzji bota opierało się na whale_tracker SM data, MarketVision, Toxicity Engine i Momentum Guard.
+
+**Rozwiązanie (Phase 1):** Soft Prediction Bias — h4 predykcja z prediction-api jako ±15% bias na bid/ask multipliers, wstrzyknięty w kPEPE pipeline PRZED Momentum Guard.
+
+**A) prediction-api kPEPE support (dashboard-api.ts):**
+- Problem: `toUpperCase()` zamieniał `kPEPE` na `KPEPE` → Hyperliquid API 500
+- Fix: `normalizeToken()` z `MIXED_CASE_TOKENS` mapą (`KPEPE` → `kPEPE`)
+- Dodano kPEPE do `/predict-all` endpoint
+
+**B) Prediction cache + fetch (mm_hl.ts):**
+- `predictionCache: Map<string, {direction, change, confidence, fetchedAt}>`
+- `fetchPrediction(token)` — HTTP GET do `localhost:8090/predict/{token}`, 3s timeout, cache 5 min
+- Graceful degradation: prediction-api down → use stale cache or no bias
+
+**C) `getPredictionBias(token)` — soft grid adjustment:**
+
+| Warunek | Efekt |
+|---------|-------|
+| confidence < 50% | No bias (×1.0 / ×1.0) |
+| \|change\| < 0.3% | No bias (too weak) |
+| BULLISH h4 | bid × (1.0 + 0.15×strength), ask × (1.0 - 0.10×strength) |
+| BEARISH h4 | bid × (1.0 - 0.10×strength), ask × (1.0 + 0.15×strength) |
+| Stale (>15min) | staleFactor = 0.5 (halve effect) |
+
+`strength = min(|change| / 3.0, 1.0)` — 3% predicted change = max effect
+
+**D) Pipeline position:** Po Toxicity Engine + TimeZone, PRZED Momentum Guard.
+- Prediction Bias = **proaktywny** (antycypuje kierunek)
+- Momentum Guard = **reaktywny** (reaguje na cenę)
+- Multiplicative: oba wpływają na `sizeMultipliers.bid` / `sizeMultipliers.ask`
+
+**Logi:** `📊 [PREDICTION_BIAS] kPEPE: h4=BEARISH -2.33% conf=51% → bid×0.92 ask×1.12` (co 20 ticków)
+
+**Pliki:** `src/mm_hl.ts` (+92), `src/prediction/dashboard-api.ts` (+12/-5)
+
+**Deploy:** SCP mm_hl.ts → server, manual patch dist/dashboard-api.js (tsc compilation fails on pre-existing errors), PM2 restart mm-pure + prediction-api
+
+**Verified live:**
+```
+📊 [PREDICTION_BIAS] kPEPE: h4=BEARISH -2.33% conf=51% → bid×0.92 ask×1.12
+📈 [MOMENTUM_GUARD] kPEPE: score=-0.21 → bid×0.92 ask×0.74
+```
+
 ### 50. Momentum Guard v3 — usunięcie Position-Aware Guard, przywrócenie mean-reversion (26.02)
 
 **Problem:** kPEPE Close Long na minus — bot kupował dip (poprawnie), ale zamykał longi za szybko ze stratą zamiast trzymać na odbicie. Position-Aware Guard (v2) widząc LONG+DUMP wymuszał `skipAskReduce=true` → asks ×1.0 → bot zamykał longi na dołku.
@@ -2218,7 +2263,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-5cdf725 fix: prediction system overhaul — per-horizon weights, XGBoost training, verification rewrite
+8b2679a fix: Momentum Guard v3 — remove Position-Aware Guard, restore mean-reversion symmetry
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2482,6 +2527,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
 - **XGBoost data collection**: Co 15 min (cron), 30 features per sample. Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze.
-- **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
+- **Prediction Bias (26.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na kPEPE grid. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. Pipeline: po Toxicity+TimeZone, PRZED Momentum Guard. Proaktywny (antycypuje) vs MG reaktywny (reaguje). Phase 1 — tylko kPEPE. Phase 2: SM-following pairs z w1/m1 horyzontami.
+- **kPEPE mixed case token**: Hyperliquid API wymaga dokładnie `kPEPE` (mała `k`). `toUpperCase()` zamienia na `KPEPE` → HTTP 500. Fix: `normalizeToken()` w dashboard-api.ts z `MIXED_CASE_TOKENS` mapą. Dotyczy WSZYSTKICH endpointów prediction-api: `/predict/`, `/verify/`, `/predict-xgb/`, `/xgb-features/`.

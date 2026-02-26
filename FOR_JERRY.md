@@ -35,6 +35,7 @@
 27. [Auto-Skewing — przesun siatke tam gdzie bot potrzebuje fillow](#auto-skewing--przesun-siatke-tam-gdzie-bot-potrzebuje-fillow)
 28. [Prediction System Overhaul — kiedy mózg bota mówił głupoty](#prediction-system-overhaul--kiedy-mozg-bota-mowil-glupoty)
 29. [Momentum Guard v3 — nie zamykaj w popłochu, trzymaj na odbicie](#momentum-guard-v3--nie-zamykaj-w-poplochu-trzymaj-na-odbicie)
+30. [Prediction Bias — bot zaczyna przewidywać przyszłość](#prediction-bias--bot-zaczyna-przewidywac-przyszlosc)
 
 ---
 
@@ -4239,3 +4240,145 @@ Mean-reversion jest z natury symetryczny: pump = mirror dump. Jesli twoj system 
 Cala zmiana to usuniecie dwoch flag z jednej linii. Zero nowych features, zero nowych parametrow, zero nowych plikow. Ale efekt jest fundamentalny — bot przestal zamykac pozycje ze strata na dumpach.
 
 **Zasada: Najlepsze fixy to czesto nie dodawanie kodu, ale usuwanie go. Kod ktory nie istnieje nie ma bugow.**
+
+---
+
+## Prediction Bias — bot zaczyna przewidywac przyszlosc
+
+### Analogia: Prognoza pogody dla tradera
+
+Wyobraz sobie, ze prowadzisz stoisko na targowisku. Dotychczas reagowales na pogode ktora **juz jest** — deszcz pada, otwierasz parasol. Teraz masz dodatkowo prognoza pogody na nastepne 4 godziny: "80% szans na deszcz po poludniu."
+
+Co robisz? Nie zamykasz stoiska (za radykalne). Nie ignorujesz prognozy (szkoda). **Lekko przygotowujesz sie** — troche mniej towaru na wystawie, parasol pod reka.
+
+Dokladnie tak dziala Prediction Bias w bocie.
+
+### Problem: Mozg bota nie mowil do rak
+
+Nasz system predykcji (prediction-api na porcie 8090) byl jak meteorolog ktory robi prognozy... ale nikt ich nie slucha:
+
+```
+prediction-api (port 8090):  "h4: kPEPE -2.33%, confidence 51%"
+War Room (port 3000):        [wyswietla ladne wykresy]
+Bot (mm_hl.ts):              [kompletnie ignoruje, handluje po swojemu]
+```
+
+Oracle Vision istnial w kodzie bota, ale mial komentarz ktory mowil wszystko: `"logging only — no trading action"`. Dosłownie — logował przewidywania, ale nie uzywał ich do niczego.
+
+### Rozwiazanie: Soft Prediction Bias
+
+Kluczowe slowo to **soft**. Nie dajemy predykcji pelnej wladzy nad botem. Dajemy jej glos doradczy — max ±15% na bid/ask multipliers.
+
+```
+h4 mowi BEARISH -2.33%, confidence 51%
+  → strength = min(2.33 / 3.0, 1.0) = 0.78
+  → bidMult = 1.0 - 0.10 × 0.78 = 0.92  (mniej kupuj)
+  → askMult = 1.0 + 0.15 × 0.78 = 1.12  (wiecej sprzedawaj)
+```
+
+Porownaj z Momentum Guard ktory moze dac ×0.10 lub ×1.30 — Prediction Bias jest delikatny, jak lekki wiatr pochylajacy siatke w jedna strone.
+
+### Proaktywny vs Reaktywny
+
+To jest kluczowa roznica:
+
+```
+PREDICTION BIAS (proaktywny):
+  "Za 4 godziny cena spadnie 2.3%"
+  → Juz teraz lekko redukuj bidy, wzmacniaj aski
+  → Bot przygotowuje sie ZANIM cena sie ruszy
+
+MOMENTUM GUARD (reaktywny):
+  "Cena spadla 1.5% w ostatnia godzine"
+  → Teraz reaguj: bidy ×1.30, aski ×0.10
+  → Bot reaguje PO ruchu cenowym
+```
+
+W pipeline kPEPE Prediction Bias jest PRZED Momentum Guard — oba wplywaja na te same multipliers multiplicatywnie:
+```
+Toxicity → TimeZone → Prediction Bias → Momentum Guard → Dynamic TP → Inventory SL → Auto-Skew
+```
+
+### Problem z kPEPE: mala litera
+
+Prosty bug ktory zjadl godzine debugowania. Hyperliquid API wymaga dokladnie `kPEPE` (mala `k`). Prediction-api uzywalo `toUpperCase()` na kazdym tokenie:
+
+```typescript
+// PRZED:
+const token = path.split('/')[2]?.toUpperCase()  // kPEPE → KPEPE → HTTP 500!
+
+// PO:
+const MIXED_CASE_TOKENS = { 'KPEPE': 'kPEPE' }
+function normalizeToken(raw) {
+  const upper = raw.toUpperCase()
+  return MIXED_CASE_TOKENS[upper] || upper  // KPEPE → kPEPE ✓
+}
+```
+
+**Lekcja:** Nigdy nie zakladaj ze `toUpperCase()` jest bezpieczna normalizacja. Kazde API ma swoje konwencje. Hyperliquid ma mieszane: `BTC`, `ETH`, `SOL` (uppercase) ale `kPEPE`, `kBONK` (mixed case). Jeden test integracyjny by to zlapal.
+
+### Zabezpieczenia (graceful degradation)
+
+```
+prediction-api nie dziala?     → brak bias, bot handluje normalnie
+Confidence < 50%?             → brak bias (za mala pewnosc)
+|change| < 0.3%?              → brak bias (za slaby sygnal)
+Predykcja starsza niz 15 min? → staleFactor = 0.5 (polowa efektu)
+Fetch trwa > 3 sekundy?       → abort, uzyj cache
+```
+
+Bot nigdy nie zatrzyma sie z powodu prediction-api. To jest **nice-to-have**, nie **must-have**.
+
+### Co to znaczy dla pipeline'u
+
+Pelen lancuch decyzyjny dla kPEPE teraz wyglada tak:
+
+```
+1. Toxicity Engine:    "Czy ktos gra przeciwko nam?" → size mult
+2. TimeZone:          "Asia quiet czy US peak?"      → spread/size mult
+3. PREDICTION BIAS:   "Za 4h cena spadnie 2.3%"     → bid×0.92, ask×1.12  ← NOWE
+4. Momentum Guard:    "1h momentum -0.21"            → bid×0.92, ask×0.74
+5. Dynamic TP:        "Micro-reversal? Widen TP"     → spread mult
+6. Inventory SL:      "Skew > 40% + underwater?"     → panic mode
+7. Auto-Skew:         "Przesun mid o 6bps"           → mid price shift
+```
+
+Kazdy krok mnozy multipliers z poprzednich — wynik koncowy to produkt wszystkich:
+```
+Final bid = 1.0 × toxicity × timezone × prediction(0.92) × momentum(0.92) ≈ 0.85
+Final ask = 1.0 × toxicity × timezone × prediction(1.12) × momentum(0.74) ≈ 0.83
+```
+
+### Lekcje inzynierskie
+
+**1. Zacznij od soft integration**
+
+Mogliśmy podlaczyc predykcje jako twardy sygnal ("BEARISH → blokuj bidy!"). Zamiast tego — soft bias ±15%. Dlaczego?
+
+- Predykcja moze sie mylic (h4 accuracy ~50-88% zaleznie od tokena)
+- Inne moduly juz podejmuja decyzje (MG, Toxicity)
+- Jesli predykcja jest dobra, ±15% daje edge. Jesli zla, ±15% nie zalamie systemu.
+
+**Zasada: Nowe zrodlo sygnalu dodawaj jako "glos doradczy" (soft bias), nie jako "generalskie rozkazy" (hard override). Niech udowodni wartosc zanim dostanie wiecej wladzy.**
+
+**2. Cache + timeout = odpornosc**
+
+Fetch do prediction-api moze trwac 100ms lub 10s (jezeli serwer jest pod obciazeniem). Bez timeoutu 3s, caly tick bota by sie opóznial. Bez cache 5min, robilibysmy 60 requestow na godzine zamiast 12.
+
+**Zasada: Kazda zewnetrzna zaleznosc powinna miec timeout, cache, i fallback. "Co jezeli ten serwis nie odpowiada?" to pierwsze pytanie ktore powinienes zadac.**
+
+**3. Multiplicatywne multipliers to potezne narzedzie**
+
+Kazdy modul mnozy `sizeMultipliers.bid` i `sizeMultipliers.ask`. Nie nadpisuje — mnozy. To znaczy ze wszystkie moduly wspolpracuja automatycznie:
+
+```
+Toxicity mowi "mniej":  0.80
+Prediction mowi "mniej": 0.92
+Momentum mowi "mniej":   0.92
+Wynik: 0.80 × 0.92 × 0.92 = 0.68 (wszystkie zgodne → silna redukcja)
+
+Ale jesli Prediction mowi "wiecej" a Momentum "mniej":
+1.12 × 0.92 = 1.03 (prawie neutralne — sygnaly sie niweluja)
+```
+
+**Zasada: Multiplicatywna architektura pozwala modulom "glosowac" bez konfliktu. Kazdy moze wzmocnic lub oslabiC sygnal, ale zaden nie moze calkowicie zlamac innego.**

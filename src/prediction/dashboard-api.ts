@@ -8,6 +8,13 @@ import { getPredictionService } from './index.js';
 
 const PORT = process.env.PREDICTION_PORT || 8090;
 
+// Normalize token name — most are UPPERCASE but some (kPEPE) have mixed case on Hyperliquid
+const MIXED_CASE_TOKENS: Record<string, string> = { 'KPEPE': 'kPEPE' };
+function normalizeToken(raw: string): string {
+  const upper = raw.toUpperCase();
+  return MIXED_CASE_TOKENS[upper] || upper;
+}
+
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -20,7 +27,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /predict/:token
     if (path.startsWith('/predict/')) {
-      const token = path.split('/')[2]?.toUpperCase();
+      const token = normalizeToken(path.split('/')[2] || '');
       if (!token) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'Token required' }));
@@ -35,7 +42,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /predict-all
     if (path === '/predict-all') {
-      const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN'];
+      const tokens = ['BTC', 'ETH', 'SOL', 'HYPE', 'ZEC', 'XRP', 'LIT', 'FARTCOIN', 'kPEPE'];
       const results: Record<string, any> = {};
 
       for (const token of tokens) {
@@ -53,7 +60,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /verify/:token
     if (path.startsWith('/verify/')) {
-      const token = path.split('/')[2]?.toUpperCase();
+      const token = normalizeToken(path.split('/')[2] || '');
       if (!token) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'Token required' }));
@@ -84,7 +91,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /predict-xgb/:token — XGBoost-only prediction (all horizons)
     if (path.startsWith('/predict-xgb/')) {
-      const token = path.split('/')[2]?.toUpperCase();
+      const token = normalizeToken(path.split('/')[2] || '');
       if (!token) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'Token required' }));
@@ -107,7 +114,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
 
     // GET /xgb-features/:token — Feature importance from XGBoost
     if (path.startsWith('/xgb-features/')) {
-      const token = path.split('/')[2]?.toUpperCase();
+      const token = normalizeToken(path.split('/')[2] || '');
       if (!token) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: 'Token required' }));
