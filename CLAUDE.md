@@ -116,6 +116,34 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 📈 [MOMENTUM_GUARD] kPEPE: score=-0.21 → bid×0.92 ask×0.74
 ```
 
+**Live cooperation Prediction Bias × Momentum Guard (26.02, 4h sample):**
+
+Prediction Bias (stały, odświeża co 5 min):
+- h4=BEARISH -2.32/-2.38% → zawsze `bid×0.92 ask×1.12`
+
+Momentum Guard (dynamiczny, reaguje na cenę):
+- score oscyluje -0.16 do -0.20 (lekki dump, proximity blisko support)
+- Z micro-reversal: `bid×0.87-0.92 ask×1.06` (closing dozwolone)
+- Bez micro-reversal: `bid×0.92 ask×0.74` (trzymaj pozycję)
+
+Wynik końcowy (multiplicatywny):
+
+| Scenariusz | Prediction | × MG | = Final bid | Final ask |
+|-----------|-----------|------|-------------|-----------|
+| Micro-reversal ON | bid×0.92 | × 0.88 | **×0.81** | ask×1.12 × 1.06 = **×1.19** |
+| Micro-reversal OFF | bid×0.92 | × 0.92 | **×0.85** | ask×1.12 × 0.74 = **×0.83** |
+
+**WAŻNE: Multipliers zmieniają ROZMIAR orderów (notional $), NIE cenę.** bid×0.81 = bidy mają 81% normalnego rozmiaru ($81 zamiast $100 per level). Ceny orderów (L1=18bps, L2=30bps od mid) się nie zmieniają.
+
+Interpretacja:
+- **Micro-reversal OFF** (cena aktywnie spada): bid×0.85 (mniej kupuj), ask×0.83 (trzymaj, MG ×0.74 wygrywa z Prediction ×1.12) → bot pasywny, chroni pozycję 💎
+- **Micro-reversal ON** (cena odbiła od dna): bid×0.81 (nadal mniej kupuj), ask×1.19 (oba zgodne — sprzedawaj agresywnie) → bot aktywnie zamyka longi/otwiera shorty
+
+**kPEPE 4h performance (26.02 15:57-19:47 UTC):**
+- 124 fills, 79% win rate (50W/13L), **+$21.59 PnL**
+- Pozycja: -157K kPEPE = $606 SHORT (6% skew z $10K max)
+- Grid: 8×8 levels, $100/order, capitalPerPair=$12,500, 5x cross leverage
+
 ### 50. Momentum Guard v3 — usunięcie Position-Aware Guard, przywrócenie mean-reversion (26.02)
 
 **Problem:** kPEPE Close Long na minus — bot kupował dip (poprawnie), ale zamykał longi za szybko ze stratą zamiast trzymać na odbicie. Position-Aware Guard (v2) widząc LONG+DUMP wymuszał `skipAskReduce=true` → asks ×1.0 → bot zamykał longi na dołku.
@@ -2556,4 +2584,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
 - **Prediction Bias (26.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na kPEPE grid. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. Pipeline: po Toxicity+TimeZone, PRZED Momentum Guard. Proaktywny (antycypuje) vs MG reaktywny (reaguje). Phase 1 — tylko kPEPE. Phase 2: SM-following pairs z w1/m1 horyzontami.
+- **Multipliers = ROZMIAR, nie cena**: `bid×0.81` znaczy bidy mają 81% normalnego rozmiaru ($81 zamiast $100/level). Ceny orderów (L1=18bps, L2=30bps od mid) się NIE zmieniają. Każdy moduł (Toxicity, TimeZone, Prediction, MG) mnoży `sizeMultipliers.bid`/`.ask` — wynik końcowy to iloczyn wszystkich. Gdy moduły się zgadzają (np. oba BEARISH) → silna redukcja/wzmocnienie. Gdy się nie zgadzają → wzajemna neutralizacja.
 - **kPEPE mixed case token**: Hyperliquid API wymaga dokładnie `kPEPE` (mała `k`). `toUpperCase()` zamienia na `KPEPE` → HTTP 500. Fix: `normalizeToken()` w dashboard-api.ts z `MIXED_CASE_TOKENS` mapą. Dotyczy WSZYSTKICH endpointów prediction-api: `/predict/`, `/verify/`, `/predict-xgb/`, `/xgb-features/`.
