@@ -46,6 +46,37 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 26 lutego 2026
 
+### 50. Momentum Guard v3 — usunięcie Position-Aware Guard, przywrócenie mean-reversion (26.02)
+
+**Problem:** kPEPE Close Long na minus — bot kupował dip (poprawnie), ale zamykał longi za szybko ze stratą zamiast trzymać na odbicie. Position-Aware Guard (v2) widząc LONG+DUMP wymuszał `skipAskReduce=true` → asks ×1.0 → bot zamykał longi na dołku.
+
+**Root cause:** Position-Aware Guard łamał fundamentalną zasadę mean-reversion Market Makingu:
+```
+DUMP: asks powinny być ×0.10 (trzymaj longi, nie sprzedawaj na dnie)
+      Position-Aware Guard: "masz LONG, pomogę zamknąć!" → asks ×1.0 → zamykał ze stratą
+```
+
+**Rozwiązanie:** Usunięto `dumpAgainstLong` i `pumpAgainstShort` z `skipBidReduce`/`skipAskReduce`. Naturalna symetria mean-reversion sama chroni pozycje:
+
+| Sytuacja | Bidy | Aski | Efekt |
+|----------|------|------|-------|
+| STRONG PUMP | ×0.10 | ×1.30 | Nie kupuj szczytu, sprzedawaj agresywnie |
+| STRONG DUMP | ×1.30 | ×0.10 | Kupuj dip, **trzymaj longi** 💎 |
+| LONG + DUMP | ×1.30 | ×0.10 | Kupuj więcej + trzymaj → czekaj na odbicie |
+| SHORT + PUMP | ×0.10 | ×1.30 | Nie kupuj + trzymaj shorty → czekaj na zjazd |
+| Micro-reversal (dump stalling) | ×1.30 | ×1.0 | Cena odbija → zamknij longi z zyskiem |
+| Micro-reversal (pump stalling) | ×1.0 | ×1.30 | Cena spada → zamknij shorty z zyskiem |
+
+**Micro-reversal** (jedyny skip flag który został): gdy 1h momentum laguje ale cena już odbiła >0.3% od dna/szczytu → odblokuj closing side → weź profit.
+
+**Pozostałe mechanizmy zamykania działają niezależnie:** Auto-Skew (przesuwa mid), Dynamic TP (rozszerza closing spread), Inventory SL (panic close przy dużym drawdown).
+
+**Pliki:** `src/mm_hl.ts` (+10/-6)
+
+**Logi:** `💎LONG+DUMP→holding(asks×reduced,bids×up)` / `💎SHORT+PUMP→holding(bids×reduced,asks×up)` / `🔄MICRO_REVERSAL→closing_allowed`
+
+**Deploy:** SCP → server, `pm2 restart mm-pure`. Confirmed: `score=-0.19 → bid×0.95 ask×0.95`
+
 ### 45. Momentum Guard v1 — asymetryczny grid na podstawie trendu (26.02)
 
 **Problem:** kPEPE (PURE_MM) kupował na szczytach i shortował na dołkach. Grid symetryczny nie reagował na momentum — takie same bidy i aski niezależnie od trendu.
@@ -2443,7 +2474,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **isBullishTrend fix (25.02)**: 15m bull w 4h bear to dead cat bounce, nie bullish trend. Przed fixem `isBullishTrend=true` blokował shorty nawet w 4h bear → deadlock (oba kierunki zablokowane). Teraz: `trend4h !== 'bear'` jest wymagane żeby 15m bull ustawił `isBullishTrend=true`. Fix dotyczy WSZYSTKICH par, nie tylko kPEPE.
 - **kPEPE Grid Widen (25.02)**: L1 5→18bps, L2 14→30bps, L3 28→45bps, L4 55→65bps. Stary L1 (5bps) powodował adverse selection — grid re-centering co 60s tworzył nowe bidy powyżej starych asków → gwarantowana strata. Nowy L1 (18bps) daje 36bps round-trip buffer. baseSpreadBps 14→25, minSpreadBps 5→12. KPEPE_GRID_LAYERS w mm_hl.ts, NANSEN_TOKENS w market_vision.ts.
 - **Momentum Guard (26.02)**: Asymetryczny grid dla kPEPE PURE_MM. 3 sygnały: 1h momentum (50%), RSI (30%), proximity S/R (20%). Score -1.0 do +1.0. Pozytywny (pump) → redukuj bidy, zwiększ aski. Negatywny (dump) → mirror. 3 levele: strong (0.7), moderate (0.4), light (0.2). Config w `short_only_config.ts`, logika w kPEPE sekcji `mm_hl.ts`. Logi: `📈 [MOMENTUM_GUARD]` co 20 ticków lub przy |score| >= 0.4.
-- **Momentum Guard v2 (26.02)**: 7 fixów: (1) Body-based S/R (`resistanceBody4h`/`supportBody4h`) filtruje wick noise, (2) Explicit breakout: price>resistance=+1.0, price<support=-1.0, (3) ATR-based proximity zones zamiast static 1%/2%, (4) ATR-based pumpThreshold (`useAtrThreshold=true`, `atrThresholdMult=1.5`, kPEPE=2.0), (5) Dump asymmetry (`dumpSensitivityMult=0.7` = 30% szybsza reakcja na dumpy), (6) Position-aware guard: nie blokuj bidów gdy SHORT+PUMP (bidy zamykają pozycję!), mirror dla LONG+DUMP, (7) Micro-reversal: 0.3% drop od peak w pumpShieldHistory → odblokuj closing mimo lagging 1h. Flagi: `⚠️SHORT+PUMP→bids_protected`, `⚠️LONG+DUMP→asks_protected`, `🔄MICRO_REVERSAL→closing_protected`.
+- **Momentum Guard v2→v3 (26.02)**: v2 miał 7 fixów: body-based S/R, breakout math, ATR proximity, ATR pumpThreshold, dump asymmetry, position-aware guard, micro-reversal. **v3 usunął position-aware guard** (punkt 6) — `skipBidReduce=pumpAgainstShort` i `skipAskReduce=dumpAgainstLong` łamały mean-reversion. Teraz: DUMP→asks×0.10 (trzymaj longi), PUMP→bids×0.10 (trzymaj shorty). Jedyny skip: micro-reversal (cena odbiła 0.3% od extremum → odblokuj closing). Flagi: `💎SHORT+PUMP→holding`, `💎LONG+DUMP→holding`, `🔄MICRO_REVERSAL→closing_allowed`.
 - **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
 - **Dynamic TP (26.02)**: Rozszerza closing-side spread ×1.5 gdy micro-reversal + pozycja na winning side. SHORT+pump_stalling → bid spread ×1.5 (TP dalej, łapie więcej spadku). LONG+dump_stalling → ask spread ×1.5. Modyfikuje `gridBidMult`/`gridAskMult`. Config: `tpSpreadWidenerEnabled=true`, `tpSpreadMult=1.5`. Log: `🎯 [DYNAMIC_TP]`.
 - **Inventory SL (26.02)**: Panic mode gdy |skew|>40% AND drawdown > 2.5×ATR%. SHORT underwater → asks=0 + bids×2.0. LONG underwater → bids=0 + asks×2.0. Guard: `drawdownPct > 0` (tylko gdy underwater). Config: `inventorySlEnabled=true`, `maxSkewSlThreshold=0.40`, `slAtrMultiplier=2.5`, `panicClosingMult=2.0`. Log: `🚨 [INVENTORY_SL]`.

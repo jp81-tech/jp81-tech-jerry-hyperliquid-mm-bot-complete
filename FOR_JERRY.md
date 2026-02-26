@@ -34,6 +34,7 @@
 26. [Dynamic TP + Inventory SL — pozwol zyskom rosnac, tnij straty](#dynamic-tp--inventory-sl--pozwol-zyskom-rosnac-tnij-straty)
 27. [Auto-Skewing — przesun siatke tam gdzie bot potrzebuje fillow](#auto-skewing--przesun-siatke-tam-gdzie-bot-potrzebuje-fillow)
 28. [Prediction System Overhaul — kiedy mózg bota mówił głupoty](#prediction-system-overhaul--kiedy-mozg-bota-mowil-glupoty)
+29. [Momentum Guard v3 — nie zamykaj w popłochu, trzymaj na odbicie](#momentum-guard-v3--nie-zamykaj-w-poplochu-trzymaj-na-odbicie)
 
 ---
 
@@ -4136,3 +4137,105 @@ SM data jest **genialne** na h4-m1 ale **szum** na h1. To nie wina danych — to
 XGBoost byl zepsuty przez tygodnie, ale system dzialal. HybridPredictor (rules-based) obslugiwal wszystko sam. XGBoost blend weight 30% z confidence cap oznaczal ze nawet zly model mial max ~10% wplywu. Gdy XGBoost wrocil, po prostu "dolozylo sie" do istniejacego systemu.
 
 **Zasada:** Projektuj nowe komponenty jako **ulepszenia** istniejacego systemu, nie jako **zamienniki**. Jesli nowy komponent sie zepsuje, stary powinien dzialac sam. To jest roznica miedzy "ML-enhanced" a "ML-dependent".**
+
+---
+
+## Momentum Guard v3 — nie zamykaj w poplochu, trzymaj na odbicie
+
+> "Kupowanie na dnie to sztuka. Ale prawdziwa sztuka to nie sprzedawac zanim cena wrocona na gore."
+
+### Co poszlo nie tak (v2)
+
+Wyobraz sobie handlarza na bazarze. Kupuje owoce taniem (dump = okazja). Ale jak tylko ktos pyta "po ile?", od razu sprzedaje — nawet jesli kupil za $5 a teraz rynek jest na $4. Nie czeka az rynek wrocona do $6. Traci na kazdej transakcji.
+
+Dokladnie to robil nasz bot. Momentum Guard v2 mial "Position-Aware Guard" — regule ktora mowila:
+
+```
+Masz LONG? + Cena spada? → Asks ×1.0 (normalne zlecenia sprzedazy)
+```
+
+To brzmi rozsadnie: "masz pozycje, pozwol ja zamknac." Ale w kontekscie mean-reversion Market Makingu to **katastrofa**. Bot kupil tanie tokeny na dumpie (dobrze!), a potem natychmiast je oddawal ze strata bo aski byly aktywne.
+
+### Zasada Mean-Reversion
+
+Mean-reversion = "cena wraca do sredniej." Jesli cena mocno spadla, statystycznie jest bardziej prawdopodobne ze WZROSNIE niz ze spadnie dalej. Market Maker zarabia wlasnie na tym:
+
+```
+1. Cena spada (DUMP)     → KUP agresywnie (bidy ×1.30)
+2. Trzymaj pozycje        → ZABLOKUJ sprzedaz (aski ×0.10)
+3. Cena wraca do sredniej → SPRZEDAJ z zyskiem
+```
+
+Position-Aware Guard lamal punkt 2 — zamiast blokowac sprzedaz, trzymal ja na ×1.0.
+
+### Co zmienilismy (v3)
+
+Usunelismy dwie linie kodu. Tak, dwie linie:
+
+```typescript
+// PRZED (v2) — position-aware skip flags:
+const skipBidReduce = pumpAgainstShort || (microReversal && momentumScore > 0)
+const skipAskReduce = dumpAgainstLong || (microReversal && momentumScore < 0)
+
+// PO (v3) — tylko micro-reversal:
+const skipBidReduce = microReversal && momentumScore > 0
+const skipAskReduce = microReversal && momentumScore < 0
+```
+
+Usunelismy `pumpAgainstShort` i `dumpAgainstLong`. Reszta kodu sie nie zmienila.
+
+### Symetria ktora dziala
+
+Teraz bot zachowuje sie identycznie dla longow i shortow:
+
+```
+PUMP (cena rosnie):              DUMP (cena spada):
+  Bidy ×0.10 (nie kupuj)          Bidy ×1.30 (kupuj dip!)
+  Aski ×1.30 (sprzedawaj)         Aski ×0.10 (trzymaj!)
+       ↓                               ↓
+  Bot ma SHORT → trzyma go 💎     Bot ma LONG → trzyma go 💎
+  Bot nie ma → nie kupuje szczytu  Bot nie ma → kupuje dno
+```
+
+**Jedyny wyjątek: Micro-reversal.** Gdy 1h momentum mowi "dump" ale cena juz odbila >0.3% od dna → "dump stalling" → aski wracaja do ×1.0 → bot moze zamknac longa z zyskiem. To jest punkt 3 z mean-reversion cyklu: "cena wraca → sprzedaj."
+
+### Dowod z fills
+
+Przed fixem (17:50-17:56):
+```
+17:50:55  Open Long @ 0.003791  ← kupil dip (dobrze!)
+17:50:57  Open Long @ 0.003793
+17:51:01  Open Long @ 0.003776  ← najtaniej (swietnie!)
+  ...5 minut...
+17:56:16  Close Long @ 0.003790  -$0.22  ← zamknal PONIZEJ entry (zle!)
+17:56:18  Close Long @ 0.003791  -$0.36  ← strata bo asks ×1.0
+```
+
+Po fixie (oczekiwane):
+```
+  Open Long @ 0.003776  ← kupil dip (tak samo)
+  ...asks ×0.10 → bot TRZYMA...
+  Cena odbija do 0.003820
+  Micro-reversal detected → asks ×1.0
+  Close Long @ 0.003820  +$0.50  ← zysk bo czekal na odbicie
+```
+
+### Lekcje inzynierskie
+
+**1. Nie naprawiaj tego co nie jest zepsute**
+
+Oryginalny Momentum Guard (v1) mial poprawna mean-reversion symetrie. Position-Aware Guard (v2) zostal dodany jako "ulepszenie" — "pomozmy zamykac pozycje." Ale system juz wiedzial kiedy zamykac (micro-reversal). Dodatkowa regula pogorszyla wyniki zamiast je poprawic.
+
+**Zasada: Zanim dodasz nowa regule, upewnij sie ze istniejacy system nie obsluguje juz tego scenariusza. Redundantna logika to nie jest "dodatkowe bezpieczenstwo" — to potencjalny konflikt.**
+
+**2. Symetria jest twoim przyjacielem**
+
+Mean-reversion jest z natury symetryczny: pump = mirror dump. Jesli twoj system traktuje pump i dump rozne (rozne skip flags, rozne warunki), prawdopodobnie cos jest nie tak. Symetryczny system jest latwiejszy do zrozumienia, debugowania i testowania.
+
+**Zasada: Jesli twoja logika handlowa nie jest symetryczna, potrzebujesz dobrego powodu. "Bo tak sie wydaje bezpieczniej" to nie jest dobry powod.**
+
+**3. Dwie linie kodu moga zmienic wszystko**
+
+Cala zmiana to usuniecie dwoch flag z jednej linii. Zero nowych features, zero nowych parametrow, zero nowych plikow. Ale efekt jest fundamentalny — bot przestal zamykac pozycje ze strata na dumpach.
+
+**Zasada: Najlepsze fixy to czesto nie dodawanie kodu, ale usuwanie go. Kod ktory nie istnieje nie ma bugow.**

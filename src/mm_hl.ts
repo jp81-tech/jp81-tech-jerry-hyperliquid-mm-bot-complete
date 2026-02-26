@@ -8060,9 +8060,13 @@ class HyperliquidMMBot {
           }
 
           // Apply asymmetric multipliers (positive score = pump → reduce bids, negative = dump → reduce asks)
-          // Skip reducing CLOSING side when: (a) position against momentum, OR (b) micro-reversal detected
-          const skipBidReduce = pumpAgainstShort || (microReversal && momentumScore > 0)
-          const skipAskReduce = dumpAgainstLong || (microReversal && momentumScore < 0)
+          // Mean-reversion logic: pump → hold (reduce bids), dump → hold (reduce asks)
+          // Position-aware: let mean-reversion naturally protect positions:
+          //   LONG + DUMP → asks reduced (hold longs, don't sell at bottom) + bids increased (buy dip)
+          //   SHORT + PUMP → bids reduced (hold shorts, don't buy at top) + asks increased (sell into strength)
+          // Micro-reversal: when momentum lags actual price reversal, allow closing side through
+          const skipBidReduce = microReversal && momentumScore > 0  // pump stalling → allow closing shorts
+          const skipAskReduce = microReversal && momentumScore < 0  // dump stalling → allow closing longs
 
           if (momentumScore >= momGuardConfig.strongThreshold) {
             if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.strongBidMult
@@ -8085,9 +8089,9 @@ class HyperliquidMMBot {
           }
 
           if (this.tickCount % 20 === 0 || Math.abs(momentumScore) >= momGuardConfig.moderateThreshold) {
-            const posFlag = pumpAgainstShort ? ' ⚠️SHORT+PUMP→bids_protected'
-              : dumpAgainstLong ? ' ⚠️LONG+DUMP→asks_protected'
-              : microReversal ? ' 🔄MICRO_REVERSAL→closing_protected'
+            const posFlag = pumpAgainstShort ? ' 💎SHORT+PUMP→holding(bids×reduced,asks×up)'
+              : dumpAgainstLong ? ' 💎LONG+DUMP→holding(asks×reduced,bids×up)'
+              : microReversal ? ' 🔄MICRO_REVERSAL→closing_allowed'
               : ''
             console.log(
               `📈 [MOMENTUM_GUARD] ${pair}: score=${momentumScore.toFixed(2)} ` +
