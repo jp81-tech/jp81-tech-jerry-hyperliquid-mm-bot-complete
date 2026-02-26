@@ -46,6 +46,31 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 26 lutego 2026
 
+### 52. kPEPE dodane do XGBoost collect, train i prediction service (26.02)
+
+**Problem:** XGBoost zbierał dane i trenował modele tylko dla 8 tokenów (BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN). kPEPE korzystał wyłącznie z HybridPredictor (rule-based) — bez ML modelu.
+
+**Rozwiązanie:** Dodano `kPEPE` do list tokenów w 4 plikach:
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_collect.py` | `TOKENS` += `"kPEPE"` — zbieranie 30-feature wektorów co 15 min |
+| `scripts/xgboost_train.py` | `TOKENS` += `"kPEPE"` — trenowanie h1/h4/h12/w1/m1 modeli |
+| `src/prediction/models/XGBoostPredictor.ts` | `tokens` += `'kPEPE'` — ładowanie wytrenowanych modeli |
+| `src/prediction/index.ts` | CLI tokens += `'kPEPE'` — test run output |
+
+**Deploy:** SCP collect + train → server. Collector uruchomiony: `[kPEPE] Appended row (price=$0.0039, 30 features, total=1 rows)`.
+
+**Timeline do treningu:**
+- h1 model: ~50 wierszy = ~12.5h (MIN_SAMPLES=50)
+- h4 model: ~50 wierszy z h4 labels = ~50h (labels po 4h)
+- h12 model: ~4 dni
+- w1/m1: tygodnie/miesiące
+
+**Uwaga:** kPEPE mixed case — collector i trainer używają `"kPEPE"` (nie uppercase), HL API wymaga dokładnie tej formy.
+
+**Commit:** `f797863`
+
 ### 51. Prediction Bias Integration — h4 predykcja wpływa na grid kPEPE (26.02)
 
 **Problem:** prediction-api (port 8090) i War Room (port 3000) działały jako osobne dashboardy — zero wpływu na trading bota. Oracle Vision w mm_hl.ts istniał ale był "logging only — no trading action". 100% decyzji bota opierało się na whale_tracker SM data, MarketVision, Toxicity Engine i Momentum Guard.
@@ -2263,7 +2288,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-8b2679a fix: Momentum Guard v3 — remove Position-Aware Guard, restore mean-reversion symmetry
+f797863 feat: add kPEPE to XGBoost collect, train, and prediction service
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2526,7 +2551,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
 - **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
-- **XGBoost data collection**: Co 15 min (cron), 30 features per sample. Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze.
+- **XGBoost data collection**: Co 15 min (cron), 30 features per sample. Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02).
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
