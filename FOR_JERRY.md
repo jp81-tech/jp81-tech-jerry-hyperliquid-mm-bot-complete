@@ -29,7 +29,8 @@
 21. [Czyszczenie danych — Fasanara, Dormant Decay, Manual Boost](#czyszczenie-danych--fasanara-dormant-decay-manual-boost)
 22. [Pump Shield — ochrona shortow przed pumpami](#pump-shield--ochrona-shortow-przed-pumpami)
 23. [Slowniczek](#slowniczek)
-23. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
+24. [Rozdzielenie bota — PURE_MM vs SM_FOLLOWER](#rozdzielenie-bota--pure_mm-vs-sm_follower-bot_mode)
+25. [Momentum Guard — nie kupuj szczytow, nie shortuj den](#momentum-guard--nie-kupuj-szczytow-nie-shortuj-den)
 
 ---
 
@@ -3333,3 +3334,369 @@ Tick 8: $0.0175 → full bids restored, short w zysku
 **6. Defensive error handling.** `try/catch` wokol cancel orderow na gieldzie — cancel moze failnac (order juz wypelniony, API timeout). To NIE jest powod zeby crashowac caly tick. Nastepny tick za 60 sekund sprobieje ponownie. **Fail gracefully, retry next tick.**
 
 **7. Weryfikacja przez porownanie.** Najlepszy sposob zeby sprawdzic czy shield dziala: odtworz scenariusze z przeszlosci (MON -$2,130, LIT -$570) i policz co by sie stalo z shieldem. Jesli odpowiedz to "zero straty" — dziala. Nie potrzebujesz 100 testow — potrzebujesz 2 realne przypadki ktore mowia "to by zadziałało".
+
+---
+
+## Regime Bypass — kiedy reguly sie gryzą (25.02.2026)
+
+### Problem: bot kPEPE traci na "churning"
+
+Wyobraz sobie ze masz kelnerowi dwa polecenia:
+1. "Nie podawaj zupy — jest za goraca" (block longs — RSI overbought)
+2. "Nie podawaj salatki — jest za zimna" (block shorts — bull trend)
+
+Kelner stoi z pustymi rekami i nie podaje nic. A klienci (rynek) czekaja.
+
+Dokladnie to sie dzialo z kPEPE. Bot w PURE_MM mode (market maker — zarabia na spreadzie, nie na kierunku) dostal od regime filtra dwa sprzeczne zakazy:
+- **Rule #1**: 4h bear + RSI 74 → "nie kupuj, overbought" → `allowLongs = false`
+- **Rule #3**: 15m bull → "nie shortuj, bull trend" → `allowShorts = false`
+- **Wynik**: oba kierunki zablokowane. Deadlock.
+
+Na szczescie byl SIGNAL_ENGINE_OVERRIDE ktory mowil "olej regime, wlacz oba kierunki". Wiec bot i tak tradowal. Ale logika byla absurdalna:
+
+```
+Regime: "NIE HANDLUJ!"
+Override: "HANDLUJ!"
+Regime: "NIE HANDLUJ!"
+Override: "HANDLUJ!"
+... co 60 sekund, w nieskonczonosc
+```
+
+### Dlaczego regime blokowal oba kierunki naraz?
+
+Bug byl w linii `isBullishTrend`:
+
+```typescript
+// PRZED (bug)
+const isBullishTrend = analysis.trend4h === 'bull'
+  || (analysis.trend15m === 'bull' && analysis.rsi15m < 80);
+```
+
+Dla kPEPE: 4h = **bear**, 15m = **bull**, RSI = 74
+
+Logika mowila: "15m jest bull i RSI < 80, wiec mamy bullish trend!" Ale to **absurd** — 4h anchor jest BEAR. 15m bull w 4h bear to **dead cat bounce** (krotki odbicie w dlugoterminowym spadku), nie prawdziwy bullish trend. Nie powinnismy blokowac shortow na podstawie 30-minutowego odbicia gdy caly dzien spada.
+
+To jak stwierdzenie "pogoda jest ladna" bo slonce wyszlo na 5 minut podczas huraganu.
+
+### Fix #1: isBullishTrend — respektuj 4h anchor
+
+```typescript
+// PO (fix)
+const isBullishTrend = analysis.trend4h === 'bull'
+  || (analysis.trend4h !== 'bear' && analysis.trend15m === 'bull' && analysis.rsi15m < 80);
+```
+
+Dodanie `analysis.trend4h !== 'bear'` oznacza:
+- 4h = bull → `isBullishTrend = true` (prawidlowo)
+- 4h = neutral + 15m = bull → `isBullishTrend = true` (OK, moze sie rozwija)
+- 4h = **bear** + 15m = bull → `isBullishTrend = false` (dead cat bounce, nie blokuj shortow!)
+
+Ten fix dotyczy WSZYSTKICH par, nie tylko kPEPE. Kazda para ktora miala 4h bear z 15m bounce dostawala falszywy "bull_trend_no_shorting_pump".
+
+### Fix #2: PURE_MM pomija regime calkowicie
+
+Market maker zarabia na **spreadzie** — roznica miedzy cena kupna i sprzedazy. Musi quotowac OBA kierunki. Regime mowi "nie kupuj" albo "nie shortuj" — to logika dla kierunkowych traderow (SM_FOLLOWER), nie dla MM.
+
+Analogia: regime to sygnalizacja swietlna na skrzyzowaniu. SM_FOLLOWER to samochod ktory jedzie prosto — musi respektowac swiatla. PURE_MM to policjant kierujacy ruchem — sygnalizacja go nie dotyczy, on sam jest regula.
+
+```typescript
+// Nowy kod (mm_hl.ts)
+const signalEngineResultRegime = getSignalEngineForPair(pair);
+const isPureMmRegimeBypass = signalEngineResultRegime?.signalEngineOverride
+  && signalEngineResultRegime?.mode === MmMode.PURE_MM;
+
+const permissions = isPureMmRegimeBypass
+  ? { allowLongs: true, allowShorts: true, reason: 'PURE_MM_REGIME_BYPASS' }
+  : this.marketVision!.getTradePermissions(pair);
+```
+
+Zamiast: "regime blokuje → override wymusza → regime znowu blokuje → override znowu wymusza"
+Teraz: "PURE_MM? Pominiesmy regime. Oba kierunki otwarte. Koniec."
+
+### Wazne: co to jest "regime"?
+
+Regime to system regul ktore analizuja stan rynku i decyduja czy bezpieczne jest otwieranie pozycji w danym kierunku. Ma 8 regul:
+
+| # | Regula | Co blokuje | Kiedy |
+|---|--------|-----------|-------|
+| 1 | Falling Knife | Longs | 4h bear (nie lap spadajacego noza) |
+| 2 | FOMO Protection | Longs | RSI > 75 (nie kupuj szczytu) |
+| 3 | Train Wreck | Shorts | Bull trend (nie stawaj przed pociagiem) |
+| 4 | Bottom Selling | Shorts | RSI < 30 (nie sprzedawaj dna) |
+| 5 | Global Risk Off | Longs | BTC crash + volatile |
+| 6 | Wall Protection | Longs/Shorts | Blisko support/resistance |
+| 7 | Price Action | Longs/Shorts | Pinbar rejection |
+| 8 | Flash Crash | Oba | Nagle zalamania |
+
+Kazda regula jest sensowna dla **kierunkowego** tradingu. Ale market maker to inna gra — on zarabia na spreadzie niezaleznie od kierunku. Dlatego PURE_MM pomija caly system.
+
+### Architektura po fixie
+
+```
+┌──────────────────────────────────────┐
+│  getTradePermissions()               │
+│  (8 regul regime)                    │
+│                                      │
+│  Dotyczy: SM_FOLLOWER, FOLLOW_SM_*   │
+│  Pomija:  PURE_MM                    │
+└──────────────────────────────────────┘
+           │                    │
+     SM_FOLLOWER           PURE_MM
+           │                    │
+           ▼                    ▼
+  ┌─────────────────┐   ┌────────────────────┐
+  │ REGIME filters   │   │ REGIME BYPASSED    │
+  │ allowLongs: T/F  │   │ allowLongs: true   │
+  │ allowShorts: T/F │   │ allowShorts: true  │
+  └─────────────────┘   └────────────────────┘
+           │                    │
+           ▼                    ▼
+  ┌─────────────────┐   ┌────────────────────┐
+  │ SignalEngine     │   │ Both sides quoting │
+  │ may override     │   │ Spread = profit    │
+  └─────────────────┘   └────────────────────┘
+```
+
+### Lekcje
+
+**1. Reguly zaprojektowane dla X nie dzialaja dla Y.** Regime zostal napisany dla SM_FOLLOWER (idz za wielorybami, shortuj gdy shortuja). Zostal zaaplikowany do PURE_MM (market making) bez modyfikacji. Rezultat: sprzeczne zakazy. **Zawsze pytaj: "czy ta regula ma sens w nowym kontekscie?"**
+
+**2. Sprzeczne reguly = deadlock.** Gdy system ma dwa niezalezne zbiory regul, moga one dac sprzeczne wyniki. "Nie kupuj" + "nie sprzedawaj" = nie rob nic. W tradingu "nie rob nic" to tez decyzja — i czesto zla. Dodanie `SIGNAL_ENGINE_OVERRIDE` zamaskowalo problem ale go nie naprawilo. **Fix root cause, nie symptomy.**
+
+**3. Hierarchia timeframow: 4h > 15m.** 4h to "anchor" — glowny trend. 15m to "taktyczny szum". Gdy 4h mowi bear a 15m mowi bull, 4h wygrywa. To jak prognoza pogody: jesli prognoza tygodniowa mowi "deszcz caly tydzien" ale przez 15 minut swieci slonce, nie pakujesz parasola do plecaka.
+
+**4. Override chain to code smell.** Jesli twoj kod ma pattern "X blokuje → Y override → Z blokuje → W override", to znaczy ze architektura jest zla. Kazdy override dodaje kompleksja i potencjal na bugi. Zamiast tego, **warstwy powinny wiedziec o sobie nawzajem** — regime powinien wiedziec ze jest w PURE_MM mode i od razu zwracac "oba dozwolone".
+
+**5. Logi powinny mowic prawde.** Stare logi: `REGIME: Longs:false Shorts:false` + `OVERRIDE: FORCE BOTH SIDES`. Nowe logi: `REGIME: PURE_MM_REGIME_BYPASS (Longs: true, Shorts: true)`. Stare logi sugerowaly problem ktory nie istnial (override dzialal). Nowe logi jasno mowia co sie dzieje. **Czyste logi = szybsza diagnostyka.**
+
+---
+
+## Adverse Selection — dlaczego ciasny spread zabija market makera (25.02.2026)
+
+### Problem: shorty zamykaja sie na minus mimo poprawnego regime
+
+Po naprawie regime (#43) bot handlowal poprawnie — oba kierunki otwarte, zero deadlockow. Ale trade history nadal pokazywal straty:
+
+```
+21:00:15  Open Short  @ 0.004366  (ask fill)
+21:00:17  Open Short  @ 0.004363  (ask fill)
+21:01:07  Open Short  @ 0.004367  (ask fill)
+  ... cena rosnie ...
+21:02:33  Close Short @ 0.004372  → -$0.36  (bid fill — WYZEJ niz otwarcie!)
+21:02:33  Close Short @ 0.004371  → -$0.34
+21:02:33  Close Short @ 0.004371  → -$0.17
+```
+
+Bot otwieral shorty (sprzedawal) po 0.004363-0.004367, cena poszla w gore, a potem bot KUPOWAL (zamykal shorty) po 0.004371-0.004372 — drozej niz sprzedal. Strata.
+
+### Co to jest "adverse selection"?
+
+Adverse selection to problem KAZDEGO market makera na swiecie. Zdarza sie gdy ktos kto wie wiecej niz ty handluje z toba.
+
+Wyobraz sobie ze sprzedajesz lody na ulicy za 5zl/sztuke i kupujesz za 4zl (1zl spread). Nagle przybiega ktos i kupuje WSZYSTKIE twoje lody. Zanim zdazysz zamowic nowe, okazuje sie ze hurtownia podniosla cene do 6zl. Teraz musisz kupic lody po 6zl zeby napelnic lodowke — a sprzedales po 5zl. Strata 1zl na sztuce.
+
+Ten "ktos" to informed trader — wiedzial ze cena wzrosnie i kupil od ciebie taniej. Ty, market maker, dales mu dobra cene bo nie wiedziales.
+
+### Jak to wygladalo w kPEPE?
+
+Bot mial **4-warstwowy grid** — 8 orderow kupna (bid) i 8 orderow sprzedazy (ask) rozlozonych wokol ceny srodkowej (mid):
+
+```
+PRZED FIX:
+         L4 SELL: +55bps (sweep)
+         L3 SELL: +28bps (buffer)
+         L2 SELL: +14bps (core)
+         L1 SELL: +5bps  (scalping)  ← TYLKO 0.05% od mid!
+  ──────── MID PRICE ────────
+         L1 BUY:  -5bps  (scalping)  ← TYLKO 0.05% od mid!
+         L2 BUY:  -14bps (core)
+         L3 BUY:  -28bps (buffer)
+         L4 BUY:  -55bps (sweep)
+```
+
+L1 na 5bps to jak sprzedawanie lodow za 5.025zl i kupowanie za 4.975zl — spread 0.05zl. Kazdy ruch ceny >0.05zl sprawia ze tracisz na round-tripie.
+
+### Dlaczego grid re-centering pogarszal sprawe
+
+Bot odswieza grid co **60 sekund** (1 tick mainLoop). Za kazdym razem przesuwa caly grid tak zeby byl wycentrowany wokol aktualnej ceny srodkowej.
+
+Problem: kPEPE rusza sie **20-30bps na minute**. Scenariusz:
+
+```
+Tick 1 (21:00):
+  mid = 0.004360
+  L1 ask = 0.004363  (+5bps)  ← bot sprzedaje tu (open short)
+  L1 bid = 0.004357  (-5bps)
+
+Tick 2 (21:01):
+  cena poszla w gore do 0.004375 (+15bps w 60s)
+  NOWY mid = 0.004375
+  NOWY L1 bid = 0.004372  (-5bps od NOWEGO mid)
+
+  → L1 bid 0.004372 > stary L1 ask 0.004363
+  → jesli ten bid sie filluje, zamyka shorta ze STRATA!
+```
+
+To jest "grid crossing" — nowe bidy sa wyzej niz stare aski. Bot sprzedal po 0.004363 i teraz kupuje po 0.004372. Round-trip: **-9 ticks = -$0.21**.
+
+### Fix: poszerz grid 3.6x
+
+```
+PO FIX:
+         L4 SELL: +65bps (sweep)
+         L3 SELL: +45bps (wide)
+         L2 SELL: +30bps (buffer)
+         L1 SELL: +18bps (core)   ← 3.6x szerzej!
+  ──────── MID PRICE ────────
+         L1 BUY:  -18bps (core)   ← 3.6x szerzej!
+         L2 BUY:  -30bps (buffer)
+         L3 BUY:  -45bps (wide)
+         L4 BUY:  -65bps (sweep)
+```
+
+Teraz L1 round-trip: **36bps** (18 + 18). Cena musi ruszyc sie >36bps w 60 sekund zeby grid crossing nastapil. Przy typowym ruchu 20-30bps/min, wiekszosc tickow bedzie bezpieczna.
+
+### Dlaczego nie powiekszylismy spreadu wczesniej?
+
+Bo **ciasny spread = wiecej fillow = wiecej volumenu**. Market makerzy chca jak najciasniejszy spread zeby przyciagac flow. Ale jest granica — jesli spread jest wezszy niz typowa zmiennosc, tracisz wiecej na adverse selection niz zarabiasz na spreadzie.
+
+To klasyczny trade-off market makingu:
+
+```
+CIASNY SPREAD (5bps)         SZEROKI SPREAD (18bps)
+├── Wiecej fillow             ├── Mniej fillow
+├── Mniejszy zysk/fill        ├── Wiekszy zysk/fill
+├── Duzo adverse selection    ├── Malo adverse selection
+└── STRATA netto              └── ZYSK netto (mniej, ale realny)
+```
+
+Sztuka polega na znalezieniu "sweet spot" — spreadu ktory jest dosc ciasny zeby przyciagac flow, ale dosc szeroki zeby przezyc zmiennosc. Dla kPEPE z 20-30bps/min volatility, 18bps to rozsadne minimum.
+
+### Dwie warstwy configu (wazne!)
+
+Znalezlismy ze kPEPE spread jest kontrolowany w **dwoch miejscach**:
+
+| Plik | Co kontroluje | Zmiana |
+|------|--------------|--------|
+| `mm_hl.ts` → `KPEPE_GRID_LAYERS` | Offsety per warstwa (L1-L4) | L1: 5→18bps |
+| `market_vision.ts` → `NANSEN_TOKENS` | Base spread dla standardowego grida | 14→25bps |
+
+Pierwszy jest **wazniejszy** — to rzeczywiste ceny orderow. Drugi jest uzywany jako fallback i w logach. Przy pierwszym deployu zmienilismy tylko NANSEN_TOKENS (14→25bps) ale ordery nadal lezaly na 5bps bo custom grid uzywa KPEPE_GRID_LAYERS.
+
+**Lekcja: zawsze sprawdz ktory config jest faktycznie uzywany.** Zmiana configu ktory nie jest czytany to "fix" ktory nic nie zmienia. Logi (`SPREAD: 25bps`) sugerowaly ze zmiana zadziala, ale ordery (`DEBUG submit: price=...`) mowily prawde.
+
+### Trade-offy szersszego spreadu
+
+| Aspekt | Skutek |
+|--------|--------|
+| **Mniej fillow** | Mniej transakcji/godzine (ordery dalej od mid) |
+| **Wiekszy zysk/fill** | Kazdy round-trip daje ~36bps vs ~10bps |
+| **Mniejszy PnL w spokojnym rynku** | W sideways market, ciasny spread daje wiecej drobnych zyskow |
+| **Mniejsze straty w volatilnym rynku** | Grid crossing prawie niemozliwy |
+| **Netto** | Powinien byc lepszy — kPEPE jest zbyt volatilny na 5bps |
+
+### Lekcje
+
+**1. Spread musi byc szerzszy niz typowa zmiennosc za 1 tick.** Jesli twoj mainLoop trwa 60s a cena rusza sie 20-30bps/min, to L1 na 5bps to samobojstwo. Regula kciuka: L1 >= zmiennosc/tick * 0.7. Dla kPEPE: 25bps * 0.7 = 17.5bps ≈ 18bps.
+
+**2. Logi moga klamac.** `SPREAD: 14bps` w logach brzmial prawidlowo. Ale to byl config z NANSEN_TOKENS — a kPEPE uzywal KPEPE_GRID_LAYERS z L1=5bps. Zawsze weryfikuj logi z rzeczywistoscia: sprawdz `DEBUG submit: price=...` i policz odleglosc od mid.
+
+**3. Adverse selection to enemy #1 market makera.** Nie ryzyko kierunkowe, nie fees, nie volatility — to informed traders ktory wiedza wiecej. Jedyna obrona: szerzszy spread + szybsze re-quoting. My nie mozemy requotowac szybciej (60s tick), wiec musimy miec szerzszy spread.
+
+**4. Config-driven gridy musza byc testowane empirycznie.** Nie mozesz ustawic spreadu "na oko". Musisz: (a) zmierzyc zmiennosc tokena, (b) porownac z tick interval, (c) ustawic spread >= zmiennosc/tick, (d) monitorowac PnL per fill. Jesli PnL/fill < 0, spread jest za ciasny.
+
+**5. Dwa configi dla jednej rzeczy = bug czekajacy na okazje.** NANSEN_TOKENS mowil 14bps, KPEPE_GRID_LAYERS mowil 5bps. Ktory wygrywal? Ten ktory byl czytany przez `generateGridOrdersCustom`. Drugi byl martwy config — zmiana go nic nie dawala. **Jedno zrodlo prawdy (single source of truth) > dwa configi ktore sie nie zgadzaja.**
+
+---
+
+## Momentum Guard — nie kupuj szczytow, nie shortuj den
+
+### Problem: symetryczny grid w asymetrycznym swiecie
+
+Wyobraz sobie, ze jestes sprzedawca hot-dogow na stadionie. Masz dwa okienka — jedno sprzedaje (ask), drugie skupuje (bid). Normalnie oba otwarte na pelna pare. Ale co jesli widzisz, ze tlum biegnie do wyjscia (panika, dump)? Kazdy rozsadny sprzedawca zamknalby okienko skupu — nie chcesz kupowac hot-dogow od panikujacych ludzi po zawyzonej cenie. A okienko sprzedazy? Zostawiasz otwarte — bo ci co zostali, zaplaca wiecej.
+
+To dokladnie to co robi Momentum Guard. Zamiast twardo zamykac okienko (jak HARD_BLOCK), **plynnie reguluje jego szerokosc** w zaleznosci od kierunku i sily ruchu cenowego.
+
+### Jak to dziala — 3 sygnaly
+
+Momentum Guard oblicza score od -1.0 do +1.0 z trzech zrodel:
+
+```
+momentumScore = momentum_1h × 0.50 + RSI × 0.30 + proximity_S/R × 0.20
+```
+
+**Sygnal 1: Momentum 1h (50% wagi)** — "Jak szybko jedzie pociag?"
+Zmiana ceny w ostatniej godzinie, znormalizowana do [-1, +1]. Jesli kPEPE uroslo o 3% w godzine → score=+1.0 (max pump). Jesli spadlo o 2.1% → score=-1.0 (max dump, bo dumpy maja nizszy prog — krypto spada szybciej niz rosnie).
+
+**Sygnal 2: RSI (30% wagi)** — "Czy silnik sie przegrzal?"
+RSI powyzej 65 = overbought (pozytywny sygnal). RSI ponizej 35 = oversold (negatywny). RSI jest jak termometr — nawet jesli momentum nadal rośnie, RSI moze powiedziec "uwaga, za goraco".
+
+**Sygnal 3: Proximity do S/R (20% wagi)** — "Jak blisko sciany?"
+Odleglosc ceny od 4h resistance (opor) i support (wsparcie). Blisko oporu = pozytywny (nie kupuj pod sufitem). Blisko wsparcia = negatywny (nie shortuj nad podloga). Uzywa ATR-based zones — procentowa odleglosc nie jest statyczna, adaptuje sie do zmiennosci.
+
+### Ewolucja: v1 → v2 (7 fixow w jednej sesji)
+
+v1 dzialala, ale miala corner cases ktore mogly kosztowac pieniadze. Oto co naprawilismy i dlaczego:
+
+**1. Wick Trap (S/R z body zamiast wicks)**
+
+S/R bylo obliczane z `Math.max(H)` / `Math.min(L)` — czyli z wickow. Problem: flash crash o 3 AM spuszczal wick na $0.003, a normalne dno body bylo $0.0038. Bot myslal ze support jest na $0.003 — 20% nizej niz prawdziwe dno. Proximity nigdy nie triggerowala bo "daleko od supportu". Fix: uzywamy `Math.max(O,C)` / `Math.min(O,C)` — ciala swiec, bez szumu z wickow.
+
+**Lekcja: Wicki to szum. Ciala swiec to prawda. Kazdy trader wie, ze close > wick, ale zaprogramowanie tego nie jest oczywiste.**
+
+**2. Breakout Math (ujemna odleglosc = max sygnal)**
+
+Gdy cena przebila opor, `(resistance - price) / price` dawalo liczbe ujemna (np. -0.02). Stary kod mial `if distance < 0.01 → strong signal`. -0.02 < 0.01? TAK! Wiec *przypadkowo* dzialalo poprawnie. Ale "dziala przez przypadek" to nie jest inzynieria — to bomba zegarowa. Fix: explicit `if distance <= 0 → signal = 1.0` (max, bo jestesmy POWYZEJ oporu).
+
+**Lekcja: Kod ktory "dziala" ale nie z wlasciwego powodu to bug czekajacy na okazje. Explicit > implicit, zawsze.**
+
+**3. ATR-based thresholds (dynamiczne progi)**
+
+Static 1%/2% nie dzialaly. Dla kPEPE (30bps/min volatility) 1% to bylo za daleko — proximity nigdy nie triggerowala. Dla BTC 1% to za blisko — triggerowala non-stop. Fix: progi oparte na ATR (Average True Range). Wysoka zmiennosc = szersza zona. Niska zmiennosc = ciasna.
+
+**Lekcja: Statyczne progi w dynamicznym swiecie to antywzorzec. Uzyj ATR, std dev, albo percentyli — cokolwiek co samo sie skaluje.**
+
+**4. Position-aware guard (nie blokuj Take Profitu!)**
+
+To byl najwazniejszy fix. Scenariusz: bot ma SHORT -20% skew. Cena pompuje. Momentum Guard mowi "redukuj bidy!" (nie kupuj szczytu). Ale te bidy **zamykaja shorta** — to jest TP, nie otwarcie nowego longa! Blokowanie ich = trzymanie przegrywajacej pozycji.
+
+Fix: jesli `actualSkew < -0.10` (mamy SHORT) i `momentumScore > 0` (pump), bidy sa **chronione** — nie redukowane. Mirror: LONG + dump → aski chronione.
+
+```
+Pump + brak pozycji  → redukuj bidy (nie kupuj szczytu)     ✅
+Pump + SHORT pozycja → CHROŃ bidy (to twój Take Profit!)    ✅
+Dump + brak pozycji  → redukuj aski (nie shortuj dna)       ✅
+Dump + LONG pozycja  → CHROŃ aski (to twój Take Profit!)    ✅
+```
+
+**Lekcja: Identyczne zlecenie (bid) moze miec kompletnie rozne intencje w zaleznosci od stanu portfela. Kazdy filtr ktory modyfikuje zlecenia MUSI byc swiadomy aktualnej pozycji.**
+
+**5. ATR-based pumpThreshold (adaptacyjny prog momentum)**
+
+Static 3% jako "max pump" nie sprawdzalo sie. W nocy kPEPE nie ruszalo sie o 3% (threshold nieosiagalny, guard martwy). W dzien potrafiło ruszyc o 5% w godzine (3% za wolno). Fix: `pumpThreshold = 1.5 × ATR%` (kPEPE: 2.0 × ATR%). Automatyczna adaptacja do rezimu zmiennosci.
+
+**6. Dump asymmetry (krypto spada szybciej)**
+
+Rynki krypto maja charakterystyke "schody w gore, winda w dol". Pump o 3% trwa godziny, dump o 3% trwa minuty. Identyczny prog dla obu = za wolna reakcja na dump. Fix: `dumpSensitivityMult = 0.7` — dump threshold = 70% pump threshold. Jesli pump threshold to 2.5%, dump threshold to 1.75%.
+
+**Lekcja: Symetria w kodzie nie znaczy symetria na rynku. Flash crashe i flash pumpy sa fundamentalnie rozne — panic selling jest szybszy niz FOMO buying.**
+
+**7. Micro-reversal detection (obejscie lagu 1h)**
+
+Problem: 1h momentum laguje. Cena uderza w opor, odbija o 2%, ale 1h momentum nadal mowi "+3%" bo patrzyl na caly ostatnia godzine. Fix: uzywamy `pumpShieldHistory` (ostatnie 10 tickow, ~15 min) do detekcji mikro-odwrocen. Jesli 1h mowi "pump" ale cena spadla >0.3% od recent peak → micro-reversal detected → odblokuj closing orders.
+
+**Lekcja: Kazdy wskaznik laguje. Im dluzszy timeframe, tym wiekszy lag. Rozwiazanie: nie polegaj na jednym timeframe. Uzywaj krotszych danych do override dluzszych gdy sytuacja sie zmienia.**
+
+### Dlaczego to "instytucjonalne"
+
+Wiekszosci botow gridowych uzywa statycznych reguł: "spread 20bps, ordery po $100, obie strony". Momentum Guard to system adaptacyjny — reaguje na:
+
+- **Trend** (1h momentum)
+- **Extremes** (RSI overbought/oversold)
+- **Strukture** (bliskosc do S/R z body-based, nie wick)
+- **Zmiennosc** (ATR-based progi)
+- **Pozycje** (chroni TP zamiast je blokowac)
+- **Mikrostrukture** (micro-reversal z 15-min tick buffer)
+- **Asymetrie rynku** (dump = szybszy prog)
+
+To 7 wymiarow adaptacji zamiast 0. Roznica miedzy botem ktory przezywa memecoin volatility a botem ktory oddaje pieniadze rynkowi.

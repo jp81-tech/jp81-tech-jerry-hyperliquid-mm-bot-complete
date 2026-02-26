@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-25
+- Data: 2026-02-26
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -28,7 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
-- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield)
+- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
@@ -44,7 +44,211 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
+## Zmiany 26 lutego 2026
+
+### 45. Momentum Guard v1 — asymetryczny grid na podstawie trendu (26.02)
+
+**Problem:** kPEPE (PURE_MM) kupował na szczytach i shortował na dołkach. Grid symetryczny nie reagował na momentum — takie same bidy i aski niezależnie od trendu.
+
+**Rozwiązanie:** Momentum Guard — 3-sygnałowy scoring system z asymetrycznymi multiplierami grida.
+
+**Plik config:** `src/config/short_only_config.ts` — `MomentumGuardConfig` interface + defaults + kPEPE override
+**Plik logika:** `src/mm_hl.ts` — ~60 linii w kPEPE grid pipeline (po Toxicity Engine, przed `generateGridOrdersCustom`)
+
+**3 sygnały (ważone):**
+
+| Sygnał | Waga | Źródło | Co mierzy |
+|--------|------|--------|-----------|
+| 1h Momentum | 50% | `change1h` z data fetcher | Kierunek i siła ruchu cenowego |
+| RSI | 30% | `mvAnalysis.rsi` z MarketVision | Overbought/oversold extremes |
+| Proximity S/R | 20% | `resistance4h`/`support4h` z MarketVision | Odległość od HTF support/resistance |
+
+**Score → Multiplier mapping:**
+
+| Score | Level | Bid mult | Ask mult |
+|-------|-------|----------|----------|
+| >= 0.7 | STRONG pump | ×0.10 | ×1.30 |
+| >= 0.4 | MODERATE pump | ×0.40 | ×1.15 |
+| >= 0.2 | LIGHT pump | ×0.70 | ×1.05 |
+| -0.2 to 0.2 | NEUTRAL | ×1.00 | ×1.00 |
+| <= -0.2 | LIGHT dump | ×1.05 | ×0.70 |
+| <= -0.4 | MODERATE dump | ×1.15 | ×0.40 |
+| <= -0.7 | STRONG dump | ×1.30 | ×0.10 |
+
+**Pipeline position:** Po Toxicity Engine (kpepe_toxicity.ts), przed `generateGridOrdersCustom()`. Multiplicative z toxicity multipliers.
+
+**Logi:** `📈 [MOMENTUM_GUARD] kPEPE: score=X.XX (mom=X.XX rsi=X.XX prox=X.XX) → bid×X.XX ask×X.XX | 1h=X.X% RSI=XX` — co 20 ticków lub gdy |score| >= moderate.
+
+**Deploy:** SCP → server, `pm2 restart mm-pure`. Confirmed: `score=0.00` (market flat po deploy).
+
+**Commit:** `4da7540`
+
+### 46. Momentum Guard v2 — 7 fixów: position-aware, ATR-adaptive (26.02)
+
+**Feedback review:** Zidentyfikowano 3+3 corner cases w v1: Wick Trap, Breakout Math, Hard Thresholds, TP Exemption, 1h Lag, Dump Asymmetry.
+
+**7 fixów:**
+
+**A) Wick Trap (market_vision.ts):**
+- Dodano `resistanceBody4h` / `supportBody4h` do `PairAnalysis`
+- Obliczane z `Math.max(O,C)` / `Math.min(O,C)` zamiast wicks (H/L)
+- Flash crash spiki nie rozciągają kanału S/R
+- Stare wick-based pola zachowane dla innych consumers
+
+**B) Breakout Math (mm_hl.ts):**
+- Przed: `mgResistDist < 0.01` przypadkowo łapało ujemne wartości (cena > opór)
+- Po: explicit `mgResistDist <= 0 → proxSignal = +1.0` (max overbought)
+- Mirror: `mgSupportDist <= 0 → proxSignal = -1.0` (max oversold)
+
+**C) ATR-based proximity zones (mm_hl.ts):**
+- Przed: static 1%/2% thresholds — za ciasne dla kPEPE, za szerokie dla BTC
+- Po: `mgStrongZone = ATR/midPrice`, `mgModerateZone = 2×ATR/midPrice`
+- Automatyczna adaptacja do volatility regime. Fallback 1%/2% gdy ATR=0.
+
+**D) ATR-based pumpThreshold (short_only_config.ts + mm_hl.ts):**
+- `useAtrThreshold: true` — derywuje threshold z `1.5×ATR%` zamiast static 3%
+- kPEPE override: `atrThresholdMult: 2.0` (memecoin = wider)
+- Fallback na `pumpThresholdPct` gdy ATR niedostępny
+
+**E) Dump asymmetry (short_only_config.ts + mm_hl.ts):**
+- `dumpSensitivityMult: 0.7` — dump threshold = pumpThreshold × 0.7
+- Krypto spada szybciej niż rośnie → reaguj 30% szybciej na dumpy
+- Przykład: pump threshold 2.5% → dump threshold 1.75%
+
+**F) Position-aware guard (mm_hl.ts):**
+- SHORT pozycja (actualSkew < -0.10) + pump → bidy CHRONIONE (zamykają shorta!)
+- LONG pozycja (actualSkew > 0.10) + dump → aski CHRONIONE (zamykają longa!)
+- `pumpAgainstShort` / `dumpAgainstLong` flags w kodzie
+- Log: `⚠️SHORT+PUMP→bids_protected` / `⚠️LONG+DUMP→asks_protected`
+
+**G) Micro-reversal detection (mm_hl.ts):**
+- Wykorzystuje `pumpShieldHistory` (ostatnie 10 ticków = ~15 min)
+- Jeśli 1h momentum laguje (mówi "pump") ale cena spadła >0.3% od recent peak → micro-reversal
+- Odblokowuje closing orders mimo lagging momentum
+- Log: `🔄MICRO_REVERSAL→closing_protected`
+
+**Nowe pola w MomentumGuardConfig:**
+```typescript
+useAtrThreshold: boolean        // default true
+atrThresholdMult: number        // default 1.5 (kPEPE: 2.0)
+dumpSensitivityMult: number     // default 0.7
+```
+
+**Nowe pola w PairAnalysis:**
+```typescript
+supportBody4h: number           // Body-based HTF support
+resistanceBody4h: number        // Body-based HTF resistance
+```
+
+**Pliki:** `src/mm_hl.ts` (+75/-14), `src/signals/market_vision.ts` (+9), `src/config/short_only_config.ts` (+10/-3)
+
+**Deploy:** SCP 3 pliki → server, `pm2 restart mm-pure --update-env`. Confirmed: `score=-0.08 prox=-0.40 skew=-3%`
+
+**Commit:** `dc578dc`
+
+---
+
 ## Zmiany 25 lutego 2026
+
+### 43. Regime Bypass dla PURE_MM + isBullishTrend fix (25.02)
+
+**Problem:** kPEPE (PURE_MM) miał "death by 1000 cuts" — 48 transakcji w 23 minut, otwieranie i zamykanie shortów ze stratą. Logi pokazywały:
+```
+🛡️ [REGIME] kPEPE: bear_4h_bull_15m_but_rsi_overbought|rsi_overbought_no_top_buying|bull_trend_no_shorting_pump|near_htf_resistance_wait_for_breakout (Longs: false, Shorts: false)
+🧠 [SIGNAL_ENGINE_OVERRIDE] kPEPE: PURE_MM mode → FORCE BOTH SIDES
+```
+
+Regime blokował **OBA kierunki** jednocześnie (absurd), potem SIGNAL_ENGINE_OVERRIDE wymuszał oba z powrotem. Zbędny chain, mylące logi.
+
+**Root cause — 2 bugi:**
+
+**A) Regime nie powinien dotyczyć PURE_MM:**
+Regime jest zaprojektowany dla SM_FOLLOWER (ochrona kierunkowa). Market Maker musi quotować OBA kierunki — spread to jego zarobek. Regime blocking na PURE_MM to jak zakazanie kelnerowi podawania jedzenia.
+
+**Fix w `mm_hl.ts` (L7495-7502):**
+```typescript
+const signalEngineResultRegime = getSignalEngineForPair(pair);
+const isPureMmRegimeBypass = signalEngineResultRegime?.signalEngineOverride
+  && signalEngineResultRegime?.mode === MmMode.PURE_MM;
+const permissions = isPureMmRegimeBypass
+  ? { allowLongs: true, allowShorts: true, reason: 'PURE_MM_REGIME_BYPASS' }
+  : this.marketVision!.getTradePermissions(pair);
+```
+
+**B) `isBullishTrend` dawał sprzeczny wynik:**
+```typescript
+// PRZED (bug): 15m bull w 4h bear = isBullishTrend=true → blokuje shorty
+const isBullishTrend = analysis.trend4h === 'bull'
+  || (analysis.trend15m === 'bull' && analysis.rsi15m < 80);
+
+// PO (fix): 15m bull w 4h bear = dead cat bounce, nie bullish trend
+const isBullishTrend = analysis.trend4h === 'bull'
+  || (analysis.trend4h !== 'bear' && analysis.trend15m === 'bull' && analysis.rsi15m < 80);
+```
+
+Contradictory flow (przed fix):
+- Rule #1: 4h bear + RSI≥70 → block longs
+- Rule #3: 15m bull + RSI<80 → `isBullishTrend=true` → block shorts
+- Wynik: **oba zablokowane** — deadlock
+
+Po fix: 15m bull w 4h bear NIE ustawia `isBullishTrend` → shorty nie blokowane → brak deadlocku.
+
+**Log po fix:**
+```
+🛡️ [REGIME] kPEPE: PURE_MM_REGIME_BYPASS (Longs: true, Shorts: true)
+```
+
+**Pliki:** `src/mm_hl.ts`, `src/signals/market_vision.ts`
+
+**Deploy:** SCP → server, `pm2 restart mm-pure mm-follower --update-env`, verified in logs.
+
+**Commit:** `9f4ec2b`
+
+### 44. kPEPE Grid Widen — fix adverse selection losses (25.02)
+
+**Problem:** Po fixie regime (#43) bot handlował poprawnie na obu stronach, ale nadal tracił na round-tripach. Analiza trade history:
+- Bot otwierał shorty (ask fill) @ 0.004363-0.004367
+- Cena rosła +12bps w ciągu 60s
+- Grid re-centerował się wyżej → nowe bidy @ 0.004369-0.004372
+- Bidy fillowały się → zamknięcie shortów DROŻEJ niż otwarcie → strata -$0.17 do -$0.36 per $100
+
+**Root cause:** L1 layer miał offsetBps=5 (0.05% od mid) — absurdalnie ciasno dla kPEPE z volatility 20-30bps/min. Ruch >10bps w 60s (co się działo regularnie) powodował "grid crossing" — nowe bidy wyżej niż stare aski = gwarantowana strata.
+
+**Diagram problemu:**
+```
+Tick 1: mid=0.004360 | L1 ask=0.004363 (open short) | L1 bid=0.004357
+Tick 2: mid=0.004375 | L1 ask=0.004378              | L1 bid=0.004372
+→ Bid 0.004372 > old ask 0.004363 → zamknięcie shorta ze stratą!
+```
+
+**Fix — KPEPE_GRID_LAYERS (`mm_hl.ts`):**
+
+| Layer | PRZED (bps) | PO (bps) | Zmiana |
+|-------|------------|----------|--------|
+| L1 | 5 (Scalping) | **18** (Core) | 3.6× szerzej |
+| L2 | 14 (Core) | **30** (Buffer) | 2.1× szerzej |
+| L3 | 28 (Buffer) | **45** (Wide) | 1.6× szerzej |
+| L4 | 55 (Sweep) | **65** (Sweep) | 1.2× szerzej |
+
+**Fix — NANSEN_TOKENS kPEPE tuning (`market_vision.ts`):**
+- `baseSpreadBps`: 14 → **25** (0.14% → 0.25%)
+- `minSpreadBps`: 5 → **12** (0.05% → 0.12%)
+
+**Matematyka:**
+- Stary L1 round-trip: 10bps (5+5). Ruch >10bps = strata. kPEPE ruszał się 20-30bps/min → strata co minutę.
+- Nowy L1 round-trip: 36bps (18+18). Ruch musi przekroczyć 36bps żeby stracić → znacznie rzadsze.
+
+**Weryfikacja po deploy (z logów):**
+```
+PRZED: L1 bid=5bps  ask=5bps  | sellPx=0.0043312 (5.3bps od mid)
+PO:    L1 bid=18bps ask=18bps | sellPx=0.0043460 (18.4bps od mid)
+```
+
+**Pliki:** `src/mm_hl.ts` (KPEPE_GRID_LAYERS), `src/signals/market_vision.ts` (NANSEN_TOKENS kPEPE)
+
+**Deploy:** SCP → server, `pm2 restart mm-pure --update-env`
+
+**Commit:** `aa91889`
 
 ### 42. Pump Shield — ochrona shortów przed pumpami (25.02)
 
@@ -1795,10 +1999,10 @@ ETH LONG ($717M) został przymusowo zamknięty przez giełdę — margin nie wys
 origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 
 # Branch
-fix/update-nansen-debug
+feat/next
 
 # Ostatni commit
-43ed7c4 refactor: unify trader names across codebase from vip_config aliases
+dc578dc feat: Momentum Guard v2 — 7 fixes for position-aware, ATR-adaptive grid protection
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -1900,6 +2104,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 ---
 
 ## Do zrobienia
+- [ ] Monitorować Momentum Guard v2 — logi `📈 [MOMENTUM_GUARD]`, czekać na większy ruch kPEPE żeby zobaczyć score != 0
+- [ ] Sprawdzić position-aware guard w akcji — flaga `⚠️SHORT+PUMP→bids_protected` gdy bot ma SHORT i cena pompuje
+- [ ] Sprawdzić micro-reversal detection — flaga `🔄MICRO_REVERSAL→closing_protected` gdy 1h laguje ale cena odbiła
+- [ ] Sprawdzić ATR-based thresholds — czy pump/dump threshold adaptuje się do zmienności (powinien być różny w nocy vs dzień)
 - [ ] Monitorować Pump Shield — logi `🛡️ [PUMP_SHIELD]`, sprawdzić czy triggeruje przy price spikach na kPEPE i SM-following pairs
 - [ ] Sprawdzić Pump Shield na kPEPE — progi 2/4/6%, czy nie blokuje normalnych ruchów cenowych
 - [ ] Sprawdzić scale-in na SM pairs — czy ask×1.30 działa poprawnie podczas pumpa (nie dotyczy kPEPE)
@@ -2034,3 +2242,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **SM Live Activity (24.02)**: 58bro.eth reduced ~49 BTC ($3.1M) @ $63K (take profit, still 212 BTC SHORT). OG Shorter reduced 20 BTC ($1.3M) @ $66,130. Selini Capital fresh entry $4.7M. ETH: 58bro $9.3M SHORT, Galaxy $6.2M (+$8.8M uPnL). Fasanara $45M ETH SHORT (MM, ignored). Abraxas +$14.1M realized ETH PnL 7d.
 - **Pump Shield (25.02)**: Ochrona shortów przed pumpami. 3 levele: light (bid×0.50), moderate (bid×0.10), aggressive (bid×0.00 + cancel exchange bids). Per-token progi: BTC 0.5/1/2%, kPEPE 2/4/6%, LIT/FARTCOIN 1.5/3/5%. Scale-in asks×1.30 podczas pumpa (wyłączone dla kPEPE). SM integration: aktywny gdy SM SHORT + confidence>=40%. Cooldown 3 ticki. Config w `short_only_config.ts`. Pipeline: przed BounceFilter + po PROFIT_FLOOR. Logi: `🛡️ [PUMP_SHIELD]`.
 - **PM2 naming (25.02)**: Bot działa jako `mm-follower` (id 45) i `mm-pure` (id 48), NIE `mm-bot`. Restart: `pm2 restart mm-follower mm-pure`.
+- **PURE_MM Regime Bypass (25.02)**: PURE_MM pary (kPEPE) pomijają regime gating całkowicie. Regime jest dla SM_FOLLOWER (kierunkowa ochrona), nie dla market makera. MM musi quotować OBA kierunki. Log: `PURE_MM_REGIME_BYPASS (Longs: true, Shorts: true)`.
+- **isBullishTrend fix (25.02)**: 15m bull w 4h bear to dead cat bounce, nie bullish trend. Przed fixem `isBullishTrend=true` blokował shorty nawet w 4h bear → deadlock (oba kierunki zablokowane). Teraz: `trend4h !== 'bear'` jest wymagane żeby 15m bull ustawił `isBullishTrend=true`. Fix dotyczy WSZYSTKICH par, nie tylko kPEPE.
+- **kPEPE Grid Widen (25.02)**: L1 5→18bps, L2 14→30bps, L3 28→45bps, L4 55→65bps. Stary L1 (5bps) powodował adverse selection — grid re-centering co 60s tworzył nowe bidy powyżej starych asków → gwarantowana strata. Nowy L1 (18bps) daje 36bps round-trip buffer. baseSpreadBps 14→25, minSpreadBps 5→12. KPEPE_GRID_LAYERS w mm_hl.ts, NANSEN_TOKENS w market_vision.ts.
+- **Momentum Guard (26.02)**: Asymetryczny grid dla kPEPE PURE_MM. 3 sygnały: 1h momentum (50%), RSI (30%), proximity S/R (20%). Score -1.0 do +1.0. Pozytywny (pump) → redukuj bidy, zwiększ aski. Negatywny (dump) → mirror. 3 levele: strong (0.7), moderate (0.4), light (0.2). Config w `short_only_config.ts`, logika w kPEPE sekcji `mm_hl.ts`. Logi: `📈 [MOMENTUM_GUARD]` co 20 ticków lub przy |score| >= 0.4.
+- **Momentum Guard v2 (26.02)**: 7 fixów: (1) Body-based S/R (`resistanceBody4h`/`supportBody4h`) filtruje wick noise, (2) Explicit breakout: price>resistance=+1.0, price<support=-1.0, (3) ATR-based proximity zones zamiast static 1%/2%, (4) ATR-based pumpThreshold (`useAtrThreshold=true`, `atrThresholdMult=1.5`, kPEPE=2.0), (5) Dump asymmetry (`dumpSensitivityMult=0.7` = 30% szybsza reakcja na dumpy), (6) Position-aware guard: nie blokuj bidów gdy SHORT+PUMP (bidy zamykają pozycję!), mirror dla LONG+DUMP, (7) Micro-reversal: 0.3% drop od peak w pumpShieldHistory → odblokuj closing mimo lagging 1h. Flagi: `⚠️SHORT+PUMP→bids_protected`, `⚠️LONG+DUMP→asks_protected`, `🔄MICRO_REVERSAL→closing_protected`.
+- **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
