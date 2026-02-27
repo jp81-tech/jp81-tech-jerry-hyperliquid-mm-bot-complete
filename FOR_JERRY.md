@@ -4591,3 +4591,61 @@ Jak dataset urosnie do 500+, XGBoost confidence wzrosnie i blend automatycznie d
 **4. Bot widzi support — ale po swojemu**
 
 Momentum Guard `prox=-1.00` + `RSI=22` = "jestem na dnie". Ale overall score to "tylko" -0.27 (LIGHT) bo 1h momentum = 0.0% (cena jest flat na support, nie w aktywnym spadku). System mowi: "wiem ze to support, ale nic sie nie dzieje — bede ostrozny, nie agresywny". I to jest madrze — agresywne kupowanie na support ktory moze przebic to przepis na strate.
+
+---
+
+## Rozdzial 12: Zabijanie martwego sygnalu — kPEPE Weight Redistribution
+
+### Problem: 30% wagi = zero
+
+HybridPredictor ma 5 sygnalow: technical, momentum, smartMoney, volume, trend. Dla wiekszosci tokenow (BTC, ETH, SOL) smartMoney to nasz edge — whale_tracker daje nam dane o pozycjach 40+ wielorybow, a SM signal ma 10-65% wagi w zaleznosci od horyzontu.
+
+Ale kPEPE? Zero. Nul. Nic.
+
+whale_tracker nie ma kPEPE w `WATCHED_COINS`. Na spot PEPE (Ethereum) przez Nansen MCP sprawdzilismy: 3 SM holders z drobnymi pozycjami, **zero inflows, zero outflows przez 7 dni**. Na Hyperliquid perps przeskanowalismy wszystkie 64 adresy wielorybow — 6 ma kPEPE, ale 94% to Silk Capital ($250K SHORT). Jeden trader to nie "smart money consensus" — to hazard jednego funduszu.
+
+Wynik? `smartMoney: 0.00` w kazdy prediction call. Na krotkich horyzontach (h1) to 10% martwej wagi — nie tak zle. Ale na h4 to 30%, na h12 to 40%, na m1 to **65%**. Dwie trzecie predykcji miesiecznej opieralo sie na sygnale ktory zawsze zwracal zero.
+
+To jak gdyby 65% twojego nawigacji GPS skladalo sie z danych radarowych z lotniskowca... ktory nie istnieje.
+
+### Rozwiazanie: TOKEN_WEIGHT_OVERRIDES
+
+Zamiast patrzec na martwy sygnal, redystrybuujemy jego wage do sygnalow ktore naprawde dzialaja. Nowy mechanizm:
+
+```typescript
+const TOKEN_WEIGHT_OVERRIDES = {
+  kPEPE: {
+    h1:  { technical: 0.40, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.15 },
+    h4:  { technical: 0.35, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.20 },
+    // ... h12, w1, m1 — SM=0%, reszta rosnie
+  },
+};
+```
+
+W `calculatePredictions()` lookup jest prosty:
+```typescript
+const weightsMap = (token && TOKEN_WEIGHT_OVERRIDES[token]) || HORIZON_WEIGHTS;
+```
+
+Jesli token ma override → uzyj go. Jesli nie → domyslne wagi (SM 10-65%). Zero zmian dla BTC/ETH/SOL — ich SM dane sa zdrowe.
+
+### Co sie zmienilo w praktyce
+
+Przed: kPEPE h4 prediction = `technical * 0.25 + momentum * 0.20 + 0 * 0.30 + volume * 0.10 + momentum * 0.15`
+Po: kPEPE h4 prediction = `technical * 0.35 + momentum * 0.30 + 0 * 0.00 + volume * 0.15 + momentum * 0.20`
+
+Technical i momentum dostaly wiecej glosu. Na dlugich horyzontach (w1, m1) trend dominuje — co ma sens, bo kPEPE jest memecoin ktory podaza za ogolnym sentymentem rynku bardziej niz za fundamentami.
+
+### Lekcja: audytuj swoje wagi
+
+Kiedy budujesz model predykcyjny, latwo jest ustawic wagi raz i zapomniec. "SM ma 40% bo to nasz edge!" — tak, ale czy SM NAPRAWDE daje dane dla KAZDEGO tokena? Regularny audyt wag vs faktyczny sygnal to must-have.
+
+**Zasada: Dead input > zero wagi > szum.** Martwy input ktory zawsze zwraca 0 to nie jest "neutralny" — to rozcienczanie sygnalow ktore naprawde dzialaja. Wyobraz sobie ze masz 5 doradcow, ale jeden spi. Nie mowisz "jego glos sie nie liczy" — mowisz "reszta teraz ma wiecej do powiedzenia".
+
+### Kiedy przywrocic SM
+
+SM dla kPEPE wroci gdy spelni sie jedno z:
+- >= 3 SM addresses z >$50K na kPEPE perps (konsensus a nie jeden trader)
+- SM spot activity na PEPE >$500K/tydzien (smart money zaczyna handlowac spotem)
+
+Do tego czasu — kPEPE predykcje opieraja sie w 100% na technice, momentum i trendzie. I to jest szczere, bo to sa jedyne sygnaly ktore naprawde mamy.

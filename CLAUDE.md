@@ -239,6 +239,54 @@ XGBoost moderuje predykcję — na support widzi że spadek może wyhamować.
 - `🔄MICRO_REVERSAL→closing_allowed` — allows closing longs on bounces for profit
 - Mean-reversion working: DUMP→asks reduced (hold longs), micro-reversal→asks unblocked (take profit)
 
+### 61. kPEPE Prediction Weight Redistribution — SM=0% (27.02)
+
+**Problem:** 30% wagi predykcji kPEPE (smartMoney signal) było martwe — zawsze zero. whale_tracker nie ma kPEPE w WATCHED_COINS, na spot PEPE zero SM activity (Nansen potwierdził: zero inflows/outflows 7 dni), na HL perps tylko 1 realny SM trader (Silk Capital $250K SHORT). SM signal = szum.
+
+**Analiza (Nansen MCP + HL API scan):**
+- PEPE spot (Ethereum): 3 SM holders, 26.2B PEPE ($97-114K), **zero** inflows/outflows 7 dni
+- PEPE spot whales: 11 holders, 3.5T PEPE ($13-15M), **zero** activity 7 dni
+- kPEPE perps (HL): 6 tracked addresses, $267K SHORT vs $40K LONG = 6.7x SHORT, ale 94% = Silk Capital alone
+- whale_tracker output: `trading_mode: "NEUTRAL"`, `confidence: 0`
+
+**Rozwiązanie:** Per-token weight override w `HybridPredictor.ts` — kPEPE SM=0%, redystrybuowane do technical + momentum + trend.
+
+**Plik:** `src/prediction/models/HybridPredictor.ts`
+
+**A) `TOKEN_WEIGHT_OVERRIDES` map (po `HORIZON_WEIGHTS`):**
+```typescript
+const TOKEN_WEIGHT_OVERRIDES: Record<string, typeof HORIZON_WEIGHTS> = {
+  kPEPE: {
+    h1:  { technical: 0.40, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.15 },
+    h4:  { technical: 0.35, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.20 },
+    h12: { technical: 0.30, momentum: 0.25, smartMoney: 0.00, volume: 0.15, trend: 0.30 },
+    w1:  { technical: 0.25, momentum: 0.20, smartMoney: 0.00, volume: 0.15, trend: 0.40 },
+    m1:  { technical: 0.20, momentum: 0.15, smartMoney: 0.00, volume: 0.15, trend: 0.50 },
+  },
+};
+```
+
+**B) `calculatePredictions()` — dodano `token` parametr:**
+- Method signature: `+ token?: string`
+- Call site: `+ signals, token`
+- Weight lookup: `const weightsMap = (token && TOKEN_WEIGHT_OVERRIDES[token]) || HORIZON_WEIGHTS;`
+
+**Porównanie wag kPEPE (przed → po):**
+
+| Horyzont | SM (przed) | SM (po) | Technical | Momentum | Trend |
+|----------|-----------|---------|-----------|----------|-------|
+| h1 | 10% | **0%** | 35→40% | 30% | 10→15% |
+| h4 | 30% | **0%** | 25→35% | 20→30% | 15→20% |
+| h12 | 40% | **0%** | 20→30% | 15→25% | 15→30% |
+| w1 | 55% | **0%** | 10→25% | 10→20% | 20→40% |
+| m1 | 65% | **0%** | 5→20% | 5→15% | 20→50% |
+
+**Kiedy dodać SM z powrotem:** >= 3 SM addresses z >$50K na kPEPE perps, LUB SM spot activity na PEPE >$500K/tydzień.
+
+**Deploy:** SCP src → server, manual patch `dist/prediction/models/HybridPredictor.js`, `pm2 restart prediction-api`. Verified: `/predict/kPEPE` returns valid predictions, BTC/ETH unchanged.
+
+**Pliki:** `src/prediction/models/HybridPredictor.ts` (+15/-3)
+
 ---
 
 ## Zmiany 26 lutego 2026
@@ -2515,7 +2563,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-c9f012d feat: copy-trading bot + vip_spy ALL COINS + NansenFeed 429 fix + Dynamic Spread
+feat: kPEPE prediction weight redistribution — SM=0%, redistribute to technical/momentum/trend
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2790,3 +2838,4 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
 - **kPEPE risk pipeline (27.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.

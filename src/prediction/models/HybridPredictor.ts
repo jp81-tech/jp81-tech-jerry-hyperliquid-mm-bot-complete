@@ -54,6 +54,19 @@ const HORIZON_WEIGHTS: Record<string, { technical: number; momentum: number; sma
   m1:  { technical: 0.05, momentum: 0.05, smartMoney: 0.65, volume: 0.05, trend: 0.20 },
 };
 
+// Per-token weight overrides — tokens where SM signal is dead/unreliable
+// kPEPE: zero SM spot activity, only 1 real SM trader on perps (Silk Capital)
+// → redistribute SM weight to technical + momentum + trend
+const TOKEN_WEIGHT_OVERRIDES: Record<string, typeof HORIZON_WEIGHTS> = {
+  kPEPE: {
+    h1:  { technical: 0.40, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.15 },
+    h4:  { technical: 0.35, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.20 },
+    h12: { technical: 0.30, momentum: 0.25, smartMoney: 0.00, volume: 0.15, trend: 0.30 },
+    w1:  { technical: 0.25, momentum: 0.20, smartMoney: 0.00, volume: 0.15, trend: 0.40 },
+    m1:  { technical: 0.20, momentum: 0.15, smartMoney: 0.00, volume: 0.15, trend: 0.50 },
+  },
+};
+
 export class HybridPredictor {
   private technicalIndicators: TechnicalIndicators;
   private nansenFeatures: NansenFeatures;
@@ -128,7 +141,7 @@ export class HybridPredictor {
     }
 
     // 5. Calculate predictions for different timeframes (pass raw signals for per-horizon weighting)
-    const predictions = this.calculatePredictions(currentPrice, combinedSignal, latestTech, ohlcvData, signals);
+    const predictions = this.calculatePredictions(currentPrice, combinedSignal, latestTech, ohlcvData, signals, token);
 
     // 6. Determine overall direction and confidence
     const direction = this.getDirection(combinedSignal);
@@ -262,7 +275,8 @@ export class HybridPredictor {
     signal: number,
     tech: TechnicalFeatures,
     ohlcv: OHLCVData[],
-    signals?: { technical: number; momentum: number; smartMoney: number; volume: number }
+    signals?: { technical: number; momentum: number; smartMoney: number; volume: number },
+    token?: string
   ): PredictionResult['predictions'] {
     // Base volatility for scaling predictions
     const volatility = tech.volatility || 2;
@@ -279,11 +293,14 @@ export class HybridPredictor {
 
     const predictions: Record<string, { price: number; change: number; confidence: number }> = {};
 
+    // Use token-specific weight overrides if available (e.g. kPEPE has SM=0)
+    const weightsMap = (token && TOKEN_WEIGHT_OVERRIDES[token]) || HORIZON_WEIGHTS;
+
     for (const hz of PREDICTION_HORIZONS) {
       // Per-horizon signal: re-combine signals with horizon-specific weights
       let hzSignal = signal;  // fallback to combined
-      if (signals && HORIZON_WEIGHTS[hz.key]) {
-        const w = HORIZON_WEIGHTS[hz.key];
+      if (signals && weightsMap[hz.key]) {
+        const w = weightsMap[hz.key];
         hzSignal = signals.technical * w.technical +
                    signals.momentum * w.momentum +
                    signals.smartMoney * w.smartMoney +
