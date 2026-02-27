@@ -8441,6 +8441,22 @@ class HyperliquidMMBot {
         console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} tz=${timeZone.spreadMult.toFixed(2)}/${timeZone.sizeMult.toFixed(2)} bidMult=${(gridBidMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)} askMult=${(gridAskMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)}`)
       }
     } else {
+      // === 📊 PREDICTION BIAS: h4 prediction from prediction-api ===
+      // Applies to ALL non-kPEPE tokens (kPEPE has its own in the branch above)
+      try {
+        await this.fetchPrediction(symbol)
+        const predBias = this.getPredictionBias(symbol)
+        if (predBias.reason) {
+          sizeMultipliers.bid *= predBias.bidMult
+          sizeMultipliers.ask *= predBias.askMult
+          if (this.tickCount % 20 === 0) {
+            console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
+          }
+        }
+      } catch {
+        // prediction-api down — no bias applied, continue normally
+      }
+
       gridOrders = this.gridManager!.generateGridOrders(
         pair,
         midPrice,
