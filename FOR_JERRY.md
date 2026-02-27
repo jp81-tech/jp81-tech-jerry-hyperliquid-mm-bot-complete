@@ -4497,3 +4497,97 @@ Bot startuje ZAWSZE w dry-run. Musisz SWIADOMIE zmienic na `--live`. To chroni p
 - "Ops, nie wiedzialem ze to jest live!"
 
 **Zasada: Kazdy system ktory moze stracic pieniadze/dane powinien byc domyslnie w trybie "nie rob nic". Wlaczenie destrukcyjnych akcji powinno wymagac jawnej decyzji.**
+
+---
+
+## Rozdzial 18: Pierwszy ML Model dla kPEPE — Od Rule-Based do Machine Learning
+
+*27 lutego 2026 — dzien, w ktorym kPEPE dostal wlasny mozg*
+
+### Kontekst
+
+Przez caly czas kPEPE (nasz PURE_MM memecoin) dzialal na samych regulach:
+- Momentum Guard: "RSI oversold? Kupuj wiecej!"
+- Toxicity Engine: "Szybkie fille? Rozszerz spread!"
+- Prediction Bias: "HybridPredictor mowi -2.33%? Mniej kupuj!"
+
+Problem z rule-based prediction: HybridPredictor po prostu ekstrapoluje trend liniowo. Jak cena spada, mowi "bedzie spadac dalej". Na support to jest glupie — cena moze odbic.
+
+### XGBoost Training — co, jak, dlaczego
+
+**XGBoost** (eXtreme Gradient Boosting) to algorytm ML ktory buduje "las" drzew decyzyjnych. Kazde drzewo poprawia bledy poprzedniego. Jest szybki, nie wymaga GPU, i dobrze dziala na małych datasetach.
+
+**Dataset:** 90 wierszy (co 15 min od 26.02), 30 cech per wiersz:
+- Techniczne: RSI, MACD, Bollinger Bands, ATR
+- Rynkowe: OI change, volume, volatility, funding rate
+- Czasowe: hour_sin/cos, day_sin/cos (pora dnia/tygodnia)
+- SM: sm_ratio, sm_long/short_usd (dla kPEPE = prawie zero, bo whale_tracker nie trackuje kPEPE)
+
+**Wyniki (90 samples, 3 klasy: SHORT/NEUTRAL/LONG):**
+| Horyzont | Test Accuracy | Random Baseline | Top Feature |
+|----------|---------------|-----------------|-------------|
+| h1 | 58.8% | 33% | MACD signal (19%) |
+| h4 | 60.0% | 33% | Pora dnia (20%) |
+
+**Ciekawe discovery:** Top feature dla h4 = `hour_cos` (pora dnia, 20% waznosci!). To potwierdza cos co widzielismy empirycznie — kPEPE ma bardzo wyrazny time-of-day pattern. Asia session (02-04 UTC) = niska vol, US open (14-16 UTC) = wysoka vol + toksycznosc. Model to wylapał sam.
+
+### Efekt na bota
+
+Prediction Bias kPEPE korzysta z h4 predykcji. Po wlaczeniu XGBoost blend:
+
+```
+Rule-based only:  h4=BEARISH -2.33% → bid×0.92 ask×1.12 (agresywnie bearish)
+Z XGBoost blend:  h4=BEARISH -0.92% → bid×0.97 ask×1.05 (lagodnie bearish)
+```
+
+Na support ($0.003631) z RSI=22, XGBoost moderuje predykcje — mowi "tak, trend jest w dol, ale na tym poziomie spadek moze wyhamowac". Rule-based tego nie widzi (slepo ekstrapoluje).
+
+### kPEPE Performance 27.02 — $83 w jeden dzien
+
+374 fills, 100% win rate (zero strat), +$83.23 PnL. Bot siedzial na support caly dzien:
+- Kupował dip (bidy wypelniane na $0.003631-0.003650)
+- Sprzedawal na micro-bounceach (aski na $0.003660-0.003680)
+- Micro-reversal pozwalal zamykac longi z zyskiem zamiast trzymac w nieskonczonosc
+
+$83/dzien z $12.5K capital = ~240% annualizowane. Oczywiscie to jeden dzien na support (idealny scenariusz dla MM), ale system dziala.
+
+### Silk Capital — nasz "sojusznik" na kPEPE
+
+Przy okazji odkrylismy kto jest glownym SM graczem na kPEPE:
+
+**Silk Capital (0x880ac4):** $4.3M equity, kPEPE SHORT $250K (+$51K, +20%). Hardcore shorter — XMR SHORT $10.1M, HYPE SHORT $5.4M. Tier CONVICTION, weight 0.75.
+
+Nasz bot dziala jako PURE_MM (obie strony), ale fakt ze biggest SM player jest SHORT potwierdza ze kPEPE jest w downtrend. Nie wplywu na bota (kPEPE nie jest w whale_tracker WATCHED_COINS), ale to intel.
+
+### Mass SM Profit-Taking
+
+Takze dzisiaj 5 wielorybow zredukowalo shorty o 35-40%:
+- fce0: BTC $11.8M→$8.5M, ETH $6M→$3.6M
+- SOL2: SOL $8.1M→$4.8M
+
+Ale to NIE byly pelne wyjscia — redukcja zyskow. Heavyweights (58bro $31.8M, Wice-General $28.8M, Kraken A $14.3M) nie ruszyli nawet palcem. SM consensus SHORT nadal trzyma.
+
+### Lekcje inzynierskie
+
+**1. dist/ vs src/ — wieczny problem TypeScript**
+
+Zrodlo (`src/prediction/models/XGBoostPredictor.ts`) mialo kPEPE od 26.02. Ale `dist/` (skompilowany JS ktory PM2 uruchamia) nie mialo — bo `tsc` nie kompiluje czysto (pre-existing errors w innych plikach). Musielismy ręcznie patchowac dist.
+
+**Zasada: Jesli nie mozesz skompilowac czysto, masz dwa wyjscia: (1) napraw WSZYSTKIE errory (idealne ale czasochlonne), (2) patchuj dist reczne i pamietaj ze sie rozjezdza. Opcja 2 jest "technicznym dlugiem" — dziala teraz, gryzie pozniej.**
+
+**2. ML nie musi byc skomplikowane**
+
+XGBoost z 90 probkami, 30 cechami, 2 sekundy treningu → 60% accuracy na 3-class problem. Nie potrzebujesz GPU, nie potrzebujesz miliona probek, nie potrzebujesz transformerow. Dobry feature engineering (pora dnia!) + prosty model = lepiej niz fancy rule-based system.
+
+**3. Blend > Replace**
+
+Nie zamienilismy HybridPredictor na XGBoost. XGBoost jest blendowany z 30% waga × 33% confidence = ~10% efektywnego wplywu. Dlaczego?
+- 90 probek to za malo na pelne zaufanie
+- Rule-based ma domain knowledge (SM signals, mean-reversion)
+- Blend laczy "co model znalazl w danych" z "co wiemy o rynku"
+
+Jak dataset urosnie do 500+, XGBoost confidence wzrosnie i blend automatycznie da mu wiecej wagi.
+
+**4. Bot widzi support — ale po swojemu**
+
+Momentum Guard `prox=-1.00` + `RSI=22` = "jestem na dnie". Ale overall score to "tylko" -0.27 (LIGHT) bo 1h momentum = 0.0% (cena jest flat na support, nie w aktywnym spadku). System mowi: "wiem ze to support, ale nic sie nie dzieje — bede ostrozny, nie agresywny". I to jest madrze — agresywne kupowanie na support ktory moze przebic to przepis na strate.

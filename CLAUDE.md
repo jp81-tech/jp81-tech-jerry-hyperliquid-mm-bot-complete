@@ -13,7 +13,7 @@
 ### Hyperliquid Market-Making Bot
 Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracking.
 
-**Branch:** `fix/update-nansen-debug`
+**Branch:** `feat/next`
 **PR:** https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
 
 **Główne komponenty:**
@@ -159,6 +159,85 @@ minProfitBps: 10
 **Logi:** `📐 [MIN_PROFIT] kPEPE: Removed 2 close orders < 10bps from entry`
 
 **Commit:** `c9f012d`
+
+### 58. XGBoost Training kPEPE — pierwszy model ML (27.02)
+
+**Problem:** kPEPE korzystał wyłącznie z HybridPredictor (rule-based). XGBoost collect zbierał dane od 26.02, ale model nie był wytrenowany.
+
+**Rozwiązanie:** Ręczny trening XGBoost + patch dist na serwerze.
+
+**Training results (90 samples):**
+
+| Horyzont | Samples | Test Accuracy | Top Features |
+|----------|---------|---------------|-------------|
+| **h1** | 85 | **58.8%** | macd_signal (19%), bb_width (14%), rsi (8%) |
+| **h4** | 74 | **60.0%** | hour_cos (20%), macd_line (18%), oi_change_4h (12%) |
+| h12 | 42 | — | Za mało (potrzeba 50) |
+
+**Observations:**
+- kPEPE features = czysto techniczne (zero SM — prawidłowo, kPEPE nie ma SM data w whale_tracker)
+- h4 top feature = `hour_cos` (pora dnia) — kPEPE ma wyraźny time-of-day pattern (Asia low vol vs US high vol)
+- 58-60% accuracy na 3-class problem z 90 samples — solid start, lepiej niż random (33%)
+
+**Server patch:** `dist/prediction/models/XGBoostPredictor.js` — dodano `'kPEPE'` do `tokens` array (source `src/` już miał z commit `f797863`, ale `tsc` nie kompiluje czysto).
+
+**Prediction Bias zmiana po XGBoost blend:**
+```
+Przed (rule-based only): h4=BEARISH -2.33% conf=51% → bid×0.92 ask×1.12
+Po (XGBoost blend):      h4=BEARISH -0.92% conf=50% → bid×0.97 ask×1.05
+```
+XGBoost moderuje predykcję — na support widzi że spadek może wyhamować.
+
+**Deploy:** `pm2 restart prediction-api`, verified `/xgb-status` shows kPEPE h1+h4 models loaded.
+
+### 59. SM Intelligence Report — kPEPE Positions + Mass Profit-Taking (27.02)
+
+**kPEPE SM positions (6 tracked addresses):**
+
+| Trader | Tier | Weight | Side | Value | uPnL |
+|--------|------|--------|------|-------|------|
+| **Silk Capital** (0x880ac4) | CONVICTION | 0.75 | SHORT | $250K | +$51K (+20%) |
+| SM Active dbcc96 | ACTIVE | 0.50 | LONG | $40K | -$3.5K |
+| Token Millionaire 7717a7 | ACTIVE | 0.60 | SHORT | $15K | +$1.6K |
+| Selini Capital #1 | MM | 0.0 | SHORT | $2.4K | +$49 |
+| Oct Winner 8e0969 | ACTIVE | 0.65 | SHORT | $693 | +$473 |
+| Fasanara Capital | MM | 0.0 | LONG | $391 | -$4 |
+
+**Bilans:** SM SHORT ~$267K vs LONG ~$40K = **6.7x SHORT dominant** (po odfiltrowaniu MM).
+
+**Silk Capital profil:** $4.3M equity, 16 pozycji, +$2.87M uPnL. XMR SHORT $10.1M (main play), HYPE SHORT $5.4M, kPEPE SHORT $250K. Hardcore shorter.
+
+**Fasanara Capital kPEPE:** Zamknęła $10.7M SHORT (5 redukcji w 4 minuty, 16:58-17:00 UTC), flip na micro LONG $391 (dust position).
+
+**Mass SM profit-taking (27.02):**
+- fce0: BTC SHORT $11.8M→$8.5M (-35%), ETH SHORT $6M→$3.6M (-40%)
+- SOL2: SOL SHORT $8.1M→$4.8M (-40%), BTC SHORT reduced
+- NIE full exits — redukcja 35-40%, SM consensus nadal SHORT
+- Heavyweights (58bro $31.8M, Wice-Generał $28.8M, Kraken A $14.3M) — ZERO zmian
+
+**Generał:** ZERO zmian cały dzień. 8 pozycji, $2.18M, +$1.31M uPnL. Copy bot: 0 orders (wszystko baseline).
+
+### 60. kPEPE Performance Day Report (27.02)
+
+**Wyniki:**
+- **374 fills**, 197 buys / 177 sells
+- **Closed PnL: +$83.23**
+- **Win rate: 100%** (198 winning closes, 0 losses)
+- Volume: $34K, orders po $100 each
+
+**Hourly highlights:**
+- Best hour: 10:00 UTC (+$22.02, 64 fills) — kPEPE dip buying + selling on bounce
+- Gap 04-09 UTC — Asia session, brak volume
+- Consistent profits every hour ($1.61 - $22.02)
+
+**Position at EOD:** LONG 95K kPEPE ($347), nearly flat, healthy inventory.
+
+**Bot support detection verified:**
+- `⚓ near S` — MarketVision sees support
+- `prox=-1.00` — Momentum Guard: price AT support body ($0.003664)
+- `RSI=22` — deeply oversold
+- `🔄MICRO_REVERSAL→closing_allowed` — allows closing longs on bounces for profit
+- Mean-reversion working: DUMP→asks reduced (hold longs), micro-reversal→asks unblocked (take profit)
 
 ---
 
