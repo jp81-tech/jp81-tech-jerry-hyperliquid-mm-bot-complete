@@ -1,11 +1,11 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-26
+- Data: 2026-02-27
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
-- PM2 zarządza botem: `pm2 restart mm-follower mm-pure`
+- PM2 zarządza botem: `pm2 restart mm-follower mm-pure copy-general`
 - GitHub: `jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete`
 
 ## Nad czym pracujemy
@@ -31,7 +31,8 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
-- `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała")
+- `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała"), ALL COINS dla Generała
+- `scripts/general_copytrade.ts` - copy-trading bot: kopiuje pozycje Generała (dry-run/live)
 
 **Kluczowe pliki danych:**
 - `/tmp/smart_money_data.json` - dane z whale_tracker.py (na serwerze)
@@ -41,6 +42,123 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 27 lutego 2026
+
+### 57. Copy-Trading Bot — Cień Generała v3 (27.02)
+
+**Nowy plik:** `scripts/general_copytrade.ts`
+**PM2:** `copy-general` (id 49), dry-run domyślnie
+
+**Cel:** Automatyczne kopiowanie pozycji Generała (0xa31211...) na naszym koncie.
+
+**Architektura:**
+```
+vip_spy.py (30s) → /tmp/vip_spy_state.json → general_copytrade.ts → HL API (ordery)
+```
+
+**Baseline seeding:** Na pierwszym starcie bot zapisuje snapshot istniejących pozycji Generała jako baseline. Kopiowane są TYLKO nowe pozycje otwarte po uruchomieniu bota (nie stare).
+
+**Wykrywane zdarzenia:**
+| Event | Akcja |
+|-------|-------|
+| NEW position | Open copy ($500 fixed, IOC z 30bps slippage) |
+| CLOSED position | Close our copy (reduce-only IOC) |
+| FLIP (LONG↔SHORT) | Close old + open new direction |
+| SIZE_REDUCED >20% | Reduce proportionally |
+
+**Filtracja:** Min wartość pozycji Generała: $10K. Max kopia per pair: $500. Blocked coins configurable.
+
+**Config (env vars):**
+```
+COPY_PRIVATE_KEY    — klucz prywatny (wymagany w --live)
+COPY_CAPITAL_USD    — $2000
+COPY_MAX_PER_PAIR   — $500
+COPY_LEVERAGE       — 3x
+COPY_POLL_SEC       — 30s
+COPY_MIN_VALUE_USD  — $10000
+COPY_SCALING_MODE   — "fixed" / "proportional"
+COPY_BLOCKED_COINS  — ""
+```
+
+**Tryby:** `--dry-run` (logi only) / `--live` (real orders)
+**State:** `/tmp/copy_general_state.json`
+
+**Pliki:** `scripts/general_copytrade.ts` (NEW), `ecosystem.config.cjs` (+24)
+
+### 56. vip_spy.py — ALL COINS + portfolio summary + general_changes.json (27.02)
+
+**Problem:** vip_spy.py trackował tylko `WATCHED_COINS` whitelist (6 coinów). Generał otwierał pozycje na AVAX, RESOLV, PUMP, ASTER, APEX — niewidoczne w alertach.
+
+**Fix w `scripts/vip_spy.py`:**
+- `get_positions()` z parametrem `track_all=True` dla Generała — pobiera WSZYSTKIE coiny z API
+- `format_portfolio_summary()` — generuje portfolio summary (total value, total PnL, lista pozycji posortowana wg wartości) dołączane do alertów Telegram
+- `write_general_changes()` — pisze `/tmp/general_changes.json` z timestamp, changes, positions, total_value, total_pnl
+
+**Generał portfel (27.02, 8 pozycji, $2.23M, +$1.26M uPnL):**
+
+| Coin | Side | Value | uPnL | Lev |
+|------|------|-------|------|-----|
+| ASTER | SHORT | $739K | +$511K | 5x |
+| PUMP | SHORT | $504K | +$221K | 10x |
+| FARTCOIN | SHORT | $466K | +$492K | 10x |
+| APEX | SHORT | $220K | +$31K | 3x |
+| **LIT** | **LONG** | **$198K** | **+$4K** | 5x isolated |
+| RESOLV | SHORT | $87K | +$6K | 3x |
+| AVAX | SHORT | $16K | +$163 | 10x |
+| HYPE | SHORT | $1.6K | -$135 | 10x |
+
+**LIT SM Landscape (27.02):**
+- SM SHORT: $3.77M (Manifold $1.5M, 0xef759e $1.4M, Wice-Generał $364K)
+- SM LONG: $562K (0x08c14b $350K, **Generał $197K**)
+- **6.7x SHORT dominant** — Generał jest w mniejszości
+
+### 55. NansenFeed 429 fix — position cache + sequential fetching (27.02)
+
+**Problem:** mm-pure (PURE_MM) triggerował AlphaEngine która fetchowała 83 whale pozycji co minutę → 429 rate limit → SM sygnały tracone.
+
+**3 fixy:**
+1. **AlphaEngine skip dla PURE_MM** — `if (IS_PURE_MM_BOT)` → skip AlphaEngine entirely. Oszczędza 83 API calls/min.
+2. **Position cache fallback** — `NansenFeed.ts`: cache successful responses, return cached data on 429.
+3. **Reduced batch size** — 3→2 per batch, 800ms→1500ms delay, sequential fetching (nie concurrent).
+
+**Verified:** Zero NansenFeed 429 errors po deploy na mm-pure.
+
+### 54. Dynamic Spread — ATR-based grid layer scaling (27.02)
+
+**Problem:** kPEPE stale L1=18bps powodował fee-eating w low-vol (choppy) rynku. Round-trip spread 36bps, ale z 3.5bps fee = 7bps kosztu. W low-vol ruchach <30bps bot tracił na fees.
+
+**Fix w `src/mm_hl.ts` + `src/config/short_only_config.ts`:**
+
+**A) ATR-based L1 scaling:**
+```
+Low vol (ATR% < 0.30%):  L1 = 28bps (widen — avoid fee-eating)
+Normal (0.30-0.80%):     L1 = 18-28bps (interpolated)
+High vol (ATR% > 0.80%): L1 = 14bps (tighten — capture moves)
+L2-L4 scale proportionally (L2 = L1×1.67, L3 = L1×2.50, L4 = L1×3.61)
+```
+
+**B) Min Profit Buffer:**
+- Filtruje close orders < 10bps od entry price (3.5bps fee + 6.5bps safety)
+- SHORT: bidy muszą być < entry × (1 - 0.001)
+- LONG: aski muszą być > entry × (1 + 0.001)
+
+**DynamicSpreadConfig** w `short_only_config.ts`:
+```typescript
+atrScalingEnabled: true
+lowVolAtrPctThreshold: 0.30
+highVolAtrPctThreshold: 0.80
+lowVolL1Bps: 28
+highVolL1Bps: 14
+minProfitBps: 10
+```
+
+**Logi:** `📐 [DYNAMIC_SPREAD] kPEPE: ATR=0.420% → L1=22bps L2=37bps L3=55bps L4=79bps | NORMAL`
+**Logi:** `📐 [MIN_PROFIT] kPEPE: Removed 2 close orders < 10bps from entry`
+
+**Commit:** `c9f012d`
 
 ---
 
@@ -1231,9 +1349,11 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | PM2 id | Nazwa | Skrypt | Status | Rola |
 |--------|-------|--------|--------|------|
 | 5 | `ai-executor` | `src/signals/ai-executor-v2.mjs` | online | Nansen alert relay |
-| 41 | `mm-bot` | główny bot | online | Market making engine (recreated 23.02, was id=36) |
+| 45 | `mm-follower` | `src/mm_hl.ts` | online | SM-following bot (BTC,ETH,SOL,HYPE,FARTCOIN) |
+| 48 | `mm-pure` | `src/mm_hl.ts` | online | PURE_MM bot (kPEPE) |
+| 49 | `copy-general` | `scripts/general_copytrade.ts` | online | Copy-trading Generała (dry-run, 27.02) |
 | 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
-| 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll) |
+| 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll, ALL COINS dla Generała) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
 | 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 (8 tokens, 5 horizons, 23.02) |
 | 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (8 tokens, 5 horizons, 22.02) |
@@ -2316,7 +2436,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-f797863 feat: add kPEPE to XGBoost collect, train, and prediction service
+c9f012d feat: copy-trading bot + vip_spy ALL COINS + NansenFeed 429 fix + Dynamic Spread
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2586,3 +2706,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction Bias (26.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na kPEPE grid. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. Pipeline: po Toxicity+TimeZone, PRZED Momentum Guard. Proaktywny (antycypuje) vs MG reaktywny (reaguje). Phase 1 — tylko kPEPE. Phase 2: SM-following pairs z w1/m1 horyzontami.
 - **Multipliers = ROZMIAR, nie cena**: `bid×0.81` znaczy bidy mają 81% normalnego rozmiaru ($81 zamiast $100/level). Ceny orderów (L1=18bps, L2=30bps od mid) się NIE zmieniają. Każdy moduł (Toxicity, TimeZone, Prediction, MG) mnoży `sizeMultipliers.bid`/`.ask` — wynik końcowy to iloczyn wszystkich. Gdy moduły się zgadzają (np. oba BEARISH) → silna redukcja/wzmocnienie. Gdy się nie zgadzają → wzajemna neutralizacja.
 - **kPEPE mixed case token**: Hyperliquid API wymaga dokładnie `kPEPE` (mała `k`). `toUpperCase()` zamienia na `KPEPE` → HTTP 500. Fix: `normalizeToken()` w dashboard-api.ts z `MIXED_CASE_TOKENS` mapą. Dotyczy WSZYSTKICH endpointów prediction-api: `/predict/`, `/verify/`, `/predict-xgb/`, `/xgb-features/`.
+- **Copy-trading bot (27.02)**: `scripts/general_copytrade.ts`, PM2 `copy-general` (id 49). Czyta `/tmp/vip_spy_state.json` co 30s, kopiuje NOWE pozycje Generała po $500 fixed (IOC 30bps slippage). Baseline seeding: na starcie zapisuje snapshot istniejących pozycji i nie kopiuje ich. State: `/tmp/copy_general_state.json`. Tryby: `--dry-run` (domyślny) / `--live`. Żeby włączyć live: ustawić `COPY_PRIVATE_KEY` + zmienić args na `--live` w `ecosystem.config.cjs`.
+- **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
+- **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
+- **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
+- **kPEPE risk pipeline (27.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
