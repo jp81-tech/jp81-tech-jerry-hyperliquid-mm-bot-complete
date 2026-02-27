@@ -47,6 +47,52 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 27 lutego 2026
 
+### 63. Candlestick Pattern Features — XGBoost 30→45 features (27.02)
+
+**Problem:** XGBoost model korzystał z 30 features (11 technical + 11 Nansen/SM + 8 extra) bez żadnych informacji o geometrii świec OHLC. Analiza kPEPE price action (bearish expansion, liquidity cascade, bear flag) pokazała, że candlestick patterns mogą dodać wartościowe sygnały — szczególnie dla h1 (krótkoterminowe odwrócenia) i h4 (formacje kontynuacji).
+
+**Rozwiązanie:** 15 nowych candlestick features dodanych do całego pipeline (collect → train → predict).
+
+**Nowa funkcja `compute_candle_features(candles)` w `xgboost_collect.py`:**
+Oblicza z ostatnich 3 świec OHLC:
+
+| # | Feature | Typ | Co wykrywa |
+|---|---------|-----|------------|
+| [30] | hammer | bool | Long lower shadow, small upper — bullish reversal |
+| [31] | shooting_star | bool | Long upper shadow, small lower — bearish reversal |
+| [32] | engulfing_bull | bool | Green engulfs previous red — bullish reversal |
+| [33] | engulfing_bear | bool | Red engulfs previous green — bearish reversal |
+| [34] | doji | bool | Body ≤10% range — indecision |
+| [35] | pin_bar_bull | bool | Lower shadow >60% range — demand rejection |
+| [36] | pin_bar_bear | bool | Upper shadow >60% range — supply rejection |
+| [37] | marubozu_bull | bool | Green, body >90% range — strong buying |
+| [38] | marubozu_bear | bool | Red, body >90% range — strong selling |
+| [39] | inside_bar | bool | H/L within previous H/L — consolidation |
+| [40] | three_crows | bool | 3 consecutive red, large bodies — strong sell |
+| [41] | three_soldiers | bool | 3 consecutive green, large bodies — strong buy |
+| [42] | spinning_top | bool | Both shadows > body — uncertainty |
+| [43] | body_ratio | 0-1 | body/range (1=marubozu, 0=doji) |
+| [44] | wick_skew | -1 to 1 | (upper-lower)/range (+1=bearish pressure) |
+
+**Backward compatibility:**
+- Trainer: akceptuje 30 LUB 45 features, paduje stare 30-feature wiersze zerami (= "brak pattern")
+- Predictor: akceptuje 30 LUB 45 features, paduje stare wektory zerami
+- Stare modele (wytrenowane na 30 feat) działają bez zmian — candle features = 0 → brak wpływu na drzewa decyzyjne
+
+**Zmodyfikowane pliki (3):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_collect.py` | `compute_candle_features()` (+123 LOC), `collect_token()` assembles 45 features |
+| `scripts/xgboost_train.py` | 15 candle names w `FEATURE_NAMES`, `NUM_FEATURES=45`, backward compat padding |
+| `src/prediction/models/XGBoostPredictor.ts` | 15 feature names, `NUM_FEATURES=45`, backward compat padding |
+
+**Deploy:** SCP 3 pliki + dist patch na serwerze. Collector verified: `45 features` na wszystkich 9 tokenach. Trainer: retrained all models (backward compat OK). prediction-api: restarted, all models loaded.
+
+**Timeline do efektywności:** ~50 nowych 45-feature wierszy (~12.5h, collector co 15 min) → retrain. Do tego czasu stare wiersze (padded zeros) = modele zachowują się identycznie.
+
+**Commit:** `b9c738c`
+
 ### 62. Prediction Bias for ALL tokens — mm-follower integration (27.02)
 
 **Problem:** Prediction bias (h4 prediction z prediction-api, ±15% soft bid/ask size adjustment) działał TYLKO dla kPEPE w mm-pure. Tokeny mm-follower (BTC, ETH, SOL, HYPE, FARTCOIN) nie miały żadnego prediction bias — 100% decyzji opierało się na SM signals + regime.
@@ -2615,7 +2661,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-feat: prediction bias for ALL tokens — extend h4 ML prediction to mm-follower
+feat: add 15 candlestick pattern features to XGBoost pipeline (30→45 features)
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2878,7 +2924,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
 - **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
-- **XGBoost data collection**: Co 15 min (cron), 30 features per sample. Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02).
+- **XGBoost data collection**: Co 15 min (cron), **45 features** per sample (30 base + 15 candle patterns, od 27.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: stare 30-feature wiersze padowane zerami w trainerze i predictorze.
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".

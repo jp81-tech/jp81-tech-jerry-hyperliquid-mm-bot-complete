@@ -4783,3 +4783,106 @@ Prediction bias jest **multiplicative** z innymi modulami. Jesli SM mowi SHORT (
 3. **Unconditional logs** do debugowania, nie throttled
 4. **Weryfikuj sciezke wykonania** logami, nie zakladaj
 5. **16 linii kodu, 2 dni debugowania** — wiekszosc czasu programisty to zrozumienie problemu, nie pisanie rozwiazania
+
+---
+
+## Rozdzial 25: Candlestick Patterns w ML Pipeline — jak dodac features bez zepsucia produkcji
+
+### Problem: XGBoost nie widzi geometrii swiec
+
+Nasz model ML (XGBoost) mial 30 features — technical indicators (RSI, MACD, BB), Nansen SM data, funding, OI, pora dnia. Ale ZERO informacji o ksztalcie samej swieczki.
+
+Wyobraz sobie tradera ktory patrzy na wykres, ale widzi TYLKO liczby (RSI=32, MACD=-0.5) bez patrzenia na same swieczki. Nie widzi hammera na dnie, nie widzi shooting star na szczycie, nie widzi bearish engulfing po pumpie. Wlasnie tak dzialal nasz model.
+
+Analiza kPEPE price action (bearish expansion, liquidity cascade, bear flag) pokazala ze candlestick patterns dodaja informacje ktore zadna z naszych 30 features nie capturuje — geometria cenowa w ramach jednej swieczki.
+
+### Czym sa candlestick patterns?
+
+Kazda swieczka OHLC (Open, High, Low, Close) tworzy ksztalt. Ten ksztalt mowi cos o walce miedzy kupujacymi a sprzedajacymi:
+
+```
+Hammer (bullish):       Shooting Star (bearish):
+    |                         |
+    |                         |
+   ___                       ___
+  |   |                     |   |
+  |___|                     |___|
+    |
+    |
+    |
+```
+
+Hammer: cena spadla nisko (dlugi dolny cien), ale kupujacy zepchneli ja z powrotem (male cialo na gorze). To sygnal "popyt jest silny".
+
+Shooting Star: cena poszla wysoko (dlugi gorny cien), ale sprzedajacy zepchneli ja z powrotem (male cialo na dole). To sygnal "podaz jest silna".
+
+### 15 nowych features
+
+Dodalismy 3 kategorie:
+
+**Boolean patterns (13):** hammer, shooting_star, engulfing_bull/bear, doji, pin_bar_bull/bear, marubozu_bull/bear, inside_bar, three_crows, three_soldiers, spinning_top. Wartosc 0.0 lub 1.0.
+
+**Continuous features (2):** body_ratio (0=doji, 1=marubozu — jak "zdecydowana" jest swieczka) i wick_skew (-1 do +1 — czy presja jest od gory czy dolu).
+
+### Backward compatibility — klucz do bezpiecznego deploy
+
+To najwazniejsza lekcja tego rozdzialu. Mielismy ~480 wierszy danych per token, wszystkie z 30 features. Nie mozemy ich wyrzucic — to miesiac zbierania. Ale nowe wiersze beda mialy 45 features.
+
+**Rozwiazanie: zero-padding starych wierszy.**
+
+```python
+# W trainerze:
+if len(feat) == 30:
+    feat = feat + [0.0] * 15  # pad z zerami
+
+# W predictorze (TypeScript):
+if (features.length === 30) {
+    paddedFeatures = [...features, ...new Array(15).fill(0)];
+}
+```
+
+Dlaczego to dziala? Zero oznacza "brak pattern" — hammer=0, shooting_star=0, body_ratio=0, wick_skew=0. XGBoost traktuje to jak "ta swieczka nie miala zadnego wyraznego patternu". To NIE jest idealne (body_ratio=0 to nie "brak danych" tylko "doji"), ale jest wystarczajaco dobre — XGBoost sam nauczy sie ze stare wiersze maja inne rozklady tych features.
+
+### Pipeline: collect → train → predict
+
+```
+xgboost_collect.py                    xgboost_train.py
+┌──────────────────┐                 ┌──────────────────┐
+│ tech (11)        │   JSONL file    │ Load JSONL       │
+│ nansen (11)      │ ──────────────→ │ Pad 30→45        │
+│ extra (8)        │  45 features    │ Train XGBoost    │
+│ candle (15) NEW  │                 │ Save model JSON  │
+└──────────────────┘                 └──────────────────┘
+                                              │
+                                              ▼
+                                     XGBoostPredictor.ts
+                                     ┌──────────────────┐
+                                     │ Load model JSON  │
+                                     │ Accept 30 OR 45  │
+                                     │ Traverse trees   │
+                                     │ Return probs     │
+                                     └──────────────────┘
+```
+
+Kazdy etap musi byc backward compatible:
+- **Collect** produkuje 45 features (nowe wiersze). Stare 30-feature wiersze juz w pliku.
+- **Train** akceptuje 30 i 45, paduje stare. Model trenuje na 45 kolumnach.
+- **Predict** akceptuje 30 i 45 feature vectors. Stare modele (trenowane na 30) dzialaja z nowymi 45-feature wektorami bo ekstra features = 0 = brak wplywu na istniejace drzewa.
+
+### Lekcja: Feature Engineering vs Model Complexity
+
+W ML czesto wazniejsze jest JAKIE features dasz modelowi niz JAK skomplikowany jest model. Nasz XGBoost ma proste parametry (max_depth=4, 100 drzew), ale teraz widzi:
+- RSI mowi "oversold" (technical)
+- SM mowi "SHORT dominant" (fundamental)
+- **Hammer mowi "kupujacy odrzucili dno"** (price action) ← NOWE
+
+Te 3 informacje razem daja duzo silniejszy sygnal niz kazda z osobna. XGBoost sam nauczy sie waznych interakcji — np. "hammer + oversold + SM neutral = silny sygnal kupna".
+
+### Lekcja: Deploy bez downtime
+
+Zmienilismy format danych z 30 na 45 features. Gdybysmy po prostu zmienili `assert len(features) == 45` bez backward compat, to:
+1. Trainer by odrzucil 480 istniejacych wierszy ("expected 45, got 30")
+2. Predictor by odrzucil feature vectors z callersow ktore jeszcze nie zaktualizowaly
+3. Stare modele (trenowane na 30 features) by crashowaly na 45-feature input
+
+Backward compatibility to nie opcja — to **wymog produkcyjny**. Zawsze pytaj sie: "co sie stanie ze starymi danymi?"
