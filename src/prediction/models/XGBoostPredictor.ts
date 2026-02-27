@@ -77,9 +77,15 @@ export const FEATURE_NAMES = [
   'funding_rate', 'oi_change_1h', 'oi_change_4h',
   'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
   'volatility_24h',
+  // Candle patterns (15)
+  'hammer', 'shooting_star', 'engulfing_bull', 'engulfing_bear',
+  'doji', 'pin_bar_bull', 'pin_bar_bear',
+  'marubozu_bull', 'marubozu_bear', 'inside_bar',
+  'three_crows', 'three_soldiers', 'spinning_top',
+  'body_ratio', 'wick_skew',
 ];
 
-const NUM_FEATURES = 30;
+const NUM_FEATURES = 45;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12', 'w1', 'm1'] as const;
 const MODEL_DIR = '/tmp';
@@ -265,7 +271,12 @@ export class XGBoostPredictor {
       return null;
     }
 
-    if (features.length !== NUM_FEATURES) {
+    // Accept both 30-feature (old) and 45-feature (new) vectors
+    // Pad old 30-feature vectors with zeros (candle features = "no pattern detected")
+    let paddedFeatures = features;
+    if (features.length === 30) {
+      paddedFeatures = [...features, ...new Array(15).fill(0)];
+    } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;
     }
@@ -276,7 +287,7 @@ export class XGBoostPredictor {
       const model = tokenModels[horizon];
       if (!model) continue;
 
-      const probs = predictModel(model, features);
+      const probs = predictModel(model, paddedFeatures);
       // probs = [SHORT, NEUTRAL, LONG] (classes 0, 1, 2)
 
       const shortProb = probs[0] || 0;

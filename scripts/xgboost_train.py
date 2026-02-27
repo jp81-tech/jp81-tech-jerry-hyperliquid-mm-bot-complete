@@ -85,7 +85,15 @@ FEATURE_NAMES = [
     "funding_rate", "oi_change_1h", "oi_change_4h",
     "hour_sin", "hour_cos", "day_sin", "day_cos",
     "volatility_24h",
+    # Candle patterns (15)
+    "hammer", "shooting_star", "engulfing_bull", "engulfing_bear",
+    "doji", "pin_bar_bull", "pin_bar_bear",
+    "marubozu_bull", "marubozu_bear", "inside_bar",
+    "three_crows", "three_soldiers", "spinning_top",
+    "body_ratio", "wick_skew",
 ]
+
+NUM_FEATURES = 45  # 11 tech + 11 nansen + 8 extra + 15 candle
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -118,8 +126,12 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) != 30:
+            if not feat or len(feat) not in (30, NUM_FEATURES):
                 continue
+
+            # Backward compat: pad old 30-feature rows with zeros (candle features = "no pattern")
+            if len(feat) == 30:
+                feat = feat + [0.0] * 15
 
             features.append(feat)
 
