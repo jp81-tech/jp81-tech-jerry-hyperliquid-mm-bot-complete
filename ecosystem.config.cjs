@@ -56,6 +56,30 @@ module.exports = {
       max_restarts: 10,
       min_uptime: 10000,
       autorestart: true,
+    },
+    {
+      name: "copy-general",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
+      script: "scripts/general_copytrade.ts",
+      interpreter: "npx",
+      interpreter_args: "tsx",
+      args: "--dry-run",  // START IN DRY-RUN! Change to "--live" when ready
+      env: {
+        COPY_CAPITAL_USD: "2000",
+        COPY_MAX_PER_PAIR: "500",
+        COPY_LEVERAGE: "3",
+        COPY_POLL_SEC: "30",
+        COPY_MIN_VALUE_USD: "10000",
+        COPY_SCALING_MODE: "fixed",
+        COPY_BLOCKED_COINS: "",
+        // COPY_PRIVATE_KEY: "..."  // Set on server .env or PM2 env
+      },
+      max_memory_restart: "150M",
+      kill_timeout: 10000,
+      restart_delay: 5000,
+      max_restarts: 10,
+      min_uptime: 5000,
+      autorestart: true,
     }
   ]
 }

@@ -317,3 +317,69 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
 export function getMomentumGuardConfig(token: string): MomentumGuardConfig {
   return { ...MOMENTUM_GUARD_DEFAULTS, ...(MOMENTUM_GUARD_OVERRIDES[token] || {}) }
 }
+
+// ============================================================
+// DYNAMIC SPREAD — ATR-based grid layer scaling + min profit buffer
+// Prevents fee-eating close orders in choppy/sideways markets.
+// Applied to PURE_MM tokens (kPEPE).
+//
+// 3 mechanisms:
+// 1) ATR-based L1 scaling: widen L1 when vol is low (choppy → fees eat spread)
+// 2) Min Profit Buffer: remove close orders that would be < minProfitBps from entry
+// 3) Don't Chase the Price: freeze TP at minimum profitable distance from entry
+// ============================================================
+
+export interface DynamicSpreadConfig {
+  enabled: boolean
+
+  // ATR-based L1 scaling
+  atrScalingEnabled: boolean
+  baseL1Bps: number              // Default L1 offset when ATR matches "normal" vol (18 bps)
+  lowVolAtrPctThreshold: number  // ATR% below this = low vol (choppy) → widen L1
+  highVolAtrPctThreshold: number // ATR% above this = high vol (trending) → tighten L1
+  lowVolL1Bps: number            // L1 in low vol regime (wider = safer)
+  highVolL1Bps: number           // L1 in high vol regime (tighter = capture more)
+  // L2-L4 scale proportionally: L2 = L1 × l2Ratio, etc.
+  l2Ratio: number                // L2/L1 ratio (default 1.67 = 30/18)
+  l3Ratio: number                // L3/L1 ratio (default 2.50 = 45/18)
+  l4Ratio: number                // L4/L1 ratio (default 3.61 = 65/18)
+
+  // Min Profit Buffer: filter close orders below fee threshold
+  minProfitEnabled: boolean
+  minProfitBps: number           // Minimum distance from entry for close orders (default 10 bps)
+  // 3.5 bps round-trip fee + 6.5 bps safety = 10 bps minimum
+
+  // Don't Chase the Price: freeze TP at min profit distance
+  tpFreezeEnabled: boolean
+  // When position opened, calculate min profitable close price.
+  // Grid re-centering cannot move close orders closer than this.
+}
+
+export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
+  enabled: true,
+
+  atrScalingEnabled: true,
+  baseL1Bps: 18,
+  lowVolAtrPctThreshold: 0.30,   // ATR% < 0.30% = low vol (kPEPE normally 0.3-0.8%)
+  highVolAtrPctThreshold: 0.80,  // ATR% > 0.80% = high vol
+  lowVolL1Bps: 28,               // Widen L1 to 28bps in choppy market
+  highVolL1Bps: 14,              // Tighten L1 to 14bps in trending market
+  l2Ratio: 1.67,                 // 30/18
+  l3Ratio: 2.50,                 // 45/18
+  l4Ratio: 3.61,                 // 65/18
+
+  minProfitEnabled: true,
+  minProfitBps: 10,              // 3.5 bps fee + 6.5 bps safety
+
+  tpFreezeEnabled: true,
+}
+
+export const DYNAMIC_SPREAD_OVERRIDES: Record<string, Partial<DynamicSpreadConfig>> = {
+  'kPEPE': {
+    // kPEPE defaults are already tuned — no overrides needed yet
+  },
+}
+
+export function getDynamicSpreadConfig(token: string): DynamicSpreadConfig {
+  return { ...DYNAMIC_SPREAD_DEFAULTS, ...(DYNAMIC_SPREAD_OVERRIDES[token] || {}) }
+}

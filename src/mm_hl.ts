@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -316,19 +316,55 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// kPEPE CUSTOM 4-LAYER GRID
-// L1 Core (18bps) → L2 Buffer (30bps) → L3 Wide (45bps) → L4 Sweep (65bps)
+// kPEPE CUSTOM 4-LAYER GRID — DYNAMIC SPREAD (ATR-based)
+// L1 scales with ATR%: low vol → widen (28bps), normal → 18bps, high vol → tighten (14bps)
+// L2-L4 scale proportionally using fixed ratios from L1.
 // FIX 25.02: Old L1 was 5bps — way too tight for kPEPE volatility (20-30bps/min).
-// Grid re-centering every 60s was creating adverse selection: new bids above old asks → guaranteed loss.
-// New minimum 18bps gives enough buffer to survive 1-tick re-centering.
+// FIX 26.02: Dynamic Spread — ATR-based L1 scaling to prevent fee-eating in choppy markets.
 // ─────────────────────────────────────────────────────────────────────────────
-const KPEPE_GRID_LAYERS: GridLayer[] = [
-  { level: 1, offsetBps: 18, capitalPct: 12, ordersPerSide: 2, isActive: true },  // Core (was 5bps Scalping — killed by adverse selection)
-  { level: 2, offsetBps: 30, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Buffer (was 14bps Core)
-  { level: 3, offsetBps: 45, capitalPct: 28, ordersPerSide: 2, isActive: true },  // Wide (was 28bps Buffer)
-  { level: 4, offsetBps: 65, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep (was 55bps)
+const KPEPE_GRID_LAYERS_DEFAULT: GridLayer[] = [
+  { level: 1, offsetBps: 18, capitalPct: 12, ordersPerSide: 2, isActive: true },  // Core (fallback when ATR unavailable)
+  { level: 2, offsetBps: 30, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Buffer
+  { level: 3, offsetBps: 45, capitalPct: 28, ordersPerSide: 2, isActive: true },  // Wide
+  { level: 4, offsetBps: 65, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep
   // 16% reserve (not allocated = available for rebalancing)
 ]
+
+/**
+ * Dynamic grid layers: scale L1 based on ATR%, L2-L4 follow proportionally.
+ * Low ATR (choppy) → widen all layers → avoid fee-eating trash fills.
+ * High ATR (trending) → tighten layers → capture moves.
+ */
+function getKpepeGridLayers(atrPct: number): GridLayer[] {
+  const cfg = getDynamicSpreadConfig('kPEPE')
+  if (!cfg.enabled || !cfg.atrScalingEnabled || atrPct <= 0) {
+    return KPEPE_GRID_LAYERS_DEFAULT
+  }
+
+  // Interpolate L1 offset based on ATR%
+  let l1Bps: number
+  if (atrPct <= cfg.lowVolAtrPctThreshold) {
+    // Low vol: widen to maximum
+    l1Bps = cfg.lowVolL1Bps
+  } else if (atrPct >= cfg.highVolAtrPctThreshold) {
+    // High vol: tighten to minimum
+    l1Bps = cfg.highVolL1Bps
+  } else {
+    // Linear interpolation between low and high vol
+    const t = (atrPct - cfg.lowVolAtrPctThreshold) / (cfg.highVolAtrPctThreshold - cfg.lowVolAtrPctThreshold)
+    l1Bps = cfg.lowVolL1Bps + t * (cfg.highVolL1Bps - cfg.lowVolL1Bps)
+  }
+
+  // Floor: never below highVolL1Bps (14), never above lowVolL1Bps (28)
+  l1Bps = Math.max(cfg.highVolL1Bps, Math.min(cfg.lowVolL1Bps, Math.round(l1Bps)))
+
+  return [
+    { level: 1, offsetBps: l1Bps, capitalPct: 12, ordersPerSide: 2, isActive: true },
+    { level: 2, offsetBps: Math.round(l1Bps * cfg.l2Ratio), capitalPct: 24, ordersPerSide: 2, isActive: true },
+    { level: 3, offsetBps: Math.round(l1Bps * cfg.l3Ratio), capitalPct: 28, ordersPerSide: 2, isActive: true },
+    { level: 4, offsetBps: Math.round(l1Bps * cfg.l4Ratio), capitalPct: 20, ordersPerSide: 2, isActive: true },
+  ]
+}
 
 // kPEPE Toxicity Engine instance (pattern-based toxic flow detection)
 const kpepeToxicity = new KpepeToxicityEngine()
@@ -4128,8 +4164,13 @@ class HyperliquidMMBot {
     // ════════════════════════════════════════════════════════════════════════
     // 🚀 AlphaExtractionEngine - Native TypeScript Smart Money tracking
     // Replaces Python whale_tracker.py JSON file reading with real-time signals
+    // PURE_MM mode: AlphaEngine skipped — kPEPE uses whale_tracker.py JSON + prediction-api
+    // AlphaEngine multipliers are bypassed for PURE_MM anyway (line ~7136)
+    // Skipping saves 83 whale API calls/min → preserves rate limit for grid orders
     // ════════════════════════════════════════════════════════════════════════
-    try {
+    if (IS_PURE_MM_BOT) {
+      this.notifier.info('🚀 AlphaExtractionEngine SKIPPED (PURE_MM mode — not needed, saves API rate limit)')
+    } else try {
       await alphaEngineIntegration.start(60_000) // 60s interval (reduced from 30s to avoid 429 rate limits)
       this.notifier.info('🚀 AlphaExtractionEngine started (60s interval)')
 
@@ -8069,17 +8110,20 @@ class HyperliquidMMBot {
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
         const momGuardConfig = getMomentumGuardConfig(pair)
+        // ATR% computed outside MG scope — also used by Dynamic Spread below
+        const mvAnalysisMg = this.marketVision?.getPairAnalysis(pair)
+        const mgAtr = mvAnalysisMg?.atr ?? 0
+        const atrPct = mgAtr > 0 && midPrice > 0 ? (mgAtr / midPrice) * 100 : 0
+
         if (momGuardConfig.enabled) {
           const change1h = momentum1h  // already fetched above for toxicity engine
-          const mvAnalysis = this.marketVision?.getPairAnalysis(pair)
+          const mvAnalysis = mvAnalysisMg
           const mgRsi = mvAnalysis?.rsi ?? 50
-          const mgAtr = mvAnalysis?.atr ?? 0
           const mgResistance = mvAnalysis?.resistance4h ?? 0
           const mgSupport = mvAnalysis?.support4h ?? 0
 
           // 1. Momentum signal (50% weight): change1h normalized to [-1, +1]
           // ATR-based threshold adapts to current volatility regime
-          const atrPct = mgAtr > 0 && midPrice > 0 ? (mgAtr / midPrice) * 100 : 0
           const pumpThreshold = momGuardConfig.useAtrThreshold && atrPct > 0
             ? atrPct * momGuardConfig.atrThresholdMult
             : momGuardConfig.pumpThresholdPct
@@ -8282,11 +8326,25 @@ class HyperliquidMMBot {
           }
         }
 
+        // === 📐 DYNAMIC SPREAD: ATR-based layer scaling ===
+        const dynSpreadCfg = getDynamicSpreadConfig(pair)
+        const dynamicLayers = getKpepeGridLayers(atrPct)
+
+        if (dynSpreadCfg.enabled && dynSpreadCfg.atrScalingEnabled && atrPct > 0 && this.tickCount % 20 === 0) {
+          const l1 = dynamicLayers[0].offsetBps
+          const regime = atrPct < dynSpreadCfg.lowVolAtrPctThreshold ? 'LOW_VOL(widen)'
+            : atrPct > dynSpreadCfg.highVolAtrPctThreshold ? 'HIGH_VOL(tight)' : 'NORMAL'
+          console.log(
+            `📐 [DYNAMIC_SPREAD] ${pair}: ATR=${atrPct.toFixed(3)}% → L1=${l1}bps L2=${dynamicLayers[1].offsetBps}bps ` +
+            `L3=${dynamicLayers[2].offsetBps}bps L4=${dynamicLayers[3].offsetBps}bps | ${regime}`
+          )
+        }
+
         gridOrders = this.gridManager!.generateGridOrdersCustom(
           pair,
           skewedMidPrice,  // ← shifted mid price instead of raw midPrice
           capitalPerPair,
-          KPEPE_GRID_LAYERS,
+          dynamicLayers,   // ← ATR-scaled layers instead of fixed KPEPE_GRID_LAYERS
           0.001,
           inventorySkew,
           permissions,
@@ -8294,6 +8352,43 @@ class HyperliquidMMBot {
           { bid: gridBidMult * toxSpreadMult, ask: gridAskMult * toxSpreadMult },
           sizeMultipliers
         )
+
+        // === 📐 MIN PROFIT BUFFER: remove close orders that would lose money to fees ===
+        // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
+        // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
+        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0) {
+          const entryPx = position.entryPrice || 0
+          if (entryPx > 0) {
+            const minProfitFraction = dynSpreadCfg.minProfitBps / 10000  // 10bps = 0.001
+            const isShort = actualSkew < -0.05
+            const isLong = actualSkew > 0.05
+
+            const beforeMinProfit = gridOrders.length
+            if (isShort) {
+              // SHORT: close = bid (buying back). Bid must be < entry - minProfit to be profitable.
+              const maxBidPrice = entryPx * (1 - minProfitFraction)
+              gridOrders = gridOrders.filter(o => {
+                if (o.side !== 'bid') return true  // keep all asks
+                return o.price <= maxBidPrice
+              })
+            } else if (isLong) {
+              // LONG: close = ask (selling). Ask must be > entry + minProfit to be profitable.
+              const minAskPrice = entryPx * (1 + minProfitFraction)
+              gridOrders = gridOrders.filter(o => {
+                if (o.side !== 'ask') return true  // keep all bids
+                return o.price >= minAskPrice
+              })
+            }
+
+            const removedMinProfit = beforeMinProfit - gridOrders.length
+            if (removedMinProfit > 0) {
+              console.log(
+                `📐 [MIN_PROFIT] ${pair}: Removed ${removedMinProfit} close orders < ${dynSpreadCfg.minProfitBps}bps from entry ` +
+                `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} skew=${(actualSkew*100).toFixed(0)}%`
+              )
+            }
+          }
+        }
 
         // ── Toxicity-driven layer removal (overrides skew-based removal) ──
         if (toxOut.removeLayers.length > 0) {

@@ -701,6 +701,8 @@ export class NansenFeed extends EventEmitter {
   private allPositions: Map<string, AccountState> = new Map()
   private aggregatedData: Record<string, AggregatedCoinData> = {}
   private lastUpdateTime: Date | null = null
+  private positionCache: Map<string, AccountState> = new Map()  // 429 fallback cache
+  private fetch429Count: number = 0  // Track 429s per cycle for logging
 
   constructor() {
     super()
@@ -748,14 +750,31 @@ export class NansenFeed extends EventEmitter {
         }
       }
 
-      return {
+      const result: AccountState = {
         positions,
         accountValue: parseFloat(data.marginSummary?.accountValue || '0'),
         timestamp: new Date().toISOString()
       }
-    } catch (error) {
-      console.error(`[NansenFeed] Error fetching position for ${address.slice(0, 10)}: ${error}`)
-      return { positions: [], accountValue: 0, timestamp: new Date().toISOString() }
+
+      // Cache successful result for 429 fallback
+      this.positionCache.set(address.toLowerCase(), result)
+
+      return result
+    } catch (error: any) {
+      const is429 = error?.response?.status === 429 || String(error).includes('429')
+      const cached = this.positionCache.get(address.toLowerCase())
+
+      if (is429) {
+        this.fetch429Count++
+        // Use stale cache instead of returning empty — SM signal preserved
+        if (cached) return cached
+      }
+
+      // Only log non-429 errors (429s are summarized at end of cycle)
+      if (!is429) {
+        console.error(`[NansenFeed] Error fetching position for ${address.slice(0, 10)}: ${error}`)
+      }
+      return cached || { positions: [], accountValue: 0, timestamp: new Date().toISOString() }
     }
   }
 
@@ -765,26 +784,30 @@ export class NansenFeed extends EventEmitter {
   async fetchAllPositions(): Promise<Map<string, AccountState>> {
     const addresses = Object.keys(WHALES)
     const results = new Map<string, AccountState>()
+    this.fetch429Count = 0
 
     // Fetch in small batches with generous delays to avoid 429s
-    // 43 addresses ÷ 3/batch = 15 batches × 500ms = ~7.5s spread (vs old: 43 in 500ms)
-    const batchSize = 3
+    // 83 addresses ÷ 2/batch = 42 batches × 1500ms = ~63s total
+    // Sequential within batches: no concurrent requests competing for rate limiter
+    const batchSize = 2
+    const batchDelayMs = 1500
     for (let i = 0; i < addresses.length; i += batchSize) {
       const batch = addresses.slice(i, i + batchSize)
-      const promises = batch.map(async (addr) => {
+
+      // Sequential fetching within batch (avoids concurrent API contention)
+      for (const addr of batch) {
         const state = await this.fetchPosition(addr)
-        return { address: addr.toLowerCase(), state }
-      })
-
-      const batchResults = await Promise.all(promises)
-      for (const { address, state } of batchResults) {
-        results.set(address, state)
+        results.set(addr.toLowerCase(), state)
       }
 
-      // 800ms between batches — leaves room for trading API calls
+      // Generous delay between batches — leaves headroom for trading API calls
       if (i + batchSize < addresses.length) {
-        await new Promise(resolve => setTimeout(resolve, 800))
+        await new Promise(resolve => setTimeout(resolve, batchDelayMs))
       }
+    }
+
+    if (this.fetch429Count > 0) {
+      console.warn(`[NansenFeed] ${this.fetch429Count} addresses hit 429 — used cached positions`)
     }
 
     this.allPositions = results
