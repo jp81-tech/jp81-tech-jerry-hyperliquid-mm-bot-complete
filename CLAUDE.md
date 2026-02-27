@@ -47,6 +47,58 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 27 lutego 2026
 
+### 62. Prediction Bias for ALL tokens — mm-follower integration (27.02)
+
+**Problem:** Prediction bias (h4 prediction z prediction-api, ±15% soft bid/ask size adjustment) działał TYLKO dla kPEPE w mm-pure. Tokeny mm-follower (BTC, ETH, SOL, HYPE, FARTCOIN) nie miały żadnego prediction bias — 100% decyzji opierało się na SM signals + regime.
+
+**Root cause:** Prediction bias był dodany tylko w branchu `if (pair === 'kPEPE')` wewnątrz `executeMultiLayerMM`. Branch `else` (wszystkie inne tokeny) nie miał tego kodu.
+
+**Dodatkowy problem przy deploy:** `src/mm_hl.ts` był edytowany lokalnie, ale nie SCP'd na serwer. mm-follower biegnie z `src/` via ts-node (nie z `dist/`), więc patching `dist/mm_hl.js` na serwerze nie miał efektu na mm-follower.
+
+**Fix w `src/mm_hl.ts` (linia 8443-8458):**
+```typescript
+} else {
+  // === PREDICTION BIAS: h4 prediction from prediction-api ===
+  try {
+    await this.fetchPrediction(symbol)
+    const predBias = this.getPredictionBias(symbol)
+    if (predBias.reason) {
+      sizeMultipliers.bid *= predBias.bidMult
+      sizeMultipliers.ask *= predBias.askMult
+      if (this.tickCount % 20 === 0) {
+        console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
+      }
+    }
+  } catch {
+    // prediction-api down — no bias applied, continue normally
+  }
+
+  gridOrders = this.gridManager!.generateGridOrders(...)
+}
+```
+
+**Pipeline position:** W `executeMultiLayerMM`, `else` branch (non-kPEPE), PRZED `generateGridOrders()`. Multiplicative z innymi modulami (SM signals, regime, etc.).
+
+**Verified live (all 5 mm-follower tokens + kPEPE):**
+```
+📊 [PREDICTION_BIAS] BTC:      h4=BEARISH -0.80% conf=54% → bid×0.97 ask×1.04
+📊 [PREDICTION_BIAS] ETH:      h4=BEARISH -1.31% conf=53% → bid×0.96 ask×1.07
+📊 [PREDICTION_BIAS] SOL:      h4=BEARISH -1.41% conf=53% → bid×0.95 ask×1.07
+📊 [PREDICTION_BIAS] HYPE:     h4=BEARISH -1.12% conf=58% → bid×0.96 ask×1.06
+📊 [PREDICTION_BIAS] FARTCOIN: h4=BEARISH -1.82% conf=54% → bid×0.94 ask×1.09
+📊 [PREDICTION_BIAS] kPEPE:    h4=BEARISH -1.13% conf=51% → bid×0.96 ask×1.06
+```
+
+**Efekt:** Przy BEARISH h4 prediction — zmniejszone bidy (mniej kupowania), zwiększone aski (agresywniejsze shortowanie). Przy BULLISH — odwrotnie. Soft bias ±4-9% zależnie od siły predykcji.
+
+**Kluczowe lekcje:**
+1. mm-follower biegnie z `src/mm_hl.ts` (ts-node), NIE z `dist/mm_hl.js` — zawsze SCP'uj src, nie dist
+2. `executeMultiLayerMM` vs `executeRegularMM` — oba procesy (mm-follower i mm-pure) używają `executeMultiLayerMM` bo `ENABLE_MULTI_LAYER=true` w `.env`
+3. `PREDICTION_BIAS` log drukuje się co 20 ticków (~20 min) — nie panikuj jeśli nie widzisz od razu
+
+**Pliki:** `src/mm_hl.ts` (+16)
+**Commit:** `c8d1925`
+
 ### 57. Copy-Trading Bot — Cień Generała v3 (27.02)
 
 **Nowy plik:** `scripts/general_copytrade.ts`
@@ -2563,7 +2615,7 @@ origin: git@github.com:jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete.git
 feat/next
 
 # Ostatni commit
-feat: kPEPE prediction weight redistribution — SM=0%, redistribute to technical/momentum/trend
+feat: prediction bias for ALL tokens — extend h4 ML prediction to mm-follower
 
 # PR #1
 https://github.com/jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete/pull/1
@@ -2830,7 +2882,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
-- **Prediction Bias (26.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na kPEPE grid. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. Pipeline: po Toxicity+TimeZone, PRZED Momentum Guard. Proaktywny (antycypuje) vs MG reaktywny (reaguje). Phase 1 — tylko kPEPE. Phase 2: SM-following pairs z w1/m1 horyzontami.
+- **Prediction Bias (26-27.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na bid/ask size. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. **Działa na WSZYSTKICH tokenach** (kPEPE w if-branch, reszta w else-branch `executeMultiLayerMM`). kPEPE: po Toxicity+TimeZone, PRZED Momentum Guard. Reszta: PRZED `generateGridOrders()`. Multiplicative z innymi modułami. Log: `📊 [PREDICTION_BIAS]` co 20 ticków (~20 min). **WAŻNE:** mm-follower biegnie z `src/` (ts-node), nie z `dist/` — zmiany muszą być SCP'd do `src/mm_hl.ts` na serwerze.
 - **Multipliers = ROZMIAR, nie cena**: `bid×0.81` znaczy bidy mają 81% normalnego rozmiaru ($81 zamiast $100/level). Ceny orderów (L1=18bps, L2=30bps od mid) się NIE zmieniają. Każdy moduł (Toxicity, TimeZone, Prediction, MG) mnoży `sizeMultipliers.bid`/`.ask` — wynik końcowy to iloczyn wszystkich. Gdy moduły się zgadzają (np. oba BEARISH) → silna redukcja/wzmocnienie. Gdy się nie zgadzają → wzajemna neutralizacja.
 - **kPEPE mixed case token**: Hyperliquid API wymaga dokładnie `kPEPE` (mała `k`). `toUpperCase()` zamienia na `KPEPE` → HTTP 500. Fix: `normalizeToken()` w dashboard-api.ts z `MIXED_CASE_TOKENS` mapą. Dotyczy WSZYSTKICH endpointów prediction-api: `/predict/`, `/verify/`, `/predict-xgb/`, `/xgb-features/`.
 - **Copy-trading bot (27.02)**: `scripts/general_copytrade.ts`, PM2 `copy-general` (id 49). Czyta `/tmp/vip_spy_state.json` co 30s, kopiuje NOWE pozycje Generała po $500 fixed (IOC 30bps slippage). Baseline seeding: na starcie zapisuje snapshot istniejących pozycji i nie kopiuje ich. State: `/tmp/copy_general_state.json`. Tryby: `--dry-run` (domyślny) / `--live`. Żeby włączyć live: ustawić `COPY_PRIVATE_KEY` + zmienić args na `--live` w `ecosystem.config.cjs`.

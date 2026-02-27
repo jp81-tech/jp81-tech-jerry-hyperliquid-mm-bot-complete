@@ -4649,3 +4649,137 @@ SM dla kPEPE wroci gdy spelni sie jedno z:
 - SM spot activity na PEPE >$500K/tydzien (smart money zaczyna handlowac spotem)
 
 Do tego czasu — kPEPE predykcje opieraja sie w 100% na technice, momentum i trendzie. I to jest szczere, bo to sa jedyne sygnaly ktore naprawde mamy.
+
+---
+
+## Rozdzial 24: Prediction Bias dla wszystkich tokenow — lekcja o deploy pipeline
+
+### Problem: jedna galaz kodu, dwa swiaty
+
+Mielismy fajny feature — prediction bias. Bot fetchowal h4 prognozę z naszego ML modelu (prediction-api, port 8090) i uzywal jej jako soft ±15% bias na rozmiar orderow. BEARISH prediction → mniejsze bidy (mniej kupowania), wieksze aski (agresywniejsze shortowanie). BULLISH → odwrotnie.
+
+Ale dzialal tylko na kPEPE. Piec innych tokenow (BTC, ETH, SOL, HYPE, FARTCOIN) — zero prediction bias. 100% decyzji SM signals + regime gating. ML model pracowal, mial dobre predykcje dla wszystkich tokenow, ale nikt ich nie konsumował.
+
+### Architektura: dwie sciezki wykonania
+
+W `mm_hl.ts` jest metoda `executeMultiLayerMM` ktora obsluguje generowanie grida. Wewnatrz jest rozgalezienie:
+
+```typescript
+if (pair === 'kPEPE') {
+  // ... Toxicity Engine, TimeZone, Prediction Bias, Momentum Guard ...
+  gridOrders = this.gridManager.generateGridOrdersCustom(...)
+} else {
+  // ... reszta tokenow — tutaj brakowalo prediction bias ...
+  gridOrders = this.gridManager.generateGridOrders(...)
+}
+```
+
+kPEPE ma swoj bogaty pipeline (10+ modulow). Reszta tokenow ma prostszy pipeline. Prediction bias zostal dodany do kPEPE i... nikt nie pomyslal o reszcie.
+
+### Fix: 16 linii kodu
+
+Dodanie prediction bias do else branchu to 16 linii:
+
+```typescript
+} else {
+  try {
+    await this.fetchPrediction(symbol)
+    const predBias = this.getPredictionBias(symbol)
+    if (predBias.reason) {
+      sizeMultipliers.bid *= predBias.bidMult
+      sizeMultipliers.ask *= predBias.askMult
+    }
+  } catch {
+    // prediction-api down — continue normally
+  }
+
+  gridOrders = this.gridManager.generateGridOrders(...)
+}
+```
+
+Proste. Ale potem zaczela sie prawdziwa lekcja.
+
+### Lekcja 1: Skad biegnie kod?
+
+Po dodaniu kodu lokalnie i patchowaniu `dist/mm_hl.js` na serwerze — zero efektu. Zero logow, zero prediction bias. Dwa dni debugowania.
+
+Root cause: **mm-follower biegnie z `src/mm_hl.ts` przez ts-node, NIE z `dist/mm_hl.js`**.
+
+```
+ecosystem.config.cjs:
+  script: "src/mm_hl.ts"          ← to jest zrodlo prawdy
+  interpreter_args: "--experimental-loader ts-node/esm"
+```
+
+ts-node kompiluje TypeScript w locie do JavaScript. Nie uzywa katalogu `dist/`. Wiec caly czas patchowalismy ZLY PLIK.
+
+**Lekcja: Zanim zaczniesz debugowac, sprawdz KTORY plik jest wykonywany.** `pm2 show <process>` pokaze `script path`. Jesli to `src/*.ts` — zmieniaj src. Jesli to `dist/*.js` — zmieniaj dist. Nigdy nie zakladaj.
+
+### Lekcja 2: src vs dist — dwie prawdy
+
+W naszym projekcie mamy ciekawy podzial:
+- **mm-follower** i **mm-pure** — biegna z `src/` (ts-node)
+- **prediction-api** — biegnie z `dist/` (skompilowany JS)
+
+Dlaczego? Bo `tsc` (TypeScript compiler) nie kompiluje czysto — sa pre-existing type errors w roznych czesciach codebase. `TS_NODE_TRANSPILE_ONLY=1` pomija type checking i kompiluje "na zywo". `dist/` jest wynikiem starszej kompilacji, ktora trzeba patchowac recznie.
+
+To znaczy ze:
+- Zmiana w `src/mm_hl.ts` → SCP na serwer → restart mm-follower/mm-pure
+- Zmiana w prediction-api → patch `dist/prediction/*.js` na serwerze → restart prediction-api
+
+**Dwie rozne procedury deploy dla roznych procesow.** Nie jest to idealne, ale tsc nie kompiluje czysto, wiec z tym zyjemy.
+
+### Lekcja 3: Log throttling moze cie zmylic
+
+`PREDICTION_BIAS` log drukuje sie co 20 tickow (~20 minut):
+
+```typescript
+if (this.tickCount % 20 === 0) {
+  console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
+}
+```
+
+Kod DZIALA (modyfikuje sizeMultipliers) nawet gdy log nie drukuje. Ale z perspektywy debuggera — zero logow = "kod nie dziala". Dodanie tymczasowego unconditional `console.log` przed throttled logiem od razu pokaze czy kod jest osiagany.
+
+**Zasada debugowania:** Gdy szukasz czy kod w ogole sie wykonuje — NIGDY nie polegaj na throttled logach. Dodaj tymczasowy unconditional log, zweryfikuj, usun.
+
+### Lekcja 4: executeMultiLayerMM vs executeRegularMM
+
+Poczatkowo myslalismy ze mm-follower uzywa `executeRegularMM` (prostsza metoda z 1 bidem + 1 askiem). To by tlumaczylo brak prediction bias — kod byl w `executeMultiLayerMM`.
+
+Ale sprawdzenie logow (`[DEBUG ENTRY] executeMultiLayerMM called for BTC`) i konfiguracji (`ENABLE_MULTI_LAYER=true` w .env) potwierdzilo ze OBA procesy uzywaja `executeMultiLayerMM`.
+
+Routing:
+```typescript
+async executePairMM(pair, assetCtxs) {
+  if (this.config.enableMultiLayer && this.gridManager) {
+    return await this.executeMultiLayerMM(pair, assetCtxs)  // ← tu trafiaja oba
+  }
+  return await this.executeRegularMM(pair, assetCtxs)       // ← dead code w naszym setupie
+}
+```
+
+**Lekcja: Nie zakladaj sciezki wykonania — zweryfikuj.** Jeden `grep` w logach lub jeden `console.log` w kodzie oszczedzi godziny slepego debugowania.
+
+### Wyniki
+
+Po poprawce — 6 tokenow z prediction bias:
+
+| Token | h4 Prediction | Bid Mult | Ask Mult |
+|-------|--------------|----------|----------|
+| BTC | BEARISH -0.80% | ×0.97 | ×1.04 |
+| ETH | BEARISH -1.31% | ×0.96 | ×1.07 |
+| SOL | BEARISH -1.41% | ×0.95 | ×1.07 |
+| HYPE | BEARISH -1.12% | ×0.96 | ×1.06 |
+| FARTCOIN | BEARISH -1.82% | ×0.94 | ×1.09 |
+| kPEPE | BEARISH -1.13% | ×0.96 | ×1.06 |
+
+Prediction bias jest **multiplicative** z innymi modulami. Jesli SM mowi SHORT (ask×1.50) i prediction mowi BEARISH (ask×1.07) — wynik to ask×1.61. Moduly ktore sie zgadzaja wzmacniaja sygnal. Moduly ktore sie nie zgadzaja — neutralizuja sie.
+
+### Podsumowanie lekcji
+
+1. **Sprawdz script path** przed debugowaniem — `pm2 show` pokaze skad biegnie kod
+2. **src vs dist** — rozne procesy moga biegac z roznych zrodel
+3. **Unconditional logs** do debugowania, nie throttled
+4. **Weryfikuj sciezke wykonania** logami, nie zakladaj
+5. **16 linii kodu, 2 dni debugowania** — wiekszosc czasu programisty to zrozumienie problemu, nie pisanie rozwiazania
