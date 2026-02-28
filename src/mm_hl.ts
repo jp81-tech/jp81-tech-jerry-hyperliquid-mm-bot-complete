@@ -8141,9 +8141,14 @@ class HyperliquidMMBot {
               : 0
 
           // 3. Proximity to resistance/support (20% weight)
-          // Use body-based S/R (filters wick noise from flash crashes)
-          const mgResistBody = mvAnalysis?.resistanceBody4h ?? 0
-          const mgSupportBody = mvAnalysis?.supportBody4h ?? 0
+          // Use SHORT-TERM body-based S/R from 1h candles (24h lookback)
+          // 4h S/R (30 candles = 5 days) is too wide for volatile memecoins — price never enters zone
+          // 1h S/R (24 candles = 24h) gives tighter, actionable proximity signals
+          const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
+          const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
+          // Fallback to 4h S/R if 1h not available
+          const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+          const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
           // Dynamic thresholds: ATR-based (adapts to volatility regime)
           // Strong zone = 1×ATR from level, moderate zone = 2×ATR
           const mgStrongZone = mgAtr > 0 && midPrice > 0 ? mgAtr / midPrice : 0.01
@@ -8233,7 +8238,8 @@ class HyperliquidMMBot {
               `📈 [MOMENTUM_GUARD] ${pair}: score=${momentumScore.toFixed(2)} ` +
               `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
               `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
-              `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}`
+              `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}` +
+              ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
             )
           }
 

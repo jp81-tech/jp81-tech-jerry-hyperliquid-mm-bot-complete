@@ -6235,3 +6235,73 @@ To jest klasyczny "streetlight effect" — szukasz kluczy pod latarnią, bo tam 
 |------|--------|
 | `src/mm_hl.ts` | `PURE_MM_REGIME_BYPASS` → `PURE_MM_REGIME_BYPASS_override` + usunięcie MIN_PROFIT bypass |
 | `src/utils/grid_manager.ts` | Nie zmieniony — BIAS LOCK + override mechanism już istniały |
+
+---
+
+## Rozdzial 40: Slepa Plamka — Kiedy Bot Ma Oczy Ale Nie Widzi
+
+> "Masz radar, ale antena wskazuje na Marsa zamiast na autostradę przed tobą."
+
+### Problem
+
+Momentum Guard — system który dostosowuje rozmiary orderów na podstawie 3 sygnałów (momentum, RSI, proximity S/R) — miał **20% martwej wagi**. Sygnał proximity (bliskość do support/resistance) był ZAWSZE zero. Bot reagował na momentum i RSI, ale kompletnie ignorował czy cena jest blisko kluczowego poziomu.
+
+To tak jakby kierowca widział prędkościomierz i obrotomierz, ale miał zaklejone lusterko boczne.
+
+### Dlaczego prox=0.00?
+
+Momentum Guard brał support i resistance z **30 candles 4h** — czyli 5 dni danych. kPEPE (memecoin z szaloną zmiennością) spadło z $0.00436 do $0.00345 w ciągu tych 5 dni. Range = **26%**.
+
+Potem sprawdzał: "czy cena jest blisko S/R?" używając **ATR-based zones** (1.6% strong, 3.2% moderate). Ale cena ($0.00366) była:
+- 18.7% poniżej resistance — daleko
+- 6.1% powyżej support — daleko
+
+Zone 3.2% vs odległość 18.7%/6.1% → **cena nigdy nie wchodzi w zone**. Bot miał radar o zasięgu 3 km, ale najbliższy obiekt był 19 km dalej.
+
+### Analogia: Lornetka vs Lupa
+
+```
+4h S/R (30 candles = 5 dni):    🔭 LORNETKA
+  → Widzi dalekie góry i doliny
+  → Dobre do identyfikacji trendu
+  → Za daleko do nawigacji "tu i teraz"
+
+1h S/R (24 candles = 24h):      🔍 LUPA
+  → Widzi najbliższe przeszkody
+  → Dobre do reagowania "w tym momencie"
+  → Zbyt krótkie na trend
+```
+
+Bot potrzebował **obu**. MarketVision używał lornetki do wykrywania trendu (4h=bear), ale Momentum Guard próbował nawigować lornekti zamiast lupy.
+
+### Fix
+
+Dodaliśmy **1h body-based S/R** (24 candles = 24h lookback) do MarketVision. Momentum Guard teraz używa tych krótkoterminowych poziomów do proximity, z fallback na 4h gdy 1h nie jest dostępne.
+
+```
+PRZED (4h S/R):
+  Resistance: $0.004360 (18.7% od ceny) → prox=0.00 → DEAD
+  Support:    $0.003449 (6.1% od ceny)  → prox=0.00 → DEAD
+
+PO (1h S/R):
+  Resistance: $0.003682 (0.3% od ceny)  → prox=0.80 → ALIVE!
+  Support:    $0.003449 (6.0% od ceny)  → prox=0.00 → daleko (OK)
+```
+
+0.3% od resistance → bot widzi że cena jest tuż pod 24h high → sygnał "overbought" → dostosowuje grid.
+
+### Kluczowa lekcja: Testuj Założenia
+
+Ten bug istniał od tygodni. Nikt nie sprawdził CZY proximity faktycznie cokolwiek robi. Logi mówiły `prox=0.00` — a zero wygląda normalnie jeśli nie wiesz czego szukasz.
+
+**Dobre praktyki:**
+1. **Dodaj debug log z raw values** — nie tylko wynik (prox=0.00), ale dane wejściowe (res=0.004360, sDist=18.7%)
+2. **Sprawdź edge case** — "co jeśli range S/R jest dużo większy niż ATR zone?" → cena nigdy nie trafia
+3. **Kwestionuj "to działa"** — score=0.00 może znaczyć "market flat" albo "sygnał zepsuty". Bez kontekstu nie odróżnisz
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/signals/market_vision.ts` | Nowe pola `supportBody12h` / `resistanceBody12h` z 24 candles 1h |
+| `src/mm_hl.ts` | MG proximity używa 1h S/R z fallback na 4h, S/R values w logu |

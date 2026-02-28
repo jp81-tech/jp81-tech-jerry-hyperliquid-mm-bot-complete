@@ -291,6 +291,8 @@ export type PairAnalysis = {
   resistance4h: number; // HTF Resistance Price (High of last 30 4h candles)
   supportBody4h: number; // HTF Support from candle bodies (min of O/C) — wick-filtered
   resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — wick-filtered
+  supportBody12h: number; // Short-term support (last 12 1h candles) for MG proximity
+  resistanceBody12h: number; // Short-term resistance (last 12 1h candles) for MG proximity
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -433,6 +435,18 @@ export class MarketVisionService {
         // B. MTF Context: 1h Candles for volatility and tactical bias
         const candles = await this.api.getCandles(pair, '1h', now - 7 * 24 * 60 * 60 * 1000, now);
         if (!candles || candles.length < 50) continue;
+
+        // Short-term S/R from 1h candles (last 24h) — for Momentum Guard proximity
+        // 4h S/R (30 candles = 5 days) too wide for volatile memecoins — price never enters ATR zone
+        // 1h S/R (24 candles = 24h) gives tighter, actionable proximity signals
+        let supportBody12h = 0;
+        let resistanceBody12h = 0;
+        const srLookback = Math.min(24, candles.length);
+        if (srLookback >= 12) {
+          const recent1h = candles.slice(-srLookback);
+          supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
+          resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
+        }
 
         // C. STF Context: 15m Candles for "Golden Ticket" Entry
         // We fetch last 2 days (48h) of 15m candles
@@ -693,6 +707,8 @@ export class MarketVisionService {
           resistance4h,
           supportBody4h,
           resistanceBody4h,
+          supportBody12h,
+          resistanceBody12h,
           supportDist: distSup,
           resistanceDist: distRes,
           activeCandlePattern,

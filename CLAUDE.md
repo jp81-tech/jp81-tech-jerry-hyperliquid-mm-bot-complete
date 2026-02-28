@@ -45,6 +45,69 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
+## Zmiany 1 marca 2026
+
+### 78. Momentum Guard 1h S/R — fix prox=0.00 for kPEPE (01.03)
+
+**Problem:** Momentum Guard proximity signal (`prox`) zawsze 0.00 dla kPEPE — bot nie widział resistance/support. Efekt: 20% wagi MG score (proximity S/R) było martwe. Bot reagował tylko na momentum (50%) i RSI (30%), ignorując bliskość kluczowych poziomów cenowych.
+
+**Root cause:** S/R obliczane z **30 candles 4h (5 dni lookback)** — zbyt szeroki zakres dla volatile memecoina. kPEPE spadło z $0.004360 do $0.003449 w 5 dni (26% range). ATR-based proximity zone = 1.6% (strong) / 3.2% (moderate). Cena ($0.003660) była 18.7% od resistance i 6.1% od support — obie daleko poza zone. `prox` zawsze 0.
+
+**Diagnoza (debug log):**
+```
+PRZED: resBody=0.004360 supBody=0.003449 rDist=18.7% sDist=6.0% zone=1.5%/3.0% → prox=0.00
+```
+
+**Rozwiązanie:** Dodano **1h S/R** (24 candles = 24h lookback) — krótkoterminowe support/resistance z 1h candle bodies. Tighter range → cena wchodzi w ATR-based zone → proximity signal aktywny.
+
+**A) Nowe pola w `PairAnalysis` (`market_vision.ts`):**
+```typescript
+supportBody12h: number;      // Short-term support (last 24 1h candles)
+resistanceBody12h: number;   // Short-term resistance (last 24 1h candles)
+```
+
+**B) Obliczenie z istniejących 1h candles (zero nowych API calls):**
+```typescript
+const srLookback = Math.min(24, candles.length);
+if (srLookback >= 12) {
+  const recent1h = candles.slice(-srLookback);
+  supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
+  resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
+}
+```
+
+**C) Momentum Guard używa 1h S/R z fallback na 4h (`mm_hl.ts`):**
+```typescript
+const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
+const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
+const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+```
+
+**Wynik live:**
+```
+PRZED: res=0.004360 (18.7% od ceny) → prox=0.00, score=0.00
+PO:    res=0.003682 (0.3% od ceny)  → prox=0.80, score=0.16
+```
+
+| Metryka | Przed (4h S/R) | Po (1h S/R) |
+|---------|---------------|-------------|
+| Resistance | $0.004360 (18.7%) | **$0.003682 (0.3%)** |
+| Support | $0.003449 (6.0%) | $0.003449 (6.0%) |
+| prox signal | 0.00 (dead) | **0.80 (active!)** |
+| MG score | 0.00 | **0.16** |
+
+**D) S/R values w logu MG:**
+```
+📈 [MOMENTUM_GUARD] kPEPE: score=0.16 (mom=0.00 rsi=0.00 prox=0.80) → bid×1.28 ask×0.72 | S/R(1h): R=$0.003682 S=$0.003449
+```
+
+**Dotyczy WSZYSTKICH par** w activePairs (kPEPE, LIT, ETH, BTC, HYPE, SOL) — 1h candles już fetchowane przez MarketVision, zero dodatkowych API calls.
+
+**Pliki:** `src/signals/market_vision.ts` (+12), `src/mm_hl.ts` (+8/-3)
+
+---
+
 ## Zmiany 28 lutego 2026
 
 ### 77. MIN_PROFIT + BIAS LOCK fix — 0 orders deadlock resolved (28.02)
@@ -3561,6 +3624,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Momentum Guard (26.02)**: Asymetryczny grid dla kPEPE PURE_MM. 3 sygnały: 1h momentum (50%), RSI (30%), proximity S/R (20%). Score -1.0 do +1.0. Pozytywny (pump) → redukuj bidy, zwiększ aski. Negatywny (dump) → mirror. 3 levele: strong (0.7), moderate (0.4), light (0.2). Config w `short_only_config.ts`, logika w kPEPE sekcji `mm_hl.ts`. Logi: `📈 [MOMENTUM_GUARD]` co 20 ticków lub przy |score| >= 0.4.
 - **Momentum Guard v2→v3 (26.02)**: v2 miał 7 fixów: body-based S/R, breakout math, ATR proximity, ATR pumpThreshold, dump asymmetry, position-aware guard, micro-reversal. **v3 usunął position-aware guard** (punkt 6) — `skipBidReduce=pumpAgainstShort` i `skipAskReduce=dumpAgainstLong` łamały mean-reversion. Teraz: DUMP→asks×0.10 (trzymaj longi), PUMP→bids×0.10 (trzymaj shorty). Jedyny skip: micro-reversal (cena odbiła 0.3% od extremum → odblokuj closing). Flagi: `💎SHORT+PUMP→holding`, `💎LONG+DUMP→holding`, `🔄MICRO_REVERSAL→closing_allowed`.
 - **Momentum Guard scope**: TYLKO kPEPE (PURE_MM). SM-following pary (LIT, FARTCOIN, HYPE) używają Pump Shield, nie MG. MG jest w kPEPE sekcji `if (pair === 'kPEPE')` po Toxicity Engine.
+- **Momentum Guard 1h S/R (01.03)**: Proximity signal teraz używa 1h S/R (24 candles = 24h lookback) zamiast 4h S/R (30 candles = 5 dni). Pola: `supportBody12h`, `resistanceBody12h` w PairAnalysis. Fallback na 4h gdy 1h niedostępne. Fix: prox=0.00 → prox=0.80 (cena 0.3% od 24h resistance). Log: `S/R(1h): R=$X S=$X`. Zero dodatkowych API calls (1h candles już fetchowane).
 - **Dynamic TP (26.02)**: Rozszerza closing-side spread ×1.5 gdy micro-reversal + pozycja na winning side. SHORT+pump_stalling → bid spread ×1.5 (TP dalej, łapie więcej spadku). LONG+dump_stalling → ask spread ×1.5. Modyfikuje `gridBidMult`/`gridAskMult`. Config: `tpSpreadWidenerEnabled=true`, `tpSpreadMult=1.5`. Log: `🎯 [DYNAMIC_TP]`.
 - **Inventory SL (26.02)**: Panic mode gdy |skew|>40% AND drawdown > 2.5×ATR%. SHORT underwater → asks=0 + bids×2.0. LONG underwater → bids=0 + asks×2.0. Guard: `drawdownPct > 0` (tylko gdy underwater). Config: `inventorySlEnabled=true`, `maxSkewSlThreshold=0.40`, `slAtrMultiplier=2.5`, `panicClosingMult=2.0`. Log: `🚨 [INVENTORY_SL]`.
 - **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
