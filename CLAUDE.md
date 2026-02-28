@@ -120,6 +120,50 @@ kPEPE h4: "58%" (inflated) → **40.4%** (genuine +7.4% edge over 33% random bas
 
 **Deploy:** SCP → server, full retrain all 9 tokens, `pm2 restart prediction-api`. All 44 models loaded, predictions verified as non-uniform and differentiated.
 
+### 71. XGBoost Accuracy Illusion Fix — ALL tokens, per-token thresholds for BTC/ETH/SOL/XRP/ZEC (28.02)
+
+**Problem:** Odkrycie #70 (kPEPE accuracy illusion) dotyczyło WSZYSTKICH tokenów. BTC h4 miał "70% accuracy" ale z progiem ±1.5% → 88% etykiet NEUTRAL → baseline=88% → **edge = -18%** (GORZEJ niż random). Podobnie ETH h4 (79% NEUTRAL), SOL h4 (73% NEUTRAL), XRP h4 (76% NEUTRAL).
+
+**Root cause:** Globalne progi ±0.5%/±1.5%/±3.0% (h1/h4/h12) za szerokie dla BTC (mediana h4 ~0.44%) i ETH (mediana h4 ~0.60%). Model uczył się "always predict NEUTRAL".
+
+**Fix: Per-token thresholds for ALL 9 tokens based on median price changes**
+
+Cel: ~35-40% NEUTRAL labels (threshold ≈ p30-p35 of abs price changes).
+
+| Token | h1 | h4 | h12 | OLD h4 NEUTRAL | NEW h4 NEUTRAL | Drop |
+|-------|-----|-----|------|---------------|---------------|------|
+| **BTC** | ±0.15% | **±0.3%** | ±0.6% | **88%** | **37%** | **-50pp** |
+| **ETH** | ±0.2% | **±0.4%** | ±0.9% | **79%** | **36%** | **-41pp** |
+| **SOL** | ±0.3% | **±0.6%** | ±1.2% | **73%** | **40%** | **-33pp** |
+| **XRP** | ±0.3% | **±0.5%** | ±1.0% | **76%** | **38%** | **-37pp** |
+| **ZEC** | ±0.6% | **±1.2%** | ±2.2% | ~60% | ~38% | -22pp |
+| kPEPE | ±0.3% | ±0.8% | ±2.0% | 67% | 43% | -24pp |
+
+**Fix: Per-token XGBoost params for majors**
+
+Majors (BTC/ETH/SOL/XRP/ZEC) use moderate regularization (depth 4, n_estimators 300, lr 0.03, subsample 0.8). Volatile tokens (kPEPE/FARTCOIN/LIT/HYPE) use aggressive regularization via shared `_REGULARIZED_PARAMS` dict (depth 3, colsample 0.5, min_child_weight 10).
+
+**Accuracy vs baseline after full retrain (best horizons):**
+
+| Token | Horizon | Accuracy | Baseline | Edge |
+|-------|---------|----------|----------|------|
+| ETH | h1 | 38.6% | 35% | **+3.5%** |
+| SOL | h4 | 38.3% | 34% | **+4.2%** |
+| HYPE | h1 | 38.9% | 34% | **+4.7%** |
+| kPEPE | h4 | 40.2% | 38% | **+2.4%** |
+| FARTCOIN | h1 | 36.8% | 33% | **+3.4%** |
+| BTC | h4 | 40.6% | 40% | +0.9% |
+
+**Key observation:** w1/m1 long horizons have negative edge for nearly all tokens — temporal shift problem (180-day backfill data represents different market regime than recent data). Not fixable with threshold tuning alone.
+
+**Zmodyfikowane pliki (1):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_train.py` | Extended `TOKEN_THRESHOLDS` to all 9 tokens, `_REGULARIZED_PARAMS` shared dict, `TOKEN_XGB_PARAMS` for majors |
+
+**Deploy:** SCP → server, full retrain all 9 tokens. `pm2 restart prediction-api`.
+
 ### 69. XGBoost Flat Tree Fix + Feature File Bridge — predictions from 33.3% uniform to real (28.02)
 
 **Problem:** XGBoost predictions returned 33.3%/33.3%/33.3% (uniform) for ALL tokens and ALL horizons — effectively random. Two independent root causes discovered and fixed.

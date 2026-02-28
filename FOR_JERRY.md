@@ -5536,3 +5536,137 @@ PO:    kPEPE h4 = 40.4% (prawdziwa, baseline 33%)
 4. **Inverse frequency = sprawiedliwosc** — bez tego model optymalizuje accuracy (= predict majority class). Z tym model optymalizuje REAL accuracy (= trafienie kazdej klasy proporcjonalnie).
 
 5. **Dead features sa toksyczne** — 30/62 features = 0 to nie "neutralne", to szum. `colsample_bytree=0.5` pomaga bo losowo pomija wiele z nich w kazdym drzewie.
+
+---
+
+## Rozdzial 34: Accuracy Illusion — Kiedy "70% Accuracy" Jest GORSZE Niz Losowe Zgadywanie
+
+*Albo: jak BTC h4 model udawal geniusza, a w rzeczywistosci byl gorszy niz moneta*
+
+### "Houston, We Have a Problem" — Skala Iluzji
+
+Po naprawieniu kPEPE (Rozdzial 33), zapytalismy: **czy inne tokeny maja ten sam problem?**
+
+Odpowiedz: TAK, i to GORSZY.
+
+| Token | h4 "Accuracy" | h4 NEUTRAL % | Baseline | **Real Edge** |
+|-------|--------------|-------------|----------|---------------|
+| **BTC** | 70.0% | **88%** | 88% | **-18%** (gorszy niz random!) |
+| **ETH** | 56.7% | **79%** | 79% | **-22%** |
+| **SOL** | 58.3% | **73%** | 73% | **-15%** |
+| **XRP** | 58.4% | **76%** | 76% | **-18%** |
+| kPEPE | 58.0% | 67% | 67% | -9% |
+
+BTC h4 mial **najgorsza iluzje**: model mowil "NEUTRAL" w 88% przypadkow i osiagal "70% accuracy" — bo 88% etykiet BYLO NEUTRAL! To jak przepowiadanie pogody w Dubaju: "jutro bedzie slonecznie" — trafisz w 95% przypadkow, ale to nie jest zaden talent.
+
+### Analogia: Termometr Kliniczny
+
+Wyobraz sobie termometr ktory mierzy temperature ciala, ale ma skale:
+- **Normalny**: 35-42°C
+- **Goraczka**: > 42°C
+- **Hipotermia**: < 35°C
+
+Z taka skala 99% pacjentow to "normalny" — nawet z 39°C goraczka. Termometr wyglada na "99% dokladny" ale jest kompletnie bezuzyteczny.
+
+Nasz XGBoost mial taki sam problem. Progi ±1.5% dla h4 to "termometr z za szerokim zakresem":
+
+```
+BTC h4 mediana ruchu: 0.44%
+Prog: ±1.5%
+
+Wiec ruch 0.44% (mediana!) → NEUTRAL
+Ruch 1.0% (duzy jak na BTC!) → NEUTRAL
+Ruch 1.4% (ogromny!) → NEUTRAL
+
+Model: "NEUTRAL, NEUTRAL, NEUTRAL... oh patrz, 88% accuracy!"
+```
+
+### Fix: Progi Dopasowane do Kazdego Tokena
+
+Kluczowe odkrycie: **kazdy token ma inna volatilnosc**. BTC rusza sie po 0.44% w 4h, kPEPE po 1.0%, ZEC po 1.6%. Jednakowe progi = nonsens.
+
+Metoda kalibracji:
+1. Oblicz mediany ruchow cenowych per token per horyzont
+2. Ustaw prog na ~30-35 percentyl absolutnych zmian
+3. Cel: ~35-40% etykiet NEUTRAL
+
+```
+BTC h4: mediana 0.44% → prog ±0.3% → 37% NEUTRAL (was 88%!)
+ETH h4: mediana 0.60% → prog ±0.4% → 36% NEUTRAL (was 79%!)
+SOL h4: mediana 0.79% → prog ±0.6% → 40% NEUTRAL (was 73%!)
+XRP h4: mediana 0.68% → prog ±0.5% → 38% NEUTRAL (was 76%!)
+kPEPE h4: mediana 1.0% → prog ±0.8% → 43% NEUTRAL (was 67%!)
+```
+
+### Rozkład Etykiet — Przed vs Po (Confusion Matrix)
+
+Zobaczmy jak zmieniła sie dystrybucja klas:
+
+#### BTC h4 (4648 samples):
+```
+PRZED (±1.5%): SHORT= 338( 7%)  NEUTRAL=4092(88%)  LONG= 218( 4%)
+PO    (±0.3%): SHORT=1453(31%)  NEUTRAL=1748(37%)  LONG=1447(31%)
+                                          -50pp !!
+```
+
+BTC przeszedl z "88% jednej klasy" do "31/37/31" — prawie idealny balans! Model teraz WIDZI prawdziwe ruchy cenowe.
+
+#### kPEPE h4 (4364 samples):
+```
+PRZED (±1.5%): SHORT= 775(17%)  NEUTRAL=2926(67%)  LONG= 663(15%)
+PO    (±0.8%): SHORT=1326(30%)  NEUTRAL=1878(43%)  LONG=1160(26%)
+                                          -24pp
+```
+
+#### Porownanie DROP NEUTRAL across all tokens (h4):
+
+```
+Token    PRZED   PO     DROP
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BTC      88%  →  37%    -50pp  ← NAJWIEKSZY spadek!
+ETH      79%  →  36%    -41pp
+XRP      76%  →  38%    -37pp
+SOL      73%  →  40%    -33pp
+kPEPE    67%  →  43%    -24pp
+```
+
+### Accuracy po Naprawie — Uczciwe Liczby
+
+Po retrainingu ze skalibrowanymi progami:
+
+| Token | Horizon | Accuracy | Baseline | **Edge** |
+|-------|---------|----------|----------|----------|
+| HYPE | h1 | 38.9% | 34% | **+4.7%** |
+| SOL | h4 | 38.3% | 34% | **+4.2%** |
+| ETH | h1 | 38.6% | 35% | **+3.5%** |
+| FARTCOIN | h1 | 36.8% | 33% | **+3.4%** |
+| kPEPE | h4 | 40.2% | 38% | **+2.4%** |
+| BTC | h4 | 40.6% | 40% | +0.9% |
+
+Liczby sa nizsze, ale **PRAWDZIWE**. 38.9% z baseline 34% = +4.7% edge. To realna przewaga!
+
+Analogia: wczesniej miales "70% accuracy" w domowych pantofli na biezni (bieznia stala). Teraz masz "39% accuracy" ale na prawdziwej drodze (z gorkach, wiatrem, i innymi biegaczami). 39% na prawdziwej drodze > 70% na stojaco.
+
+### Dlaczego w1/m1 Nie Dzialaja?
+
+Ciekawe odkrycie: dlugie horyzonty (w1 = tydzien, m1 = miesiac) maja **negatywny edge** prawie dla kazdego tokena. Dlaczego?
+
+**Temporal shift** — dane treningowe (180 dni backfill) obejmuja rozne "rezimy rynkowe":
+- Sierpien-Pazdziernik 2025: BTC od $60K do $120K (bull run)
+- Grudzien-Luty 2026: BTC od $120K do $60K (bear market)
+
+Model wytrenowany na danych z bull runu probouje predyktowac bear market. To jak nauka jazdy w lecie i egzamin w srodku zimy na lodzie.
+
+Fix nie jest prosty — potrzeba albo wiecej danych z aktualnego rezimu, albo features ktore opisuja rezim (np. "czy jestesmy w bull czy bear market?").
+
+### Lekcje dla Inzynierow
+
+1. **"Accuracy" bez baseline to klamstwo** — ZAWSZE licz: `edge = accuracy - majority_class_baseline`. Edge < 0 = model jest GORSZY niz random. Edge 0 = model nie uczy sie nic. Edge > 0 = realna wartosc.
+
+2. **Progi klasyfikacji musza byc per-asset** — BTC i kPEPE nie zyja w tym samym swiecie volatilnosci. Globalny prog to lazy engineering.
+
+3. **Sprawdzaj WSZYSTKIE tokeny, nie tylko problematyczny** — kPEPE nas zaalarmowalo, ale BTC mial GORSZY problem. Nieintuicyjne! "Bardziej przewidywalny" token mial wieksza iluzje bo jego ruch miesci sie w wezszym przedziale.
+
+4. **Balansowanie klas to nie luksus, to koniecznosc** — Cel: 30-40% per klasa. Wyzej = model sie leniwi (predict majority). Nizej = za malo przykladow do nauki.
+
+5. **Temporal shift to cichy zabojca** — model na danych historycznych moze doskonale pasowac do przeszlosci ale byc bezwartosciowy w terazniejszosci. Szczegolnie na dlugich horyzontach (w1/m1) gdzie rezim rynkowy zmienia sie szybciej niz model sie uczy.
