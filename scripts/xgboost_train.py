@@ -93,9 +93,11 @@ FEATURE_NAMES = [
     "body_ratio", "wick_skew",
     # Multi-day trend (4)
     "change_7d", "change_10d", "dist_from_7d_high", "trend_slope_7d",
+    # BTC cross-market (4)
+    "btc_change_1h", "btc_change_4h", "btc_rsi", "btc_token_corr_24h",
 ]
 
-NUM_FEATURES = 49  # 11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day
+NUM_FEATURES = 53  # 11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day + 4 btc_cross
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -128,14 +130,16 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) not in (30, 45, NUM_FEATURES):
+            if not feat or len(feat) not in (30, 45, 49, NUM_FEATURES):
                 continue
 
             # Backward compat: pad old rows with zeros
             if len(feat) == 30:
-                feat = feat + [0.0] * 19  # 15 candle + 4 multi-day
+                feat = feat + [0.0] * 23  # 15 candle + 4 multi-day + 4 btc_cross
             elif len(feat) == 45:
-                feat = feat + [0.0] * 4   # 4 multi-day
+                feat = feat + [0.0] * 8   # 4 multi-day + 4 btc_cross
+            elif len(feat) == 49:
+                feat = feat + [0.0] * 4   # 4 btc_cross
 
             features.append(feat)
 

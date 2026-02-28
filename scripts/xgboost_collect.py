@@ -9,7 +9,7 @@ Runs every 15 min via cron. Computes 45 features from:
 Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
 Backfills labels (1h, 4h, 12h price change) for older rows.
 
-Feature vector (49 features):
+Feature vector (53 features):
   [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
           tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
           volumeRatio/5, volatility/10, bbWidth/20, ATR_%
@@ -22,6 +22,7 @@ Feature vector (49 features):
           doji, pin_bar_bull, pin_bar_bear, marubozu_bull, marubozu_bear,
           inside_bar, three_crows, three_soldiers, spinning_top, body_ratio, wick_skew
   [45-48] Multi-day trend: change_7d, change_10d, distance_from_7d_high, trend_slope_7d
+  [49-52] BTC cross: btc_change_1h, btc_change_4h, btc_rsi, btc_token_corr_24h
 """
 
 import json
@@ -605,6 +606,83 @@ def compute_multiday_features(token: str, current_price: float) -> list[float]:
     ]
 
 
+def compute_btc_cross_features(token: str, btc_candles: list[dict], token_candles: list[dict]) -> list[float]:
+    """Compute 4 BTC cross-market features.
+
+    BTC price action influences all altcoins. These features give the model
+    cross-market context — e.g. "BTC just dumped 3%, altcoins will follow".
+
+    Features [49-52]:
+      [49] btc_change_1h       — BTC 1h price change, tanh(change/10) [-1, 1]
+      [50] btc_change_4h       — BTC 4h price change, tanh(change/20) [-1, 1]
+      [51] btc_rsi             — BTC RSI / 100 [0, 1]
+      [52] btc_token_corr_24h  — 24h Pearson correlation of BTC vs token returns [-1, 1]
+    """
+    zeros = [0.0] * 4
+
+    # For BTC itself, these would be redundant with existing tech features
+    if token == "BTC":
+        return zeros
+
+    if len(btc_candles) < 25:
+        return zeros
+
+    btc_closes = [c["c"] for c in btc_candles]
+    n = len(btc_closes)
+
+    # [49] BTC 1h change
+    btc_change_1h = 0.0
+    if n >= 2 and btc_closes[-2] > 0:
+        btc_change_1h = (btc_closes[-1] - btc_closes[-2]) / btc_closes[-2] * 100
+    btc_change_1h_norm = math.tanh(btc_change_1h / 10)
+
+    # [50] BTC 4h change
+    btc_change_4h = 0.0
+    if n >= 5 and btc_closes[-5] > 0:
+        btc_change_4h = (btc_closes[-1] - btc_closes[-5]) / btc_closes[-5] * 100
+    btc_change_4h_norm = math.tanh(btc_change_4h / 20)
+
+    # [51] BTC RSI
+    btc_rsi_vals = calculate_rsi(btc_closes)
+    btc_rsi_norm = (btc_rsi_vals[-1] / 100) if btc_rsi_vals else 0.5
+
+    # [52] 24h Pearson correlation between BTC and token returns
+    corr = 0.0
+    token_closes = [c["c"] for c in token_candles]
+    if len(btc_closes) >= 25 and len(token_closes) >= 25:
+        # Last 24 hourly returns
+        btc_rets = [(btc_closes[i] - btc_closes[i - 1]) / btc_closes[i - 1]
+                    for i in range(len(btc_closes) - 24, len(btc_closes))
+                    if btc_closes[i - 1] > 0]
+        tok_rets = [(token_closes[i] - token_closes[i - 1]) / token_closes[i - 1]
+                    for i in range(len(token_closes) - 24, len(token_closes))
+                    if token_closes[i - 1] > 0]
+
+        if len(btc_rets) >= 20 and len(tok_rets) >= 20:
+            # Align lengths (use min)
+            min_len = min(len(btc_rets), len(tok_rets))
+            br = btc_rets[-min_len:]
+            tr = tok_rets[-min_len:]
+
+            b_mean = sum(br) / min_len
+            t_mean = sum(tr) / min_len
+
+            cov = sum((br[i] - b_mean) * (tr[i] - t_mean) for i in range(min_len)) / min_len
+            b_std = (sum((x - b_mean) ** 2 for x in br) / min_len) ** 0.5
+            t_std = (sum((x - t_mean) ** 2 for x in tr) / min_len) ** 0.5
+
+            if b_std > 0 and t_std > 0:
+                corr = cov / (b_std * t_std)
+                corr = max(-1.0, min(1.0, corr))  # clamp
+
+    return [
+        btc_change_1h_norm,  # [49] BTC 1h change
+        btc_change_4h_norm,  # [50] BTC 4h change
+        btc_rsi_norm,        # [51] BTC RSI
+        corr,                # [52] BTC-token 24h correlation
+    ]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -677,7 +755,7 @@ def backfill_labels(filepath: str, current_price: float) -> int:
     return updated
 
 
-def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | None) -> None:
+def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | None, btc_candles: list[dict] | None = None) -> None:
     """Collect features for a single token and append to dataset."""
     print(f"\n  [{token}] Collecting features...")
 
@@ -703,9 +781,10 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
 
     candle = compute_candle_features(candles)
     multiday = compute_multiday_features(token, price)
+    btc_cross = compute_btc_cross_features(token, btc_candles or [], candles)
 
-    features = tech + nansen + extra + candle + multiday
-    assert len(features) == 49, f"Expected 49 features, got {len(features)}"
+    features = tech + nansen + extra + candle + multiday + btc_cross
+    assert len(features) == 53, f"Expected 53 features, got {len(features)}"
 
     # Build row
     row = {
@@ -749,10 +828,15 @@ def main():
     print("  Fetching metaAndAssetCtxs...")
     meta_ctx = fetch_clearinghouse_meta_and_ctx()
 
+    # Fetch BTC candles once for cross-market features (all tokens need BTC context)
+    print("  Fetching BTC candles for cross-features...")
+    btc_candles = fetch_candles("BTC", "1h", CANDLE_COUNT)
+    print(f"  BTC candles: {len(btc_candles)}")
+
     # Collect per token
     for token in TOKENS:
         try:
-            collect_token(token, mids, meta_ctx)
+            collect_token(token, mids, meta_ctx, btc_candles)
         except Exception as e:
             print(f"  [{token}] ERROR: {e}")
 

@@ -85,9 +85,11 @@ export const FEATURE_NAMES = [
   'body_ratio', 'wick_skew',
   // Multi-day trend (4)
   'change_7d', 'change_10d', 'dist_from_7d_high', 'trend_slope_7d',
+  // BTC cross-market (4)
+  'btc_change_1h', 'btc_change_4h', 'btc_rsi', 'btc_token_corr_24h',
 ];
 
-const NUM_FEATURES = 49;
+const NUM_FEATURES = 53;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12', 'w1', 'm1'] as const;
 const MODEL_DIR = '/tmp';
@@ -273,13 +275,14 @@ export class XGBoostPredictor {
       return null;
     }
 
-    // Accept 30-feature (old), 45-feature (candle), or 49-feature (full) vectors
-    // Pad old vectors with zeros for missing features
+    // Accept 30/45/49/53-feature vectors, pad old ones with zeros
     let paddedFeatures = features;
     if (features.length === 30) {
-      paddedFeatures = [...features, ...new Array(19).fill(0)];  // 15 candle + 4 multi-day
+      paddedFeatures = [...features, ...new Array(23).fill(0)];  // 15 candle + 4 multi-day + 4 btc_cross
     } else if (features.length === 45) {
-      paddedFeatures = [...features, ...new Array(4).fill(0)];   // 4 multi-day
+      paddedFeatures = [...features, ...new Array(8).fill(0)];   // 4 multi-day + 4 btc_cross
+    } else if (features.length === 49) {
+      paddedFeatures = [...features, ...new Array(4).fill(0)];   // 4 btc_cross
     } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;
