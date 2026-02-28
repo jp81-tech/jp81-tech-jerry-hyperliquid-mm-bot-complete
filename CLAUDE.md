@@ -47,6 +47,90 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 68. XGBoost Historical Backfiller — 4,460→39,001 rows (28.02)
+
+**Problem:** XGBoost collector zbierał dane co 15 min — po 6 dniach miał ~500 rows per token (4,460 total). Za mało na dobre modele. kPEPE h12 nie mógł się nawet wytrenować (class imbalance). Czekanie na wystarczające dane trwałoby tygodnie.
+
+**Rozwiązanie:** Backfiller script fetchujący 180 dni historycznych candles z Hyperliquid API i obliczający 38/62 features per godzinę. Labels obliczane przez look-ahead (przyszłe ceny znane z danych historycznych).
+
+**Nowy plik: `scripts/xgboost_backfill.py`**
+
+**Architektura:**
+```
+Hyperliquid candleSnapshot API (paginated, 5000/request)
+  → hourly candles (180 dni) + daily candles (200 dni) + BTC hourly (shared)
+    → compute_backfill_features() per timestamp
+      → 38/62 features computable, 24/62 = zeros (brak historycznych danych)
+        → labels via look-ahead (h1=+1h, h4=+4h, h12=+12h, w1=+168h, m1=+720h)
+          → append to existing JSONL (deduplikacja po timestamp)
+            → sort chronologically (dla poprawnego train/test split)
+```
+
+**Computable vs zero features:**
+
+| Grupa | Features | Computable? | Źródło |
+|-------|----------|-------------|--------|
+| Technical [0-10] | 11 | TAK | hourly candles (RSI, MACD, ATR, etc.) |
+| Nansen SM [11-21] | 11 | NIE | /tmp/smart_money_data.json (runtime only) |
+| Funding/OI [22-24] | 3 | NIE | metaAndAssetCtxs (runtime only) |
+| Time cyclical [25-27] | 3 | TAK | timestamp |
+| Volatility_24h [28-29] | 2 | TAK | hourly candles lookback |
+| Candle patterns [30-44] | 15 | TAK | 3 ostatnie candles OHLC |
+| Multi-day trends [45-48] | 4 | TAK | daily candles |
+| BTC cross-market [49-52] | 4 | TAK | BTC hourly (shared) |
+| Orderbook [53-55] | 3 | NIE | l2Book (runtime only) |
+| MetaCtx [56-58] | 3 | NIE | metaAndAssetCtxs (runtime only) |
+| Derived [59-61] | 3 | TAK | hourly candles (volume momentum, etc.) |
+
+**CLI:**
+```bash
+python3 scripts/xgboost_backfill.py                    # all tokens, 180 days
+python3 scripts/xgboost_backfill.py --token BTC        # single token
+python3 scripts/xgboost_backfill.py --days 90          # shorter period
+python3 scripts/xgboost_backfill.py --dry-run          # estimate only
+python3 scripts/xgboost_backfill.py --train            # backfill + retrain
+```
+
+**Wyniki backfilla:**
+
+| Token | Przed | Po | Nowe rows |
+|-------|-------|----|-----------|
+| BTC | 536 | 4663 | +4127 |
+| ETH | 535 | 4662 | +4127 |
+| SOL | 536 | 4663 | +4127 |
+| HYPE | 541 | 4668 | +4127 |
+| ZEC | 536 | 4663 | +4127 |
+| XRP | 536 | 4663 | +4127 |
+| LIT | 407 | 1973 | +1566 |
+| FARTCOIN | 540 | 4667 | +4127 |
+| kPEPE | 293 | 4379 | +4086 |
+| **Total** | **4,460** | **39,001** | **+34,541** |
+
+LIT: tylko 68 dni historii na HL (token nowy). kPEPE: ~182 dni historii.
+
+**Training results po backfill (najlepsze):**
+
+| Token | h1 | h4 | h12 | w1 | m1 |
+|-------|-----|-----|------|-----|-----|
+| BTC | 68.0% | 77.1% | **84.1%** | 60.3% | - |
+| ETH | 61.2% | 67.9% | 69.6% | 54.9% | 18.2% |
+| SOL | 52.9% | 64.0% | 61.5% | 55.7% | 47.9% |
+| kPEPE | 47.2% | 58.0% | **62.2%** | 36.9% | **70.2%** |
+
+**Top features shifted:** `trend_slope_7d`, `dist_from_7d_high`, `change_10d`, `atr_pct` — dowód że multi-day backfilled features dają wartość.
+
+**Techniczne detale:**
+- Pagination: API zwraca max ~5000 candles → chunk po 150 dni
+- BTC candles fetchowane raz i współdzielone (Pearson correlation BTC↔token)
+- Deduplikacja: timestamp zaokrąglony do pełnej godziny
+- Sort: po timestamp ascending (kluczowe dla 80/20 chronological split)
+- Imports: `compute_technical_features`, `compute_candle_features`, `compute_derived_features`, `compute_btc_cross_features` z `xgboost_collect.py`
+- Rate limiting: 2s delay między fetchami
+
+**Pliki:** `scripts/xgboost_backfill.py` (NEW, ~370 LOC)
+
+**Deploy:** SCP → server, run `--train`. prediction-api restarted, all 44 models loaded (9 tokens × 4-5 horizons).
+
 ### 67. Tier-1 Features — Orderbook + MetaCtx + Derived — XGBoost 53→62 features (28.02)
 
 **Problem:** Model widział tylko HISTORIĘ (RSI, MACD, zmiany cen) — nie widział PRZYSZŁEJ PRESJI. Orderbook imbalance to jedyny feature który mówi co się za chwilę stanie. Mark-Oracle spread i OI/volume ratio dają kontekst dźwigni i premii perpa vs spot.

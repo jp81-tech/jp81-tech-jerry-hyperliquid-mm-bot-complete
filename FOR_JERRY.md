@@ -36,6 +36,7 @@
 28. [Prediction System Overhaul — kiedy mózg bota mówił głupoty](#prediction-system-overhaul--kiedy-mozg-bota-mowil-glupoty)
 29. [Momentum Guard v3 — nie zamykaj w popłochu, trzymaj na odbicie](#momentum-guard-v3--nie-zamykaj-w-poplochu-trzymaj-na-odbicie)
 30. [Prediction Bias — bot zaczyna przewidywać przyszłość](#prediction-bias--bot-zaczyna-przewidywac-przyszlosc)
+31. [XGBoost Backfiller — 180 dni historii w 5 minut](#xgboost-backfiller--180-dni-historii-w-5-minut)
 
 ---
 
@@ -5224,3 +5225,135 @@ PO (62 features):
 Rate limit: Hyperliquid pozwala ~120 calls/min
 Nasz collector: ~30 calls co 15 min = ~2 calls/min — daleko od limitu
 ```
+
+---
+
+## XGBoost Backfiller — 180 dni historii w 5 minut
+
+### Problem: cold start ML
+
+Wyobraz sobie, ze budujesz samochod autonomiczny. Masz swietne kamery, lidar, radar — ale samochod dopiero zjezdza z linii produkcyjnej. Ma zero kilometrow doswiadczenia. Pierwsze 1000 km jedzie jak pijany — nie zna zakretow, nie wie ze mokra droga jest sliska, nie rozumie ze ten migajacy swiatlo na skrzyzowaniu to znaczy "zwolnij, nie przyspieszaj".
+
+Nasz XGBoost model mial dokladnie ten problem. Collector (cron co 15 min) zbiera dane od 6 dni = **500 wierszy per token**. Model potrzebuje tysiecy przykladow zeby sie nauczyc. Czekanie na "naturalne" zebranie danych trwaloby miesiace.
+
+### Rozwiazanie: podroz w czasie
+
+Co jesli zamiast czekac 6 miesiecy, mozemy **cofnac sie w czasie** i uczyc sie z przeszlosci?
+
+Hyperliquid API ma `candleSnapshot` — zwraca historyczne swiece (OHLCV) na dowolny okres. Czyli mamy ceny, wolumen, high/low co godzine od kiedy token istnial.
+
+Z jednej godzinnej swiece mozemy obliczyc:
+- RSI, MACD, ATR — **tak** (potrzebne min 14 poprzednich swiec)
+- Candlestick patterns (hammer, doji) — **tak** (potrzebne 3 ostatnie swiece)
+- Multi-day trends (change_7d, slope) — **tak** (potrzebne daily candles)
+- BTC correlation — **tak** (potrzebne BTC candles + token candles)
+- Nansen SM data — **NIE** (to jest live snapshot, nie da sie odtworzyc)
+- Orderbook depth — **NIE** (L2 book nie jest archiwizowany)
+- Funding rate, OI — **NIE** (metadane perpow nie sa archiwizowane)
+
+Czyli z 62 features mozemy obliczyc **38 historycznie**, a 24 ustawiamy na zero.
+
+### Ale zaraz — labels!
+
+Tu jest magia backfillera vs collectora. Collector nie zna przyszlosci — wpisuje label dopiero po N godzinach:
+
+```
+Collector (15:00):  features=[...], label_h1=NULL (nie wie co bedzie o 16:00)
+Collector (16:00):  ooo, cena wzrosla! Wraca do wiersza z 15:00, wpisuje label_h1=+0.8%
+```
+
+Backfiller ma **cala przyszlosc** w tablicy candles:
+
+```python
+# Patrzymy na indeks 100 (= godzina 100 od poczatku)
+current_price = candles[100].close  # $63,000
+future_1h = candles[101].close      # $63,500
+future_4h = candles[104].close      # $64,200
+
+label_h1 = (63500 - 63000) / 63000 = +0.79%  → LONG
+label_h4 = (64200 - 63000) / 63000 = +1.90%  → LONG (>1.5%)
+```
+
+Backfiller wie jak sie skonczylo — bo patrzymy wstecz.
+
+### Deduplikacja — nie duplikuj danych
+
+Collector juz zapisal ~500 wierszy per token. Backfiller nie moze pisac tych samych timestampow — model by sie "uzczyl" powtorzen zamiast wzorcow.
+
+```python
+existing_timestamps = set()
+for line in existing_jsonl:
+    ts = round(line['timestamp'] / 3600) * 3600  # zaokraglij do pelnej godziny
+    existing_timestamps.add(ts)
+
+# Skip jesli juz mamy ten timestamp
+if candle_ts in existing_timestamps:
+    continue  # pomiń, już jest
+```
+
+### Sortowanie — czas ma znaczenie
+
+Po dopisaniu backfill rows, caly dataset musi byc posortowany chronologicznie. Dlaczego?
+
+Trainer robi **80/20 chronological split** — pierwsze 80% to train, ostatnie 20% to test. Jesli dane sa pomieszane (stary, nowy, stary, nowy), model "widzi przyszlosc" w train secie i dostaje falszywie wysoki accuracy.
+
+```python
+# Sortuj po timestamp
+all_rows.sort(key=lambda r: r['timestamp'])
+# Zapisz posortowany dataset
+with open(filepath, 'w') as f:
+    for row in all_rows:
+        f.write(json.dumps(row) + '\n')
+```
+
+### Wyniki — 9x wiecej danych
+
+```
+PRZED backfill:     4,460 rows total (~500/token, 6 dni)
+PO backfill:       39,001 rows total (~4,600/token, 180 dni)
+```
+
+Ale nie chodzi tylko o ilosc. BTC model z 500 wierszami widzial **jeden tydzien** rynku. Z 4,600 wierszami widzi:
+- Crash pazdziernikowy ($126K → $103K)
+- Rally listopadowy ($86K → $105K)
+- Kolejne spadki grudniowe
+- Dno styczniowe ($55K)
+
+### Training improvement
+
+| Token | h4 (przed) | h4 (po) | h12 (przed) | h12 (po) |
+|-------|-----------|---------|-------------|---------|
+| BTC | ~55% | **77.1%** | ~65% | **84.1%** |
+| kPEPE | 35.3% | **58.0%** | ERROR | **62.2%** |
+| ETH | ~50% | **67.9%** | ~55% | **69.6%** |
+
+kPEPE h12 nie mogl sie wytrenowac z 139 wierszami (zero klasy LONG w test set → crash). Z 4,379 wierszami — **62.2% accuracy**. Nie cudownie, ale **dobrze ponad random (33%)** na 3-class problem.
+
+### Top features shift — dowod ze backfill dziala
+
+Przed backfill, top features to: `bb_width`, `volatility_24h`, `hour_cos` — krotkoterminowe, techniczne.
+
+Po backfill: `trend_slope_7d`, `dist_from_7d_high`, `change_10d` — **multi-day trend features**!
+
+To dowod ze model uczy sie prawdziwych wzorcow z historii (np. "jesli kPEPE spadla 15% w 7 dni, to prawdopodobnie spadnie dalej").
+
+### Lekcje
+
+1. **Cold start to zabojca ML** — model z 500 wierszami to jak student po pierwszym wykladzie. Backfill to odrobienie 180 wykładów jednego dnia.
+
+2. **Nie wszystkie features sa historyczne** — 24/62 features (SM data, orderbook, funding) to runtime-only. Model uczy sie z 38/62 features w historii, potem dostaje pelne 62 w produkcji. To **nie problem** — XGBoost wie ze te 24 features sa zerami w starych danych i nauczy sie ich wartosci tylko z nowych (live-collected) wierszy.
+
+3. **Deduplikacja + sortowanie = kluczowe** — bez tego model by sie nauczyl powtorzen (overfitting) albo "widzial przyszlosc" (data leakage). Oba zabijaja predykcje w produkcji.
+
+4. **Rate limiting API** — Hyperliquid API robi 429 (Too Many Requests) jesli za szybko pytasz. LIT dostal 429 przy pierwszym run, trzeba bylo ponowic. Rozwiazanie: 2-sekundowy delay miedzy fetchami i pagination (max 5000 candles per request).
+
+5. **Token age matters** — LIT ma tylko 68 dni historii na Hyperliquid (token nowy). BTC/ETH/SOL maja pelne 180 dni. Wiecej historii = lepszy model. LIT h4 accuracy 34.5% vs BTC h4 77.1% — nie tylko z powodu mniej danych, ale tez dlatego ze LIT jest bardziej losowy (memecoin effect).
+
+### Kiedy re-backfillowac?
+
+**Nie musisz.** Backfill jest one-shot operation. Nowe dane sa zbierane przez collector co 15 min (z pelnymi 62 features). Retrain co tydzien (`xgboost_train.py`) automatycznie wlacza nowe dane.
+
+Re-backfill tylko jesli:
+- Zmienisz feature pipeline (nowe features do policzenia z candles)
+- Chcesz dluzsza historie (np. `--days 365` gdy token ma roczna historie)
+- Dodasz nowy token do systemu
