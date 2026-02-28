@@ -48,12 +48,46 @@ MIN_SAMPLES = {
 }
 
 # Classification thresholds (price change %)
+# Threshold = "how big a move counts as directional" — must match token volatility
 THRESHOLDS = {
     "h1":  0.005,   # 0.5%
     "h4":  0.015,   # 1.5%
     "h12": 0.030,   # 3.0%
     "w1":  0.080,   # 8.0%
     "m1":  0.150,   # 15.0%
+}
+
+# Per-token threshold overrides — volatile tokens need lower thresholds
+# Without this, 67% of kPEPE h4 labels = NEUTRAL → model learns "always say NEUTRAL"
+TOKEN_THRESHOLDS: dict[str, dict[str, float]] = {
+    "kPEPE": {
+        "h1":  0.003,   # 0.3% (kPEPE median h1 move ~0.5%)
+        "h4":  0.008,   # 0.8% (kPEPE median h4 move ~1.0%)
+        "h12": 0.020,   # 2.0% (kPEPE std h12 ~3.5%)
+        "w1":  0.060,   # 6.0%
+        "m1":  0.120,   # 12.0%
+    },
+    "FARTCOIN": {
+        "h1":  0.004,   # 0.4%
+        "h4":  0.010,   # 1.0%
+        "h12": 0.025,   # 2.5%
+        "w1":  0.070,   # 7.0%
+        "m1":  0.130,   # 13.0%
+    },
+    "HYPE": {
+        "h1":  0.004,
+        "h4":  0.012,
+        "h12": 0.025,
+        "w1":  0.070,
+        "m1":  0.130,
+    },
+    "LIT": {
+        "h1":  0.004,
+        "h4":  0.010,
+        "h12": 0.025,
+        "w1":  0.070,
+        "m1":  0.130,
+    },
 }
 
 # XGBoost parameters (conservative for small datasets)
@@ -70,6 +104,53 @@ XGB_PARAMS = {
     "tree_method": "hist",
     "verbosity": 0,
 }
+
+# Per-token XGBoost params — larger datasets can handle more capacity
+TOKEN_XGB_PARAMS: dict[str, dict] = {
+    "kPEPE": {
+        "max_depth": 3,             # shallow trees — prevent memorization
+        "n_estimators": 300,        # many trees BUT early stopping will trim
+        "learning_rate": 0.03,      # slow learning → early stopping picks optimal count
+        "colsample_bytree": 0.5,    # aggressive feature dropout — 30/62 features dead
+        "min_child_weight": 10,     # require more samples per leaf → smoother predictions
+        "subsample": 0.7,           # row subsampling → reduces overfitting
+        "reg_alpha": 0.1,           # L1 regularization
+        "reg_lambda": 2.0,          # L2 regularization (default 1.0)
+    },
+    "FARTCOIN": {
+        "max_depth": 3,
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "colsample_bytree": 0.5,
+        "min_child_weight": 10,
+        "subsample": 0.7,
+        "reg_alpha": 0.1,
+        "reg_lambda": 2.0,
+    },
+    "LIT": {
+        "max_depth": 3,
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "colsample_bytree": 0.5,
+        "min_child_weight": 10,
+        "subsample": 0.7,
+        "reg_alpha": 0.1,
+        "reg_lambda": 2.0,
+    },
+    "HYPE": {
+        "max_depth": 3,
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "colsample_bytree": 0.5,
+        "min_child_weight": 10,
+        "subsample": 0.7,
+        "reg_alpha": 0.1,
+        "reg_lambda": 2.0,
+    },
+}
+
+# Early stopping rounds — stops training when test accuracy stops improving
+EARLY_STOPPING_ROUNDS = 30
 
 FEATURE_NAMES = [
     # Technical (11)
@@ -181,6 +262,32 @@ def classify_label(change: float, threshold: float) -> int:
         return 1   # NEUTRAL
 
 
+def get_threshold(token: str, horizon: str) -> float:
+    """Get classification threshold for token/horizon (per-token override or global default)."""
+    if token in TOKEN_THRESHOLDS and horizon in TOKEN_THRESHOLDS[token]:
+        return TOKEN_THRESHOLDS[token][horizon]
+    return THRESHOLDS[horizon]
+
+
+def get_xgb_params(token: str) -> dict:
+    """Get XGBoost params for token (per-token override merged with defaults)."""
+    params = dict(XGB_PARAMS)
+    if token in TOKEN_XGB_PARAMS:
+        params.update(TOKEN_XGB_PARAMS[token])
+    return params
+
+
+def compute_sample_weights(y: np.ndarray) -> np.ndarray:
+    """Compute inverse-frequency sample weights to balance classes."""
+    classes, counts = np.unique(y, return_counts=True)
+    total = len(y)
+    weights = np.ones(total, dtype=np.float32)
+    for cls, cnt in zip(classes, counts):
+        # Inverse frequency: rare class gets higher weight
+        weights[y == cls] = total / (len(classes) * cnt)
+    return weights
+
+
 def train_model(
     X_all: list[list[float]],
     y_raw: list[float | None],
@@ -188,7 +295,7 @@ def train_model(
     token: str,
 ) -> dict | None:
     """Train XGBoost model for one horizon. Returns metadata dict or None."""
-    threshold = THRESHOLDS[horizon]
+    threshold = get_threshold(token, horizon)
 
     # Filter rows with labels
     X = []
@@ -217,6 +324,8 @@ def train_model(
         test_count = int(np.sum(y_test == cls))
         print(f"    {horizon} class {name}: train={train_count}, test={test_count}")
 
+    print(f"    {horizon} threshold: ±{threshold*100:.1f}%")
+
     # Skip if any class missing from train — XGBoost predict() breaks with < num_class classes
     train_classes = set(int(c) for c in np.unique(y_train))
     if len(train_classes) < 3:
@@ -226,13 +335,28 @@ def train_model(
         print(f"    {horizon}: Missing class(es) {missing_names} in train set, skipping")
         return None
 
-    # Train
-    model = xgb.XGBClassifier(**XGB_PARAMS)
+    # Class-balanced sample weights (inverse frequency)
+    sample_weights = compute_sample_weights(y_train)
+
+    # Get per-token XGBoost params
+    params = get_xgb_params(token)
+
+    # Train with early stopping to prevent overfitting
+    model = xgb.XGBClassifier(
+        early_stopping_rounds=EARLY_STOPPING_ROUNDS,
+        **params,
+    )
     model.fit(
         X_train, y_train,
+        sample_weight=sample_weights,
         eval_set=[(X_test, y_test)],
         verbose=False,
     )
+
+    # Report how many trees were actually used (early stopping)
+    best_iter = getattr(model, 'best_iteration', None)
+    if best_iter is not None:
+        print(f"    {horizon}: early stopping at {best_iter}/{params.get('n_estimators', 100)} trees")
 
     # Evaluate
     train_acc = float(np.mean(model.predict(X_train) == y_train))

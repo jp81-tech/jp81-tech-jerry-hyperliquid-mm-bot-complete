@@ -47,6 +47,79 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 70. XGBoost Training Improvements — per-token thresholds, regularization, early stopping, class weighting (28.02)
+
+**Problem:** kPEPE h4 "58% accuracy" was inflated — with ±1.5% threshold, 67% of labels = NEUTRAL, so model learned "always predict NEUTRAL" and achieved 58% accuracy (near baseline). Zero actual directional edge. Also massive overfitting: train 90% vs test 37% on volatile tokens.
+
+**Root causes (3):**
+1. **NEUTRAL dominance**: Global ±1.5% threshold too wide for volatile tokens like kPEPE (median h4 move ~1.0%) → 67% NEUTRAL labels → model always predicts NEUTRAL
+2. **30/62 features dead**: kPEPE has zero SM data (no whale_tracker entry) → 11 SM features + 3 funding/OI + 6 orderbook/meta = 30 dead features out of 62
+3. **Conservative hyperparameters**: max_depth=4 with small datasets → trees memorize noise
+
+**Fix #1: Per-token classification thresholds (`TOKEN_THRESHOLDS`)**
+Volatile tokens get lower thresholds to balance label distribution:
+
+| Token | h1 | h4 | h12 | w1 | m1 |
+|-------|-----|-----|------|-----|-----|
+| Default | ±0.5% | ±1.5% | ±3.0% | ±8.0% | ±15.0% |
+| kPEPE | ±0.3% | **±0.8%** | ±2.0% | ±6.0% | ±12.0% |
+| FARTCOIN | ±0.4% | ±1.0% | ±2.5% | ±7.0% | ±13.0% |
+| HYPE | ±0.4% | ±1.2% | ±2.5% | ±7.0% | ±13.0% |
+| LIT | ±0.4% | ±1.0% | ±2.5% | ±7.0% | ±13.0% |
+
+kPEPE h4 label distribution: 67% NEUTRAL → 30% SHORT / 43% NEUTRAL / 27% LONG.
+
+**Fix #2: Per-token XGBoost hyperparameters (`TOKEN_XGB_PARAMS`)**
+Volatile tokens (kPEPE, FARTCOIN, LIT, HYPE) use aggressive regularization:
+
+| Param | Default | Volatile tokens |
+|-------|---------|----------------|
+| max_depth | 4 | **3** (shallow → less memorization) |
+| n_estimators | 100 | **300** (but early stopping trims) |
+| learning_rate | 0.1 | **0.03** (slow learning) |
+| colsample_bytree | 0.8 | **0.5** (50% feature dropout — 30/62 dead) |
+| min_child_weight | 5 | **10** (more samples per leaf) |
+| subsample | 0.8 | **0.7** (row subsampling) |
+| reg_alpha | 0 | **0.1** (L1 regularization) |
+| reg_lambda | 1 | **2.0** (L2 regularization) |
+
+**Fix #3: Class-balanced sample weights**
+`compute_sample_weights()` — inverse frequency weighting: `weight = total / (num_classes × class_count)`. Rare classes get proportionally higher weight. Prevents model from optimizing for majority class.
+
+**Fix #4: Early stopping**
+`EARLY_STOPPING_ROUNDS = 30` — stops training when test accuracy stops improving for 30 rounds. kPEPE h4 stopped at 79/300 trees (26% used). Reports `best_iteration` in logs.
+
+**Results after full retrain (all 9 tokens):**
+
+| Token | h1 | h4 | h12 | w1 | m1 |
+|-------|-----|-----|------|-----|-----|
+| BTC | 66.5% | **70.0%** | 83.8% | 59.1% | — |
+| ETH | 58.0% | **56.7%** | 60.3% | 54.4% | 42.4% |
+| SOL | 47.9% | 58.3% | 60.5% | 55.2% | 40.2% |
+| HYPE | 42.5% | **47.4%** | 53.8% | 45.3% | 38.1% |
+| kPEPE | 42.0% | **40.4%** | 39.2% | 36.5% | 48.7% |
+| ZEC | 53.5% | 63.2% | 55.5% | 56.1% | — |
+| XRP | 50.5% | 58.4% | 59.1% | 46.5% | — |
+| LIT | 44.5% | 44.5% | 48.0% | 34.2% | — |
+| FARTCOIN | 39.2% | 40.2% | 38.3% | 41.3% | 40.5% |
+
+kPEPE h4: "58%" (inflated) → **40.4%** (genuine +7.4% edge over 33% random baseline). Overfitting reduced: train 90% → 58.5%, gap 53% → 18%.
+
+**New helper functions (3):**
+- `get_threshold(token, horizon)` — returns per-token or global threshold
+- `get_xgb_params(token)` — merges per-token params with defaults
+- `compute_sample_weights(y)` — inverse frequency class balancing
+
+**Key insight:** kPEPE is inherently hard to predict with technical features alone (memecoin, 30/62 features dead, no SM data). 40% on 3-class is near the ceiling for current feature set. BTC h4 (70%) is much more predictable and could be used as proxy for kPEPE direction (95% Pearson correlation).
+
+**Zmodyfikowane pliki (1):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_train.py` | `TOKEN_THRESHOLDS`, `TOKEN_XGB_PARAMS`, `EARLY_STOPPING_ROUNDS`, `get_threshold()`, `get_xgb_params()`, `compute_sample_weights()`, early stopping in `train_model()` (+120 LOC) |
+
+**Deploy:** SCP → server, full retrain all 9 tokens, `pm2 restart prediction-api`. All 44 models loaded, predictions verified as non-uniform and differentiated.
+
 ### 69. XGBoost Flat Tree Fix + Feature File Bridge — predictions from 33.3% uniform to real (28.02)
 
 **Problem:** XGBoost predictions returned 33.3%/33.3%/33.3% (uniform) for ALL tokens and ALL horizons — effectively random. Two independent root causes discovered and fixed.

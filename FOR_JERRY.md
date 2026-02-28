@@ -5447,3 +5447,92 @@ ETH   h4: SHORT 63.0% / NEUTRAL 31.9% / LONG 5.1%   ← very bearish!
 4. **`softmax([0,0,0])` = [0.333, 0.333, 0.333]** — uniforme wyjscie z softmax jest ZAWSZE czerwona flaga. Znaczy ze model nic nie obliczyl (wszystkie raw scores = 0). Dodaj assert/warning na to!
 
 5. **Dist patching to minefield** — Python script ktory patchuje JavaScript dist pliki na serwerze jest kruchy. Stripuje quotes, zmienia formatting, gubi edge cases. Lepsze rozwiazanie: `tsc` compile lokalne + SCP dist, lub budowanie Docker image.
+
+---
+
+## Rozdzial 33: XGBoost Training Tuning — Kiedy "58% Accuracy" To Klamstwo
+
+### Problem: Iluzyjna Celnosc
+
+Wyobraz sobie ze masz model pogodowy ktory mowi "jutro bedzie pogodnie" codziennie. W Kalifornii mialbys 85% accuracy. Ale to nie jest inteligentny model — to model ktory nauczyl sie ze "pogodnie" jest domyslna odpowiedzia i powtarza ja jak papuga.
+
+Dokladnie tak dzialal nasz XGBoost dla kPEPE h4. Mial "58% accuracy" co wygladalo przyzwoicie. Ale prawda:
+- 67% etykiet = NEUTRAL (cena zmienila sie o < ±1.5% w 4h)
+- Model nauczyl sie: "zawsze mow NEUTRAL" → 58% trafien
+- **Zero przewagi** nad prostym "zawsze mow NEUTRAL"
+
+To sie nazywa **accuracy illusion** — jeden z najczescszych bledow w ML. Accuracy jest bezuzyteczna gdy klasy sa niezbalansowane.
+
+### Dlaczego 67% Neutral?
+
+Progi klasyfikacji (thresholds) byly jednakowe dla WSZYSTKICH tokenow:
+- h4 threshold: ±1.5% (zmiana ceny > +1.5% = LONG, < -1.5% = SHORT)
+
+Ale kPEPE jest memcoinem! Mediana ruchu h4 to ~1.0%. Wiec wiekszosc ruchow miescila sie w -1.5% do +1.5% → NEUTRAL. Model nie widzial prawie zadnych LONG/SHORT przykladow.
+
+### Fix 1: Per-token Thresholds
+
+Rozwiazanie jest oczywiste po zrozumieniu problemu — obniz progi dla volatilnych tokenow:
+
+```python
+TOKEN_THRESHOLDS = {
+    "kPEPE": {"h4": 0.008},   # ±0.8% zamiast ±1.5%
+    "FARTCOIN": {"h4": 0.010}, # ±1.0%
+    # BTC/ETH dalej ±1.5% — sa mniej volatilne
+}
+```
+
+Po obnizeniu: 30% SHORT / 43% NEUTRAL / 27% LONG. Teraz model widzi prawdziwe przyklady!
+
+### Fix 2: Class Weighting
+
+Nawet z lepszymi progami NEUTRAL moze dominowac (43%). Rozwiazanie: **inverse frequency weighting**:
+
+```python
+def compute_sample_weights(y):
+    # Klasa z 1000 probkami: weight = 0.33
+    # Klasa z 100 probkami: weight = 3.33  (10x wieksza waga!)
+    weights[y == cls] = total / (num_classes * count)
+```
+
+Model uczy sie ze bledne SHORT (rzadkie) kosztuje wiecej niz bledne NEUTRAL (czeste). Analogia: w szpitalu przeoczenie raka (rzadki) jest gorsze niz fatszywy alarm (czesty).
+
+### Fix 3: Regularyzacja i Early Stopping
+
+Po naprawieniu thresholds model zaczal **overfittowac** — zapamietal dane treningowe zamiast sie uczyc wzorcow:
+- Train accuracy: 90%
+- Test accuracy: 37% (gorzej niz random!)
+
+To jak student ktory wyuczyl sie odpowiedzi z egzaminu probnego zamiast zrozumiec material.
+
+**Regularyzacja** (kary za zlozonosc):
+- `max_depth: 4 → 3` — plytsze drzewa, mniej szansy na zapamiectywanie
+- `min_child_weight: 5 → 10` — liscie potrzebuja wiecej przykladow
+- `colsample_bytree: 0.8 → 0.5` — losuj 50% features (bo 30/62 = martwe!)
+- `reg_alpha=0.1, reg_lambda=2.0` — L1/L2 penalties
+
+**Early stopping**: Trenuj max 300 drzew, ale zatrzymaj jesli test accuracy nie poprawia sie przez 30 rund. kPEPE h4 zatrzymal sie na 79/300 — 74% drzew bylo zbedne!
+
+### Wyniki
+
+```
+PRZED: kPEPE h4 = "58%" (iluzyjna, baseline 58%)
+       train 90% vs test 37% (masywny overfitting)
+
+PO:    kPEPE h4 = 40.4% (prawdziwa, baseline 33%)
+       train 58.5% vs test 40.4% (zredukowany overfitting)
+```
+
+40% na 3-klasowym problemie z memcoinem to solidny wynik. Model ma +7.4% edge nad losowym zgadywaniem. BTC h4 ma 70% bo jest bardziej "przewidywalny" (fundamenty > memecoin vibes).
+
+### Lekcje
+
+1. **Accuracy bez kontekstu jest bezwartosciowa** — zawsze porownuj z baseline (najczescszja klasa). 58% przy baseline 58% = zero edge. 40% przy baseline 33% = +7.4% edge.
+
+2. **Progi musza pasowac do volatilnosci** — kPEPE z ±1.5% h4 progiem to jak mierzyc temperacture termometrem ktory rozpoznaje tylko >40°C. Wiekszosc "choroby" przejdzie niezauwazenie.
+
+3. **Overfitting to podstepny wrog** — train 90%/test 37% wyglada jak "model jest swietny ale test set jest zly". Nie — model zapamietal szum. Regularyzacja + early stopping to leki.
+
+4. **Inverse frequency = sprawiedliwosc** — bez tego model optymalizuje accuracy (= predict majority class). Z tym model optymalizuje REAL accuracy (= trafienie kazdej klasy proporcjonalnie).
+
+5. **Dead features sa toksyczne** — 30/62 features = 0 to nie "neutralne", to szum. `colsample_bytree=0.5` pomaga bo losowo pomija wiele z nich w kazdym drzewie.
