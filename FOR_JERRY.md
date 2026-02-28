@@ -5902,3 +5902,212 @@ W ML sa trzy sposoby poprawy modelu:
 #3 jest zwykle najskuteczniejsze i najtansze. Zamiast czekac miesiace na dane albo tuniwac hyperparametry w nieskonczonosc, dalismy modelowi **gotowa odpowiedz na najwazniejsze pytanie**: "co robi Bitcoin?".
 
 To jest esencja "feature engineering" — nie dodawaj wiecej danych, dodaj **madrzejsze** dane.
+
+---
+
+## Rozdzial 38: xyz:GOLD, Transfer Detection i MIN_PROFIT Bypass — trzy fixy jednego dnia (28.02.2026)
+
+### Kontekst: jeden przelew, dwa problemy, trzy fixy
+
+Ten rozdzial opowiada o dniu, w ktorym jeden przelew USDC ($265) wywalil bota na 30+ minut, obnazajac dwa niezalezne bugi. A przy okazji dodalismy wsparcie dla calkowicie nowego dexu (xyz builder-deployed perps).
+
+Sekwencja zdarzen:
+
+```
+1. Kupujemy xyz:GOLD (przelew USDC z perps na xyz dex)
+2. Risk Manager widzi -$265 equity = -3.0% drawdown
+3. Risk Manager: "HALT! Stracilismy 3%!" → process.exit(1)
+4. Bot martwy. kPEPE ma LONG pozycje, zero orderow.
+5. Po restarcie: MIN_PROFIT blokuje WSZYSTKIE close ordery
+6. kPEPE nadal 0 orderow — bot zamrozony z rosaca strata
+```
+
+Dwa kompletnie niezalezne bugi:
+- **Bug #1**: Risk Manager nie odroznia przelewow od strat
+- **Bug #2**: MIN_PROFIT nie pozwala zamknac underwater pozycji
+
+### Fix #1: Transfer Detection w Risk Manager
+
+#### Problem
+
+Risk Manager oblicza drawdown tak:
+
+```
+drawdown = (initialEquity - currentEquity) / initialEquity
+```
+
+Prosty wzor, ale jest w nim ukryte zalozenie: **kazdy spadek equity = strata tradingowa**. To nieprawda! Equity moze spasc bo:
+- Przelejesz USDC na inny dex (tak jak my — na xyz)
+- Wyplacisz USDC na Binance
+- Zaplacisz gas fee
+- Ktos Ci zrobic airdrop (equity rosnie)
+
+Nasz bot robi ordery po $100 z mainLoop co 60 sekund. **Nie jest fizycznie mozliwe** zeby stracil >1% equity ($88+) w jednym ticku na tradingu. Wiec jesli equity spada o >1% w 60 sekund — to przelew, nie strata.
+
+#### Rozwiazanie: heurystyka "Transfer Detection"
+
+```typescript
+// Nowe pola w RiskManager:
+private lastCheckedEquity: number = 0;
+private static readonly TRANSFER_THRESHOLD_PCT = 0.01;  // 1%
+private static readonly TRANSFER_MIN_USD = 50;           // $50
+
+// Na poczatku checkHealth(), PRZED drawdown checks:
+if (this.lastCheckedEquity > 0) {
+  const tickDelta = this.lastCheckedEquity - currentEquity;
+  const tickDeltaPct = Math.abs(tickDelta) / this.lastCheckedEquity;
+
+  if (tickDeltaPct > 0.01 && Math.abs(tickDelta) > 50) {
+    if (tickDelta > 0) {
+      // Wyplata/przelew — zmniejsz baseline
+      this.initialEquity -= tickDelta;
+      this.highWaterMark = Math.min(this.highWaterMark, currentEquity);
+    } else {
+      // Wplata — zwieksz baseline
+      this.initialEquity += (-tickDelta);
+    }
+  }
+}
+this.lastCheckedEquity = currentEquity;
+```
+
+#### Analogia: waga lazienki
+
+Wyobraz sobie ze masz wage w lazience i mierzysz sie codziennie. Pewnego dnia wazylas 80kg, nastepnego 77kg. "O nie, schudlem 3 kilo w jeden dzien!" — to fizycznie niemozliwe (chlowiek traci max ~0.5kg dziennie). Cos jest nie tak z pomiarem (np. wazylas sie w ubraniu, potem bez).
+
+Risk Manager mial ten sam problem — wierzyl w "pomiar" bez pytania "czy ten wynik jest fizycznie mozliwy?". Transfer Detection to "sanity check" — jesli zmiana equity jest zbyt duza na jeden tick, to nie jest trading.
+
+#### Dlaczego progi 1% i $50?
+
+- **1%**: Bot robi ordery po $100. Equity ~$8,800. Nawet jesli WSZYSTKIE ordery zostana wypelnione w jednym ticku (niemozliwe — max kilka), strata bylaby czescia $100, nie 1% of $8,800.
+- **$50**: Safety margin — nie chcemy reagowac na male fluktuacje (fees, micro-slippage). $50 to wystarczajaco duzo zeby odroznic od "szumu".
+- **Oba warunki**: AND, nie OR. $51 zmiana na koncie $50,000 = 0.1% (ponizej 1%, nie trigger). $90 zmiana na koncie $8,800 = 1.02% AND >$50 = trigger.
+
+### Fix #2: MIN_PROFIT Bypass dla underwater pozycji
+
+#### Problem
+
+MIN_PROFIT to filtr ktory chroni bota przed "fee-eating" — zamykaniem pozycji tak blisko entry price ze fees zjadaja caly profit. Zasada: nie zamykaj pozycji jesli zysk < 10 basis points (0.10%).
+
+Brzmi rozsadnie, prawda? Problem pojawia sie gdy pozycja jest **underwater** (w stracie):
+
+```
+kPEPE LONG pozycja:
+  Entry: $0.003555
+  Mid:   $0.003527 (8 bps PONIZEJ entry)
+
+MIN_PROFIT mowi: "Zaden close order nie daje 10bps profitu → USUN WSZYSTKIE"
+Wynik: 0 orderow na gieldzie → bot zamrozony → strata rosnie
+```
+
+To jak lekarz ktory mowi "nie bierz aspiryny bo ma efekty uboczne" gdy pacjent krwawi. Tak, aspiryna ma efekty uboczne, ale krwawienie jest GORSZE.
+
+#### Rozwiazanie
+
+```typescript
+// Sprawdz czy pozycja jest underwater
+const isUnderwaterShort = isShort && midPrice > entryPx
+const isUnderwaterLong = isLong && midPrice < entryPx
+
+if (isUnderwaterShort || isUnderwaterLong) {
+  // Pozycja underwater — POMIN filtr, pozwol na zamkniecie ze strata
+  console.log(`MIN_PROFIT BYPASSED — position underwater → allow loss-cutting`)
+} else {
+  // Normalne filtrowanie — pozycja w zysku, chron przed fee-eating
+  // ... istniejacy filtr bez zmian ...
+}
+```
+
+Logika: MIN_PROFIT ma sens gdy pozycja jest w zysku — nie chcesz oddawac profitu na feesach. Ale gdy pozycja jest underwater, KAZDE zamkniecie (nawet z feesem) jest lepsze niz siedzenie z rosaca strata i zerem orderow.
+
+#### Wynik live
+
+```
+Przed: kPEPE Multi-Layer: 0 orders (MIN_PROFIT usunol 8 askow)
+Po:    kPEPE Multi-Layer: 8 orders | asks=8 | $800 notional
+```
+
+6 close fills: -$0.27 do -$0.53 per $100 = lacznie -$2.42. Kontrolowane wyjscie z pozycji. Strata $2.42 to nic w porownaniu do "siedzenia z 0 orderami przez godzine podczas spadku ceny".
+
+### xyz:GOLD — nowy dex, nowy swiat
+
+#### Co to xyz dex?
+
+Hyperliquid ma dwa "swiaty" perpsow:
+1. **Standard perps** (229 assets): BTC, ETH, SOL, kPEPE... — klasyczne krypto
+2. **xyz dex** (47 assets): GOLD, SILVER, TSLA, NVDA, MU, MSTR... — commodities + akcje
+
+xyz to "builder-deployed dex" — inne API, inny clearing, inne indeksy (offset 110000). Kluczowe roznice:
+
+| Cecha | Standard | xyz |
+|-------|----------|-----|
+| API param | brak dodatkowego | `dex: "xyz"` |
+| Nazwy | `BTC`, `ETH` | `xyz:GOLD`, `xyz:TSLA` |
+| Asset index | 0-228 | 110000+ |
+| Margin | cross lub isolated | **TYLKO isolated** |
+| allMids | zawiera | **NIE zawiera** |
+| Mid price | `allMids` API | trzeba fetchowac z `l2Book` |
+
+#### Co zmienilismy?
+
+**A) vip_spy.py — dual-dex fetching:**
+```python
+dex_configs = [
+    (None, "perps"),     # standard perps
+    ("xyz", "xyz dex"),  # xyz builder-deployed
+]
+for dex_param, dex_label in dex_configs:
+    payload = {"type": "clearinghouseState", "user": address}
+    if dex_param:
+        payload["dex"] = dex_param
+    # fetch + merge z obu dexow
+```
+
+Teraz widzimy ze Pulkownik ma xyz:XYZ100 $4.4M i Kapitan BTC ma xyz:MU $625K — wczesniej niewidoczne.
+
+**B) general_copytrade.ts — 5 zmian:**
+
+1. `fetchXyzMidPrice()` — nowa funkcja, bo `allMids` NIE zawiera xyz assets
+2. `fetchOurPositions()` — dual fetch: standard + xyz dex
+3. Asset map — laduje xyz meta (offset 110000), nazwy z prefixem `xyz:`
+4. Leverage — xyz:GOLD 2x isolated (xyz wymusza isolated)
+5. `processTick()` — fetch xyz mid prices via l2Book
+
+**C) vip_config.json — `xyz:GOLD` w watched_coins**
+
+#### Odkrycie: VIPy tradeuja xyz!
+
+Z logow po deploy:
+```
+Pulkownik: xyz:XYZ100 $4.4M
+Kapitan BTC: xyz:MU $625K, xyz:SNDK $594K, xyz:MSTR $70K, xyz:SILVER $29K
+```
+
+Nie wiedzielismy o tym! xyz pozycje byly niewidoczne bo vip_spy nie fetchowal z xyz dex.
+
+### Lekcja inzynierska: "Brak danych to tez bug"
+
+Trzy pozornie niepowiazane problemy (Risk Manager HALT, MIN_PROFIT freeze, xyz niewidoczne) maja wspolny temat: **system nie mial pelnego obrazu sytuacji**.
+
+| Problem | Brakujaca informacja | Skutek |
+|---------|---------------------|--------|
+| Risk Manager HALT | Nie wiedzial ze to przelew, nie strata | Bot wylaczony 30+ min |
+| MIN_PROFIT freeze | Nie wiedzial ze pozycja jest underwater | 0 orderow, rosaca strata |
+| xyz invisible | Nie fetchowal z xyz dex | $5M+ pozycji VIPow niewidoczne |
+
+W kazdym przypadku fix polegal na **dodaniu brakujacej informacji**:
+- Risk Manager dostal `lastCheckedEquity` (porownanie tick-to-tick)
+- MIN_PROFIT dostal `isUnderwaterShort/Long` (porownanie mid vs entry)
+- vip_spy dostal `dex: "xyz"` (drugie zrodlo danych)
+
+To jest fundamentalna zasada dobrego inzyniering: **kazda decyzja w kodzie powinna byc oparta na pelnym kontekscie**. Jesli system podejmuje decyzje (HALT, blokuj ordery, ignoruj pozycje) bez pelnego obrazu, bedzie podejmowal zle decyzje.
+
+### Kluczowe pliki
+
+| Plik | Zmiana | LOC |
+|------|--------|-----|
+| `src/risk/RiskManager.ts` | Transfer Detection heuristic | +32 |
+| `src/mm_hl.ts` | MIN_PROFIT underwater bypass | +15 |
+| `scripts/vip_spy.py` | Dual-dex position fetching | +95/-71 |
+| `scripts/general_copytrade.ts` | xyz asset map + mid price + leverage | +86/-3 |
+| `scripts/vip_config.json` | xyz:GOLD w watched_coins | +1/-1 |

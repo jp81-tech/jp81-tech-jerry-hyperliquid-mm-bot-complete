@@ -8356,6 +8356,8 @@ class HyperliquidMMBot {
         // === 📐 MIN PROFIT BUFFER: remove close orders that would lose money to fees ===
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
+        // EXCEPTION: If position is UNDERWATER (mid worse than entry), allow closing at a loss
+        // to exit bad positions. MIN_PROFIT should prevent fee-eating, not prevent loss-cutting.
         if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0) {
           const entryPx = position.entryPrice || 0
           if (entryPx > 0) {
@@ -8363,29 +8365,43 @@ class HyperliquidMMBot {
             const isShort = actualSkew < -0.05
             const isLong = actualSkew > 0.05
 
-            const beforeMinProfit = gridOrders.length
-            if (isShort) {
-              // SHORT: close = bid (buying back). Bid must be < entry - minProfit to be profitable.
-              const maxBidPrice = entryPx * (1 - minProfitFraction)
-              gridOrders = gridOrders.filter(o => {
-                if (o.side !== 'bid') return true  // keep all asks
-                return o.price <= maxBidPrice
-              })
-            } else if (isLong) {
-              // LONG: close = ask (selling). Ask must be > entry + minProfit to be profitable.
-              const minAskPrice = entryPx * (1 + minProfitFraction)
-              gridOrders = gridOrders.filter(o => {
-                if (o.side !== 'ask') return true  // keep all bids
-                return o.price >= minAskPrice
-              })
-            }
+            // Check if position is underwater (mid is worse than entry)
+            const isUnderwaterShort = isShort && midPrice > entryPx  // SHORT: mid > entry = losing
+            const isUnderwaterLong = isLong && midPrice < entryPx    // LONG: mid < entry = losing
 
-            const removedMinProfit = beforeMinProfit - gridOrders.length
-            if (removedMinProfit > 0) {
-              console.log(
-                `📐 [MIN_PROFIT] ${pair}: Removed ${removedMinProfit} close orders < ${dynSpreadCfg.minProfitBps}bps from entry ` +
-                `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} skew=${(actualSkew*100).toFixed(0)}%`
-              )
+            if (isUnderwaterShort || isUnderwaterLong) {
+              // Position is underwater — SKIP min profit filter, allow closing at a loss
+              if (this.tickCount % 20 === 0) {
+                console.log(
+                  `📐 [MIN_PROFIT] ${pair}: BYPASSED — position underwater ` +
+                  `(${isUnderwaterShort ? 'SHORT' : 'LONG'} entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)}) → allow loss-cutting`
+                )
+              }
+            } else {
+              const beforeMinProfit = gridOrders.length
+              if (isShort) {
+                // SHORT: close = bid (buying back). Bid must be < entry - minProfit to be profitable.
+                const maxBidPrice = entryPx * (1 - minProfitFraction)
+                gridOrders = gridOrders.filter(o => {
+                  if (o.side !== 'bid') return true  // keep all asks
+                  return o.price <= maxBidPrice
+                })
+              } else if (isLong) {
+                // LONG: close = ask (selling). Ask must be > entry + minProfit to be profitable.
+                const minAskPrice = entryPx * (1 + minProfitFraction)
+                gridOrders = gridOrders.filter(o => {
+                  if (o.side !== 'ask') return true  // keep all bids
+                  return o.price >= minAskPrice
+                })
+              }
+
+              const removedMinProfit = beforeMinProfit - gridOrders.length
+              if (removedMinProfit > 0) {
+                console.log(
+                  `📐 [MIN_PROFIT] ${pair}: Removed ${removedMinProfit} close orders < ${dynSpreadCfg.minProfitBps}bps from entry ` +
+                  `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} skew=${(actualSkew*100).toFixed(0)}%`
+                )
+              }
             }
           }
         }

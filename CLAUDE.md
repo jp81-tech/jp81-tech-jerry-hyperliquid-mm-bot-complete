@@ -47,6 +47,135 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 77. MIN_PROFIT bypass for underwater positions — unblock loss-cutting (28.02)
+
+**Problem:** kPEPE miał LONG pozycję underwater (entry $0.003555, mid $0.003527 = -8bps). MIN_PROFIT filter (10bps minimum) usuwał WSZYSTKIE close ordery (aski) bo żaden nie spełniał wymogu 10bps profitu od entry. Efekt: **0 orderów na giełdzie przez 30+ minut** — bot kompletnie zamrożony, nie mógł zamknąć pozycji.
+
+**Root cause:** MIN_PROFIT chronił przed fee-eating (zamykanie na break-even), ale nie rozróżniał "pozycja w zysku blisko entry" od "pozycja underwater". Przy underwater pozycji blokowanie close orderów jest GORSZE niż fee — bot siedzi z rosnącą stratą bez możliwości wyjścia.
+
+**Fix w `src/mm_hl.ts` (MIN_PROFIT sekcja):**
+```typescript
+// Check if position is underwater (mid is worse than entry)
+const isUnderwaterShort = isShort && midPrice > entryPx
+const isUnderwaterLong = isLong && midPrice < entryPx
+
+if (isUnderwaterShort || isUnderwaterLong) {
+  // Position is underwater — SKIP min profit filter, allow closing at a loss
+  console.log(`📐 [MIN_PROFIT] ${pair}: BYPASSED — position underwater → allow loss-cutting`)
+} else {
+  // Normal MIN_PROFIT filtering for profitable positions
+  // ... existing filter logic unchanged ...
+}
+```
+
+**Wynik live:**
+```
+Przed: kPEPE Multi-Layer: 0 orders (MIN_PROFIT usunął wszystkie 8 asków)
+Po:    kPEPE Multi-Layer: 8 orders | asks=8 | $800 notional
+```
+
+6 close fills: -$0.27 do -$0.53 per $100 = łącznie -$2.42. Kontrolowane wyjście z pozycji zamiast 30+ min zamrożenia.
+
+**Logika:** MIN_PROFIT ma sens gdy pozycja jest w zysku — nie chcesz oddawać profitu na feesach. Ale gdy pozycja jest underwater, KAŻDE zamknięcie (nawet z feesem) jest lepsze niż trzymanie rosnącej straty.
+
+**Pliki:** `src/mm_hl.ts` (+15/-0)
+
+### 76. Risk Manager Transfer Detection — auto re-baseline on USDC transfers (28.02)
+
+**Problem:** Risk Manager porównywał `initialEquity` (snapshot przy starcie) z bieżącą equity. Przelew USDC (`usd_class_transfer` na xyz dex) zmniejszył equity z $8,837 do $8,572 = 3.0% drawdown → **RISK MANAGER HALT → `process.exit(1)`**. Bot zatrzymał się na 30+ minut mimo że nie było żadnej straty tradingowej.
+
+**Root cause:** Risk Manager nie odróżniał transferów od strat. `drawdown = (initialEquity - currentEquity) / initialEquity` — transfer USDC na inny dex zmniejsza equity identycznie jak strata.
+
+**Fix w `src/risk/RiskManager.ts`:**
+```typescript
+// New property
+private lastCheckedEquity: number = 0;
+private static readonly TRANSFER_THRESHOLD_PCT = 0.01;  // 1%
+private static readonly TRANSFER_MIN_USD = 50;           // $50
+
+// At top of checkHealth(), BEFORE drawdown checks:
+if (this.lastCheckedEquity > 0) {
+  const tickDelta = this.lastCheckedEquity - currentEquity;
+  const tickDeltaPct = Math.abs(tickDelta) / this.lastCheckedEquity;
+
+  if (tickDeltaPct > 0.01 && Math.abs(tickDelta) > 50) {
+    if (tickDelta > 0) {
+      // Withdrawal/transfer OUT
+      console.log(`[RISK_MANAGER] 💸 Transfer OUT detected: -$${tickDelta} — adjusting baseline`);
+      this.initialEquity -= tickDelta;
+      this.highWaterMark = Math.min(this.highWaterMark, currentEquity);
+    } else {
+      // Deposit IN
+      console.log(`[RISK_MANAGER] 💰 Deposit detected: +$${-tickDelta} — adjusting baseline`);
+      this.initialEquity += (-tickDelta);
+    }
+  }
+}
+this.lastCheckedEquity = currentEquity;
+```
+
+**Heurystyka:** MM bot na $100 orderach nie może stracić >1% equity ($88) w jednym 60s ticku. Nagły drop >1% AND >$50 = przelew USDC, nie trading. Działa w obie strony (withdrawal + deposit).
+
+**Scenariusz:**
+```
+Przed: Transfer $265 → drawdown 3.0% → HALT → bot martwy 30+ min
+Po:    Transfer $265 → "💸 Transfer OUT detected" → baseline $8837→$8572 → bot działa
+```
+
+**Pliki:** `src/risk/RiskManager.ts` (+32/-2)
+
+### 75. xyz:GOLD support — vip_spy + copy-general + asset map (28.02)
+
+**Problem:** Hyperliquid xyz dex (builder-deployed perps: GOLD, TSLA, NVDA, etc. — 47 assets) był niewidoczny dla botów. vip_spy.py nie fetchował xyz pozycji, general_copytrade.ts nie mógł kopiować xyz trades.
+
+**Rozwiązanie:** Dodano xyz dex support do obu botów.
+
+**A) vip_spy.py — dual-dex position fetching:**
+```python
+dex_configs = [
+    (None, "perps"),     # standard perps (no dex param)
+    ("xyz", "xyz dex"),  # xyz builder-deployed dex
+]
+for dex_param, dex_label in dex_configs:
+    payload = {"type": "clearinghouseState", "user": address}
+    if dex_param:
+        payload["dex"] = dex_param
+    # ... fetch + merge positions from both dexes
+```
+
+**B) general_copytrade.ts — 5 zmian:**
+
+| # | Zmiana | Opis |
+|---|--------|------|
+| 1 | `fetchXyzMidPrice()` | Nowa funkcja — l2Book dla xyz: coins (allMids nie zawiera xyz) |
+| 2 | `fetchOurPositions()` | Dual fetch: standard perps + xyz dex via raw axios POST |
+| 3 | Asset map | Ładuje xyz meta (offset 110000). API zwraca nazwy z `xyz:` prefixem |
+| 4 | Leverage | `xyzCoins` array: xyz:GOLD 2x isolated |
+| 5 | `processTick()` | Fetch xyz mid prices via l2Book dla coins starting with `xyz:` |
+
+**C) vip_config.json — `xyz:GOLD` dodany do `watched_coins`**
+
+**xyz API details:**
+- `clearinghouseState` z `dex: "xyz"` → xyz pozycje
+- `meta` z `dex: "xyz"` → 47 xyz assets, nazwy z prefixem `xyz:` (np. `xyz:GOLD`)
+- `l2Book` z `coin: "xyz:GOLD"` → orderbook (mid price)
+- `allMids` NIE zawiera xyz assets
+- Asset indices: `110000 + position_in_universe` (xyz:GOLD = 110003)
+- `onlyIsolated: true`, `marginMode: "noCross"` — xyz wymusza isolated margin
+
+**Verified live:**
+```
+Asset map: 229 standard perps + 47 xyz dex pairs = 276 total
+Set xyz:GOLD leverage to 2x isolated
+vip-spy: Generał xyz:GOLD 25 GOLD LONG $134K, Pułkownik xyz:XYZ100 $4.4M
+```
+
+**Odkrycie z logów:** Inne VIPy też tradują xyz assets:
+- Pułkownik: xyz:XYZ100 $4.4M
+- Kapitan BTC: xyz:MU $625K, xyz:SNDK $594K, xyz:MSTR $70K, xyz:SILVER $29K
+
+**Pliki:** `scripts/vip_spy.py` (+95/-71), `scripts/general_copytrade.ts` (+86/-3), `scripts/vip_config.json` (+1/-1)
+
 ### 74. BTC Prediction Proxy — cross-token intelligence, XGBoost 62→65 features (28.02)
 
 **Problem:** Tokeny (kPEPE, FARTCOIN, SOL, etc.) mają ~95% korelację z BTC (Pearson 24h), ale model XGBoost każdego tokena musiał samodzielnie odkrywać kierunek rynku z surowych danych. Istniejące BTC cross-features [49-52] to surowe dane (change_1h/4h, RSI, korelacja) — nie predykcje.

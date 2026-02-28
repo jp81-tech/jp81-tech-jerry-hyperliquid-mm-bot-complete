@@ -1,5 +1,5 @@
 {
-  "watched_coins": ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "XMR", "MON", "kPEPE", "BCH", "PAXG", "AVAX"],
+  "watched_coins": ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "XMR", "MON", "kPEPE", "BCH", "PAXG", "AVAX", "xyz:GOLD"],
   "poll_intervals": {
     "tier1": 30,
     "tier2": 120,

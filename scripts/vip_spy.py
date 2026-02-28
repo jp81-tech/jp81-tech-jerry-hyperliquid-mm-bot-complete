@@ -39,7 +39,7 @@ VIP_TARGETS_DEFAULT = {
     }
 }
 
-WATCHED_COINS_DEFAULT = ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL"]
+WATCHED_COINS_DEFAULT = ["LIT", "FARTCOIN", "HYPE", "BTC", "SOL", "ETH", "DOGE", "SUI", "ZEC", "VIRTUAL", "XRP", "BNB", "LTC", "ENA", "S", "PUMP", "ASTER", "UNI", "XPL", "xyz:GOLD"]
 
 POLL_INTERVALS_DEFAULT = {
     "tier1": 30,
@@ -132,49 +132,58 @@ def send_telegram(message: str):
 def get_positions(address: str, watched_coins: list, vip_name: str = "", track_all: bool = False) -> dict:
     """Pobierz pozycje z Hyperliquid API z dust filter.
     track_all=True → trackuj WSZYSTKIE coiny (dla Generała + copy-trading)
+    Fetches both standard perps AND xyz dex positions.
     """
-    try:
-        response = requests.post(
-            HL_API_URL,
-            json={"type": "clearinghouseState", "user": address},
-            timeout=10
-        )
-        if response.status_code == 429:
-            log(f"Rate limited for {address[:10]}, retry in 5s", "ERROR")
-            time.sleep(5)
-            return {}
-        data = response.json()
-        if data is None:
-            return {}
+    positions = {}
 
-        positions = {}
-        for p in data.get("assetPositions", []):
-            pos = p.get("position", {})
-            coin = pos.get("coin")
-            szi = float(pos.get("szi", 0))
-            position_value = abs(float(pos.get("positionValue", 0)))
+    # Fetch from both standard perps and xyz dex
+    dex_configs = [
+        (None, "perps"),    # standard perps (no dex param)
+        ("xyz", "xyz dex"), # xyz builder-deployed dex (GOLD, TSLA, etc.)
+    ]
 
-            # Dust/spam filter:
-            # 1. Size > 0.001 (mikro-pozycje)
-            # 2. Position value > $10 (tokeny za $0 = spam/dust)
-            # 3. Coin on whitelist OR track_all=True (Generał)
-            if abs(szi) > 0.001 and position_value > DUST_THRESHOLD_USD:
-                if track_all or coin in watched_coins:
-                    positions[coin] = {
-                        "size": szi,
-                        "side": "SHORT" if szi < 0 else "LONG",
-                        "entry_px": float(pos.get("entryPx", 0)),
-                        "position_value": position_value,
-                        "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
-                        "leverage": pos.get("leverage", {}).get("value", "cross")
-                    }
-                elif position_value > 1000:
-                    log(f"UNKNOWN COIN: {vip_name} has {coin} worth ${position_value:.0f} - not in WATCHED_COINS", "WARN")
+    for dex_param, dex_label in dex_configs:
+        try:
+            payload = {"type": "clearinghouseState", "user": address}
+            if dex_param:
+                payload["dex"] = dex_param
 
-        return positions
-    except Exception as e:
-        log(f"API error for {address[:10]}: {e}", "ERROR")
-        return {}
+            response = requests.post(HL_API_URL, json=payload, timeout=10)
+            if response.status_code == 429:
+                log(f"Rate limited for {address[:10]} ({dex_label}), retry in 5s", "ERROR")
+                time.sleep(5)
+                continue
+            data = response.json()
+            if data is None:
+                continue
+
+            for p in data.get("assetPositions", []):
+                pos = p.get("position", {})
+                coin = pos.get("coin")
+                szi = float(pos.get("szi", 0))
+                position_value = abs(float(pos.get("positionValue", 0)))
+
+                # Dust/spam filter:
+                # 1. Size > 0.001 (mikro-pozycje)
+                # 2. Position value > $10 (tokeny za $0 = spam/dust)
+                # 3. Coin on whitelist OR track_all=True (Generał)
+                if abs(szi) > 0.001 and position_value > DUST_THRESHOLD_USD:
+                    if track_all or coin in watched_coins:
+                        positions[coin] = {
+                            "size": szi,
+                            "side": "SHORT" if szi < 0 else "LONG",
+                            "entry_px": float(pos.get("entryPx", 0)),
+                            "position_value": position_value,
+                            "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                            "leverage": pos.get("leverage", {}).get("value", "cross")
+                        }
+                    elif position_value > 1000:
+                        log(f"UNKNOWN COIN: {vip_name} has {coin} worth ${position_value:.0f} - not in WATCHED_COINS", "WARN")
+
+        except Exception as e:
+            log(f"API error for {address[:10]} ({dex_label}): {e}", "ERROR")
+
+    return positions
 
 def load_state() -> dict:
     """Załaduj poprzedni stan"""

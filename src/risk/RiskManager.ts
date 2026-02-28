@@ -37,10 +37,17 @@ export class RiskManager {
   private isShutdown: boolean = false;
   private sessionStartTime: number;
   private highWaterMark: number;
+  private lastCheckedEquity: number = 0;
+
+  // Transfer detection: MM bot on $100 orders can't lose/gain >1% in a single 60s tick.
+  // Large single-tick equity changes = USDC transfer/withdrawal/deposit, not trading.
+  private static readonly TRANSFER_THRESHOLD_PCT = 0.01;  // 1%
+  private static readonly TRANSFER_MIN_USD = 50;           // $50 minimum
 
   constructor(initialEquity: number, config: RiskConfig) {
     this.initialEquity = initialEquity;
     this.highWaterMark = initialEquity;
+    this.lastCheckedEquity = initialEquity;
     this.config = config;
     this.sessionStartTime = Date.now();
 
@@ -48,6 +55,7 @@ export class RiskManager {
     console.log(`  Initial Equity: $${initialEquity.toFixed(2)}`);
     console.log(`  Max Daily Drawdown: ${(config.maxDailyDrawdownPct * 100).toFixed(1)}%`);
     console.log(`  Max Inventory: ${(config.maxInventoryPct * 100).toFixed(0)}%`);
+    console.log(`  Transfer detection: ON (>1% or >$50 single-tick = auto re-baseline)`);
     if (config.hardStopPrice) {
       console.log(`  Hard Stop Price: $${config.hardStopPrice}`);
     }
@@ -71,6 +79,30 @@ export class RiskManager {
         severity: 'critical'
       };
     }
+
+    // === 0. TRANSFER DETECTION: Auto re-baseline on withdrawals/deposits ===
+    // MM bot on $100 orders can't move equity >1% in a single 60s tick.
+    // Large single-tick drops = USDC transfer (e.g. usd_class_transfer to xyz dex).
+    if (this.lastCheckedEquity > 0) {
+      const tickDelta = this.lastCheckedEquity - currentEquity;
+      const tickDeltaPct = Math.abs(tickDelta) / this.lastCheckedEquity;
+
+      if (tickDeltaPct > RiskManager.TRANSFER_THRESHOLD_PCT && Math.abs(tickDelta) > RiskManager.TRANSFER_MIN_USD) {
+        if (tickDelta > 0) {
+          // Withdrawal/transfer OUT
+          console.log(`[RISK_MANAGER] 💸 Transfer OUT detected: -$${tickDelta.toFixed(2)} (${(tickDeltaPct * 100).toFixed(2)}%) in single tick — adjusting baseline`);
+          this.initialEquity -= tickDelta;
+          this.highWaterMark = Math.min(this.highWaterMark, currentEquity);
+        } else {
+          // Deposit IN
+          const deposit = -tickDelta;
+          console.log(`[RISK_MANAGER] 💰 Deposit detected: +$${deposit.toFixed(2)} (${(tickDeltaPct * 100).toFixed(2)}%) in single tick — adjusting baseline`);
+          this.initialEquity += deposit;
+        }
+        console.log(`[RISK_MANAGER] 📊 New baseline: $${this.initialEquity.toFixed(2)}, HWM: $${this.highWaterMark.toFixed(2)}`);
+      }
+    }
+    this.lastCheckedEquity = currentEquity;
 
     // Update high water mark
     if (currentEquity > this.highWaterMark) {

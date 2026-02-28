@@ -181,13 +181,31 @@ async function fetchMidPrices(): Promise<Record<string, number>> {
   }
 }
 
+/** Fetch mid price for xyz: coins via l2Book (allMids doesn't include xyz dex) */
+async function fetchXyzMidPrice(coin: string): Promise<number | null> {
+  try {
+    const resp = await axios.post(HL_API_URL, { type: 'l2Book', coin }, { timeout: 10000 })
+    const levels = resp.data?.levels || [[], []]
+    const bid = levels[0]?.[0]?.px ? parseFloat(levels[0][0].px) : 0
+    const ask = levels[1]?.[0]?.px ? parseFloat(levels[1][0].px) : 0
+    if (bid > 0 && ask > 0) return (bid + ask) / 2
+    if (bid > 0) return bid
+    if (ask > 0) return ask
+    return null
+  } catch {
+    return null
+  }
+}
+
 async function fetchOurPositions(
   infoClient: hl.InfoClient,
   walletAddress: string
 ): Promise<Record<string, { size: number; entryPx: number; value: number; pnl: number }>> {
+  const positions: Record<string, { size: number; entryPx: number; value: number; pnl: number }> = {}
+
+  // Standard perps
   try {
     const state = await infoClient.clearinghouseState({ user: walletAddress })
-    const positions: Record<string, { size: number; entryPx: number; value: number; pnl: number }> = {}
     for (const p of state.assetPositions) {
       const pos = p.position
       const size = parseFloat(String(pos.szi))
@@ -200,11 +218,35 @@ async function fetchOurPositions(
         }
       }
     }
-    return positions
   } catch (e) {
-    log(`Fetch our positions failed: ${e}`, 'ERROR')
-    return {}
+    log(`Fetch our perp positions failed: ${e}`, 'ERROR')
   }
+
+  // xyz dex positions (GOLD, TSLA, etc.)
+  try {
+    const resp = await axios.post(HL_API_URL, {
+      type: 'clearinghouseState', user: walletAddress, dex: 'xyz'
+    }, { timeout: 10000 })
+    const data = resp.data
+    if (data?.assetPositions) {
+      for (const p of data.assetPositions) {
+        const pos = p.position
+        const size = parseFloat(String(pos.szi))
+        if (Math.abs(size) > 0.0001) {
+          positions[pos.coin] = {
+            size,
+            entryPx: parseFloat(String(pos.entryPx)),
+            value: Math.abs(parseFloat(String(pos.positionValue))),
+            pnl: parseFloat(String(pos.unrealizedPnl)),
+          }
+        }
+      }
+    }
+  } catch (e) {
+    log(`Fetch our xyz positions failed: ${e}`, 'ERROR')
+  }
+
+  return positions
 }
 
 // ============================================================
@@ -363,6 +405,14 @@ async function processTick(
   if (Object.keys(mids).length === 0) {
     log('Failed to fetch mid prices — skipping', 'ERROR')
     return
+  }
+
+  // 2b. Fetch mid prices for xyz: coins (not in allMids)
+  for (const coin of Object.keys(generalPos)) {
+    if (coin.startsWith('xyz:') && !mids[coin]) {
+      const xyzMid = await fetchXyzMidPrice(coin)
+      if (xyzMid) mids[coin] = xyzMid
+    }
   }
 
   // 3. Fetch our current positions
@@ -591,10 +641,26 @@ async function main() {
       assetMap.set(market.name, index)
       szDecMap.set(market.name, market.szDecimals || 0)
     })
-    log(`Asset map: ${assetMap.size} pairs loaded`)
+    log(`Asset map: ${assetMap.size} standard perps loaded`)
   } catch (e) {
     log(`Failed to load asset metadata: ${e}`, 'ERROR')
     process.exit(1)
+  }
+
+  // Load xyz dex assets (GOLD, TSLA, etc.) — offset 110000
+  // API returns names with xyz: prefix already (e.g. "xyz:GOLD")
+  try {
+    const resp = await axios.post(HL_API_URL, { type: 'meta', dex: 'xyz' }, { timeout: 10000 })
+    const meta = resp.data
+    const universe = meta.universe || []
+    const XYZ_OFFSET = 110000
+    universe.forEach((market: any, index: number) => {
+      assetMap.set(market.name, XYZ_OFFSET + index)
+      szDecMap.set(market.name, market.szDecimals || 0)
+    })
+    log(`Asset map: +${universe.length} xyz dex pairs loaded (total: ${assetMap.size})`)
+  } catch (e) {
+    log(`Failed to load xyz dex metadata (non-fatal): ${e}`, 'ERROR')
   }
 
   // Set leverage for common coins (if live)
@@ -606,6 +672,16 @@ async function main() {
       try {
         await exchClient.updateLeverage({ asset: idx, isCross: true, leverage: config.leverage })
       } catch { /* some coins may not support the leverage level */ }
+    }
+    // xyz dex coins: onlyIsolated, max leverage varies
+    const xyzCoins = [{ name: 'xyz:GOLD', leverage: 2 }]
+    for (const xyzCoin of xyzCoins) {
+      const idx = assetMap.get(xyzCoin.name)
+      if (idx === undefined) continue
+      try {
+        await exchClient.updateLeverage({ asset: idx, isCross: false, leverage: xyzCoin.leverage })
+        log(`Set ${xyzCoin.name} leverage to ${xyzCoin.leverage}x isolated`)
+      } catch { /* xyz coin may not be available */ }
     }
     log(`Leverage set to ${config.leverage}x for common coins`)
   }
