@@ -6097,7 +6097,7 @@ Trzy pozornie niepowiazane problemy (Risk Manager HALT, MIN_PROFIT freeze, xyz n
 
 W kazdym przypadku fix polegal na **dodaniu brakujacej informacji**:
 - Risk Manager dostal `lastCheckedEquity` (porownanie tick-to-tick)
-- MIN_PROFIT dostal `isUnderwaterShort/Long` (porownanie mid vs entry)
+- MIN_PROFIT dostal `isUnderwaterShort/Long` (porownanie mid vs entry) — potem usuniety, bo powodowal zamykanie shortow na stracie
 - vip_spy dostal `dex: "xyz"` (drugie zrodlo danych)
 
 To jest fundamentalna zasada dobrego inzyniering: **kazda decyzja w kodzie powinna byc oparta na pelnym kontekscie**. Jesli system podejmuje decyzje (HALT, blokuj ordery, ignoruj pozycje) bez pelnego obrazu, bedzie podejmowal zle decyzje.
@@ -6107,7 +6107,131 @@ To jest fundamentalna zasada dobrego inzyniering: **kazda decyzja w kodzie powin
 | Plik | Zmiana | LOC |
 |------|--------|-----|
 | `src/risk/RiskManager.ts` | Transfer Detection heuristic | +32 |
-| `src/mm_hl.ts` | MIN_PROFIT underwater bypass | +15 |
+| `src/mm_hl.ts` | MIN_PROFIT + BIAS LOCK fix | -38/+24 |
 | `scripts/vip_spy.py` | Dual-dex position fetching | +95/-71 |
 | `scripts/general_copytrade.ts` | xyz asset map + mid price + leverage | +86/-3 |
 | `scripts/vip_config.json` | xyz:GOLD w watched_coins | +1/-1 |
+
+---
+
+## Rozdzial 39: Catch-22 — Jak Dwa Bugi Tworzą Jeden Wielki Problem
+
+### Scena: Piątkowy wieczor, bot zamrozony
+
+Jest piątek 28 lutego, ~21:00 UTC. Jerry sprawdza bota i widzi: **zero open orders na kPEPE**. Bot jest SHORT na kPEPE (entry $0.003631, mid $0.003671, -17% skew), ale nie ma ŻADNYCH orderów na giełdzie. Kompletnie martwy.
+
+### Anatomia Catch-22
+
+Catch-22 to sytuacja, gdy dwa pozornie rozsądne zasady razem tworzą paradoks. W naszym przypadku:
+
+**Zasada 1 (MIN_PROFIT):** "Nie zamykaj pozycji na stracie — fee zje zysk"
+- Bot jest SHORT. Bid = close order (kupno). Entry = $0.003631, mid = $0.003671.
+- Mid > entry = underwater. Każdy bid blisko mid zamknąłby shorta ze stratą + fee.
+- MIN_PROFIT filtr: usuwa WSZYSTKIE 8 bidów. **bids = 0** ✓ (prawidłowe zachowanie)
+
+**Zasada 2 (BIAS LOCK):** "Jeśli jesteś SHORT >15%, nie shortuj więcej"
+- Bot ma -17.2% skew (SHORT heavy). `inventorySkew = -0.172`.
+- W `generateGridOrdersCustom()`: `skewSkipAsks = inventorySkew < -0.15 && actualSkew < 0.05`
+- `-0.172 < -0.15` = true, `-0.172 < 0.05` = true → **asks = 0** (skipAsks!)
+
+Każda zasada z osobna jest sensowna:
+- MIN_PROFIT chroni przed fee-eating ✓
+- BIAS LOCK chroni przed piling on to losing position ✓
+
+Ale razem: **bids=0 + asks=0 = 0 orderów = martwy bot** ✗
+
+### Dlaczego BIAS LOCK nie powinien dotyczyć PURE_MM?
+
+BIAS LOCK został zaprojektowany dla SM-following botów. Gdy Generał mówi "SHORT LIT", bot shortuje i BIAS LOCK mówi "nie dodawaj więcej shortów ponad 15%". To ma sens.
+
+Ale kPEPE jest w trybie **PURE_MM** — market maker, nie trader kierunkowy. MM musi **quotować obie strony** żeby łapać spread. Blokowanie asków = odcinanie połowy zarobku.
+
+PURE_MM już miał mechanizm ochrony: `PURE_MM_REGIME_BYPASS` (dodany w rozdziale 31 — Regime Bypass). Problem? Sprawdzenie override w grid managerze szukało słowa `'override'` w reason stringu:
+
+```typescript
+// grid_manager.ts, linia 217
+if (permissions.reason && permissions.reason.includes('override')) {
+    if (permissions.allowShorts) skewSkipAsks = false  // ← to powinno się odpalić
+}
+```
+
+Ale permission reason był `'PURE_MM_REGIME_BYPASS'` — nie zawierał słowa `'override'`! Więc BIAS LOCK nie był wyłączany.
+
+### Fix: Jedno słowo
+
+```typescript
+// PRZED:
+reason: 'PURE_MM_REGIME_BYPASS'        // nie matchuje 'override'
+
+// PO:
+reason: 'PURE_MM_REGIME_BYPASS_override'  // matchuje!
+```
+
+Dosłownie dodanie `_override` do stringa. Najmniejszy możliwy fix, który naprawia cały problem.
+
+### Historia MIN_PROFIT bypass (3 iteracje w jednej sesji)
+
+To jest historia o tym, jak szukaliśmy problemu w złym miejscu, zanim znaleźliśmy prawdziwy root cause.
+
+**Iteracja 1 — MIN_PROFIT bypass v1 (naiwny):**
+- Problem: 0 orderów bo MIN_PROFIT usuwa wszystkie bidy
+- "Rozwiązanie": bypass MIN_PROFIT gdy pozycja underwater
+- Efekt: bot zamykał KAŻDEGO shorta na stracie — 19 fills w 20 minut, -$8.50. Katastrofa.
+
+**Iteracja 2 — MIN_PROFIT bypass v2 (z progiem 20bps):**
+- Problem: v1 za agresywny
+- "Rozwiązanie": bypass tylko gdy >20bps underwater
+- Efekt: kPEPE ruszył się 33-41bps → bypass aktywny → 5 fills, -$2.42. Nadal źle.
+- Jerry: "kurwa, cena podchodzi pod resistance to bot nie ma zamykac shortow na minusie"
+
+**Iteracja 3 — Prawdziwy fix (BIAS LOCK override):**
+- Usunięto CAŁY bypass MIN_PROFIT — bot NIE zamyka shortów na stracie ✓
+- Naprawiono BIAS LOCK → asks wracają, bot quotuje sell-side ✓
+- Wynik: `bids=0 asks=8` — bot żyje, nie zamyka na stracie, czeka na mean-reversion
+
+### Lekcja: "Nie szukaj pod latarnią"
+
+Pierwszy odruch to naprawiać to, co widać w logach: "MIN_PROFIT usunął 8 orderów → napraw MIN_PROFIT". Ale prawdziwy problem był gdzie indziej — w grid managerze, który nie generował asków. MIN_PROFIT działał prawidłowo!
+
+To jest klasyczny "streetlight effect" — szukasz kluczy pod latarnią, bo tam jest jasno, a nie tam gdzie je zgubiłeś.
+
+**Technika debugowania która pomogła:**
+1. Nie patrz tylko na logi błędów — patrz na brakujące logi
+2. `bids=0 asks=0` → pytanie: "skąd 0 asków?" (MIN_PROFIT nie rusza asków!)
+3. Trace backwards: `generateGridOrdersCustom()` → BIAS LOCK → permission reason → `'PURE_MM_REGIME_BYPASS'` nie matchuje `'override'`
+
+### Diagram końcowego stanu
+
+```
+         GRID GENERATION
+              │
+    ┌─────────┴─────────┐
+    │                    │
+  BIDS (close)       ASKS (open)
+    │                    │
+  BIAS LOCK?           BIAS LOCK?
+  inventorySkew>0.15?  inventorySkew<-0.15?
+    │ NO (skew=-0.17)    │ YES → ALE 'override' w reason!
+    │                    │ → skewSkipAsks = false ✓
+    ▼                    ▼
+  8 bids generated    8 asks generated
+    │                    │
+  MIN_PROFIT           (nie filtrowane)
+  entry=$0.003631      │
+  maxBid=$0.003627     │
+  all 8 bids > maxBid  │
+    │                    │
+  REMOVED (all 8)      KEPT (all 8)
+    │                    │
+    ▼                    ▼
+  bids=0              asks=8
+         │
+    RESULT: 8 orders ✓
+```
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | `PURE_MM_REGIME_BYPASS` → `PURE_MM_REGIME_BYPASS_override` + usunięcie MIN_PROFIT bypass |
+| `src/utils/grid_manager.ts` | Nie zmieniony — BIAS LOCK + override mechanism już istniały |

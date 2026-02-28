@@ -47,38 +47,53 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
-### 77. MIN_PROFIT bypass for underwater positions — unblock loss-cutting (28.02)
+### 77. MIN_PROFIT + BIAS LOCK fix — 0 orders deadlock resolved (28.02)
 
-**Problem:** kPEPE miał LONG pozycję underwater (entry $0.003555, mid $0.003527 = -8bps). MIN_PROFIT filter (10bps minimum) usuwał WSZYSTKIE close ordery (aski) bo żaden nie spełniał wymogu 10bps profitu od entry. Efekt: **0 orderów na giełdzie przez 30+ minut** — bot kompletnie zamrożony, nie mógł zamknąć pozycji.
+**Problem:** kPEPE miał SHORT pozycję underwater (entry $0.003631, mid $0.003671). Bot generował **0 orderów** — kompletnie zamrożony. Dwa niezależne bugi jednocześnie eliminowały oba kierunki:
 
-**Root cause:** MIN_PROFIT chronił przed fee-eating (zamykanie na break-even), ale nie rozróżniał "pozycja w zysku blisko entry" od "pozycja underwater". Przy underwater pozycji blokowanie close orderów jest GORSZE niż fee — bot siedzi z rosnącą stratą bez możliwości wyjścia.
+| Bug | Co eliminował | Root cause |
+|-----|---------------|-----------|
+| MIN_PROFIT (bidy=0) | Usuwał WSZYSTKIE 8 bidów (close orders) | Cena > entry = close at loss → filtered |
+| BIAS LOCK (aski=0) | Grid nie generował ŻADNYCH asków (open orders) | `skewSkipAsks = inventorySkew < -0.15 && actualSkew < 0.05` |
 
-**Fix w `src/mm_hl.ts` (MIN_PROFIT sekcja):**
+**Root cause BIAS LOCK:** W `generateGridOrdersCustom()` (`grid_manager.ts`), BIAS LOCK blokuje ask orders gdy `inventorySkew < -0.15` (bot jest SHORT >15%). Override check `permissions.reason.includes('override')` nie matchował bo reason = `'PURE_MM_REGIME_BYPASS'` (nie zawiera 'override'). Efekt: aski=0 nawet dla PURE_MM market makera.
+
+**Root cause MIN_PROFIT:** Poprzednio dodano bypass dla underwater pozycji (v1 → v2 → v2 removed). v1/v2 bypassowały MIN_PROFIT gdy underwater → bot zamykał shorty na stracie (-$0.32 do -$0.46 per $100). User: "cena podchodzi pod resistance to bot nie ma zamykac shortow na minusie". Bypass usunięty — MIN_PROFIT zawsze filtruje. Ale bez asków = deadlock.
+
+**Fix 1 — BIAS LOCK override (`mm_hl.ts`):**
 ```typescript
-// Check if position is underwater (mid is worse than entry)
-const isUnderwaterShort = isShort && midPrice > entryPx
-const isUnderwaterLong = isLong && midPrice < entryPx
+// PRZED: reason = 'PURE_MM_REGIME_BYPASS' → nie matchował 'override'
+// PO: reason = 'PURE_MM_REGIME_BYPASS_override' → matchuje!
+const permissions = isPureMmRegimeBypass
+  ? { allowLongs: true, allowShorts: true, reason: 'PURE_MM_REGIME_BYPASS_override' }
+  : this.marketVision!.getTradePermissions(pair);
+```
 
-if (isUnderwaterShort || isUnderwaterLong) {
-  // Position is underwater — SKIP min profit filter, allow closing at a loss
-  console.log(`📐 [MIN_PROFIT] ${pair}: BYPASSED — position underwater → allow loss-cutting`)
-} else {
-  // Normal MIN_PROFIT filtering for profitable positions
-  // ... existing filter logic unchanged ...
-}
+**Fix 2 — MIN_PROFIT bypass removed (mm_hl.ts):**
+```typescript
+// Usunięto cały isUnderwaterShort/isUnderwaterLong bypass
+// MIN_PROFIT ZAWSZE filtruje close orders < 10bps od entry
+// PURE_MM should hold and mean-revert, not panic-close
 ```
 
 **Wynik live:**
 ```
-Przed: kPEPE Multi-Layer: 0 orders (MIN_PROFIT usunął wszystkie 8 asków)
-Po:    kPEPE Multi-Layer: 8 orders | asks=8 | $800 notional
+Przed: kPEPE Multi-Layer: 0 orders (bids=0 asks=0) — bot zamrożony
+Po:    kPEPE Multi-Layer: 8 orders (bids=0 asks=8) — bot quotuje sell-side
 ```
 
-6 close fills: -$0.27 do -$0.53 per $100 = łącznie -$2.42. Kontrolowane wyjście z pozycji zamiast 30+ min zamrożenia.
+**Logika mean-reversion:**
+- `bids=0` — MIN_PROFIT filtruje close orders (nie zamykaj SHORT na stracie) ✓
+- `asks=8` — BIAS LOCK overridden, bot quotuje asks (sell-side liquidity) ✓
+- Gdy cena spadnie poniżej entry - 10bps → bidy wrócą (profitable close) ✓
+- kPEPE SKEW i Momentum Guard nadal redukują ask SIZE (×0.61) → nie dodaje masywnie do pozycji ✓
 
-**Logika:** MIN_PROFIT ma sens gdy pozycja jest w zysku — nie chcesz oddawać profitu na feesach. Ale gdy pozycja jest underwater, KAŻDE zamknięcie (nawet z feesem) jest lepsze niż trzymanie rosnącej straty.
+**Catch-22 historia (3 iteracje w jednej sesji):**
+1. **MIN_PROFIT bypass v1** — bypassed for ANY underwater → bot zamykał shorty na stracie (19 fills, -$8.50)
+2. **MIN_PROFIT bypass v2** — bypassed when >20bps underwater → nadal zamykał (5 fills, -$2.42)
+3. **MIN_PROFIT bypass REMOVED + BIAS LOCK fix** — zero close on loss, asks restored via override ✓
 
-**Pliki:** `src/mm_hl.ts` (+15/-0)
+**Pliki:** `src/mm_hl.ts` (-38/+24)
 
 ### 76. Risk Manager Transfer Detection — auto re-baseline on USDC transfers (28.02)
 
