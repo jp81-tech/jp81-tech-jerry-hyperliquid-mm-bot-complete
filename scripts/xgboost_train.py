@@ -57,22 +57,44 @@ THRESHOLDS = {
     "m1":  0.150,   # 15.0%
 }
 
-# Per-token threshold overrides — volatile tokens need lower thresholds
-# Without this, 67% of kPEPE h4 labels = NEUTRAL → model learns "always say NEUTRAL"
+# Per-token threshold overrides — each token's volatility determines optimal thresholds
+# Rule: threshold ≈ p30-p35 of abs price changes → ~35-40% NEUTRAL labels
+# Without this, low-vol tokens (BTC h4: 88% NEUTRAL) learn "always say NEUTRAL"
 TOKEN_THRESHOLDS: dict[str, dict[str, float]] = {
-    "kPEPE": {
-        "h1":  0.003,   # 0.3% (kPEPE median h1 move ~0.5%)
-        "h4":  0.008,   # 0.8% (kPEPE median h4 move ~1.0%)
-        "h12": 0.020,   # 2.0% (kPEPE std h12 ~3.5%)
-        "w1":  0.060,   # 6.0%
-        "m1":  0.120,   # 12.0%
+    "BTC": {
+        "h1":  0.0015,  # 0.15% (BTC median h1 ~0.21%, very low vol)
+        "h4":  0.003,   # 0.3%  (BTC median h4 ~0.44%, default ±1.5% → 88% NEUTRAL!)
+        "h12": 0.006,   # 0.6%  (BTC median h12 ~0.89%)
+        "w1":  0.028,   # 2.8%
+        "m1":  0.059,   # 5.9%
     },
-    "FARTCOIN": {
-        "h1":  0.004,   # 0.4%
-        "h4":  0.010,   # 1.0%
-        "h12": 0.025,   # 2.5%
-        "w1":  0.070,   # 7.0%
-        "m1":  0.130,   # 13.0%
+    "ETH": {
+        "h1":  0.002,   # 0.2%  (ETH median h1 ~0.29%)
+        "h4":  0.004,   # 0.4%  (ETH median h4 ~0.60%, default ±1.5% → 79% NEUTRAL!)
+        "h12": 0.009,   # 0.9%  (ETH median h12 ~1.23%)
+        "w1":  0.040,   # 4.0%
+        "m1":  0.077,   # 7.7%
+    },
+    "SOL": {
+        "h1":  0.003,   # 0.3%  (SOL median h1 ~0.39%)
+        "h4":  0.006,   # 0.6%  (SOL median h4 ~0.79%, default ±1.5% → 74% NEUTRAL!)
+        "h12": 0.012,   # 1.2%  (SOL median h12 ~1.61%)
+        "w1":  0.047,   # 4.7%
+        "m1":  0.115,   # 11.5%
+    },
+    "XRP": {
+        "h1":  0.003,   # 0.3%  (XRP median h1 ~0.35%)
+        "h4":  0.005,   # 0.5%  (XRP median h4 ~0.68%, default ±1.5% → 77% NEUTRAL!)
+        "h12": 0.010,   # 1.0%  (XRP median h12 ~1.37%)
+        "w1":  0.043,   # 4.3%
+        "m1":  0.096,   # 9.6%
+    },
+    "ZEC": {
+        "h1":  0.006,   # 0.6%  (ZEC median h1 ~0.78%, already ~OK with default)
+        "h4":  0.012,   # 1.2%  (ZEC median h4 ~1.62%, default ±1.5% → 47% neutral = OK)
+        "h12": 0.022,   # 2.2%  (ZEC median h12 ~2.99%)
+        "w1":  0.080,   # 8.0%  (keep default)
+        "m1":  0.150,   # 15.0% (keep default)
     },
     "HYPE": {
         "h1":  0.004,
@@ -81,12 +103,26 @@ TOKEN_THRESHOLDS: dict[str, dict[str, float]] = {
         "w1":  0.070,
         "m1":  0.130,
     },
+    "kPEPE": {
+        "h1":  0.003,   # 0.3% (kPEPE median h1 move ~0.5%)
+        "h4":  0.008,   # 0.8% (kPEPE median h4 move ~1.0%)
+        "h12": 0.020,   # 2.0% (kPEPE std h12 ~3.5%)
+        "w1":  0.060,   # 6.0%
+        "m1":  0.120,   # 12.0%
+    },
     "LIT": {
         "h1":  0.004,
         "h4":  0.010,
         "h12": 0.025,
         "w1":  0.070,
         "m1":  0.130,
+    },
+    "FARTCOIN": {
+        "h1":  0.004,   # 0.4%
+        "h4":  0.010,   # 1.0%
+        "h12": 0.025,   # 2.5%
+        "w1":  0.070,   # 7.0%
+        "m1":  0.130,   # 13.0%
     },
 }
 
@@ -105,48 +141,77 @@ XGB_PARAMS = {
     "verbosity": 0,
 }
 
-# Per-token XGBoost params — larger datasets can handle more capacity
+# Per-token XGBoost params
+# BTC/ETH/SOL/XRP: large datasets (4600+ rows) → can use more trees with early stopping
+# kPEPE/FARTCOIN/LIT/HYPE: volatile memecoins → aggressive regularization (30/62 features dead for some)
+_REGULARIZED_PARAMS = {
+    "max_depth": 3,             # shallow trees — prevent memorization
+    "n_estimators": 300,        # many trees BUT early stopping will trim
+    "learning_rate": 0.03,      # slow learning → early stopping picks optimal count
+    "colsample_bytree": 0.5,    # aggressive feature dropout
+    "min_child_weight": 10,     # require more samples per leaf → smoother predictions
+    "subsample": 0.7,           # row subsampling → reduces overfitting
+    "reg_alpha": 0.1,           # L1 regularization
+    "reg_lambda": 2.0,          # L2 regularization (default 1.0)
+}
+
 TOKEN_XGB_PARAMS: dict[str, dict] = {
-    "kPEPE": {
-        "max_depth": 3,             # shallow trees — prevent memorization
-        "n_estimators": 300,        # many trees BUT early stopping will trim
-        "learning_rate": 0.03,      # slow learning → early stopping picks optimal count
-        "colsample_bytree": 0.5,    # aggressive feature dropout — 30/62 features dead
-        "min_child_weight": 10,     # require more samples per leaf → smoother predictions
-        "subsample": 0.7,           # row subsampling → reduces overfitting
-        "reg_alpha": 0.1,           # L1 regularization
-        "reg_lambda": 2.0,          # L2 regularization (default 1.0)
-    },
-    "FARTCOIN": {
-        "max_depth": 3,
+    # Majors — large datasets, moderate regularization
+    "BTC": {
+        "max_depth": 4,             # slightly deeper OK with 4600+ rows
         "n_estimators": 300,
         "learning_rate": 0.03,
-        "colsample_bytree": 0.5,
+        "colsample_bytree": 0.7,    # less aggressive — more features are alive
         "min_child_weight": 10,
-        "subsample": 0.7,
-        "reg_alpha": 0.1,
-        "reg_lambda": 2.0,
+        "subsample": 0.8,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.5,
     },
-    "LIT": {
-        "max_depth": 3,
+    "ETH": {
+        "max_depth": 4,
         "n_estimators": 300,
         "learning_rate": 0.03,
-        "colsample_bytree": 0.5,
+        "colsample_bytree": 0.7,
         "min_child_weight": 10,
-        "subsample": 0.7,
-        "reg_alpha": 0.1,
-        "reg_lambda": 2.0,
+        "subsample": 0.8,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.5,
     },
-    "HYPE": {
-        "max_depth": 3,
+    "SOL": {
+        "max_depth": 4,
         "n_estimators": 300,
         "learning_rate": 0.03,
-        "colsample_bytree": 0.5,
+        "colsample_bytree": 0.7,
         "min_child_weight": 10,
-        "subsample": 0.7,
-        "reg_alpha": 0.1,
-        "reg_lambda": 2.0,
+        "subsample": 0.8,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.5,
     },
+    "XRP": {
+        "max_depth": 4,
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "colsample_bytree": 0.7,
+        "min_child_weight": 10,
+        "subsample": 0.8,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.5,
+    },
+    "ZEC": {
+        "max_depth": 4,
+        "n_estimators": 300,
+        "learning_rate": 0.03,
+        "colsample_bytree": 0.7,
+        "min_child_weight": 10,
+        "subsample": 0.8,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.5,
+    },
+    # Volatile tokens — aggressive regularization
+    "kPEPE": dict(_REGULARIZED_PARAMS),
+    "FARTCOIN": dict(_REGULARIZED_PARAMS),
+    "LIT": dict(_REGULARIZED_PARAMS),
+    "HYPE": dict(_REGULARIZED_PARAMS),
 }
 
 # Early stopping rounds — stops training when test accuracy stops improving
