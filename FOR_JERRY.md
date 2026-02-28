@@ -5076,3 +5076,151 @@ Pattern sie powtarza, ale teraz mamy 4 wersje danych w jednym pliku:
 ```
 
 Kazda iteracja dodaje nowa warstwe padding. To dziala, ale jesli dodamy jeszcze 10 wersji, stanie sie nieczytelne. W przyszlosci rozwazymy **wersjonowanie datasetu** zamiast padding — nagłowek z wersja + automatyczna migracja. Ale na teraz padding jest prosty i dziala.
+
+---
+
+## Chapter 28: Tier-1 Features — Orderbook, MetaCtx i Derived (53→62)
+
+### Problem: model widzi przeszlosc, nie przyszlosc
+
+Wyobraz sobie ze prowadzisz samochod patrzac TYLKO w lusterko wsteczne. Widzisz gdzie byles (RSI, MACD, zmiany cen), ale nie widzisz co jest przed toba. To dokladnie sytuacja naszego modelu przed ta zmiana.
+
+**RSI mowi:** "cena spadla duzo w ostatnich 14 godzinach"
+**MACD mowi:** "momentum jest negatywny"
+**Orderbook mowi:** "80% orderow w orderbooku to SELL — zaraz spadnie jeszcze bardziej"
+
+Roznica? RSI i MACD patrza WSTECZ. Orderbook patrzy DO PRZODU — widzi presje ktora jeszcze sie nie zmaterializowala w cenie.
+
+### 3 grupy nowych features
+
+#### Grupa A: Orderbook (L2 data) — jedyny leading indicator
+
+```python
+# Hyperliquid API:
+POST {"type": "l2Book", "coin": "kPEPE"}
+# Zwraca: {"levels": [[bidy...], [aski...]]}
+# Kazdy level: {"px": "0.0035", "sz": "150000", "n": 3}
+```
+
+3 features:
+
+**[53] `bid_ask_imbalance`** — stosunek bid vs ask depth w top 5 levelach
+```
+imbalance = (bid_depth - ask_depth) / (bid_depth + ask_depth)
+```
+- **+0.48** (BTC live) = 74% bidow → rynek chce kupowac → bullish
+- **-0.80** (ETH live) = 90% askow → rynek chce sprzedawac → bearish
+- **-0.04** (kPEPE) = rownowaga → brak sygnalu
+
+To jak patrzenie na kolejke w sklepie — jesli 80% ludzi stoi w kolejce do kasy "SPRZEDAJ", wiesz ze cena spadnie zanim to sie stanie.
+
+**[54] `spread_bps`** — jak szeroki jest spread bid-ask
+- BTC: 0.15 bps (ultra tight — duza plynnosc)
+- kPEPE: 2.9 bps (szerszy — mniejsza plynnosc)
+
+Ciasny spread = duzo zainteresowania, rynek jest "zdrowy". Szeroki spread = nikt nie chce handlowac, potencjalny problem.
+
+**[55] `book_depth_ratio`** — depth / 24h volume
+- Ile plynnosci jest w orderbooku wzgledem dziennego obrotu
+- kPEPE: 0.044 (4.4% dziennego volumenu w booku) — relatywnie plytki
+
+#### Grupa B: MetaCtx — dane z istniejacego API (zero nowych callek!)
+
+Te dane JUZ mielismy — `metaAndAssetCtxs` zwraca `markPx`, `oraclePx`, `premium`, `dayNtlVlm`. Po prostu ich nie uzywalismy!
+
+**[56] `mark_oracle_spread`** — roznica miedzy cena perpa a spotem
+```
+spread = (markPx - oraclePx) / oraclePx × 100
+```
+- Ujemny = perp tanszy niz spot = BEARISH (traderzy shortuja perpa)
+- Dodatni = perp drozszy niz spot = BULLISH (traderzy longuja perpa)
+- BTC: -0.07 → perp z dyskontem → bearish pressure
+
+**[57] `oi_normalized`** — Open Interest / dzienny volume
+```
+oi_norm = OI / (volume_24h × 10)
+```
+- kPEPE: **1.0 (capped!)** — OI jest 10x wieksze niz dzienny volume
+- To znaczy: rynek jest EKSTREMALNIE overleveraged
+- Duzy OI/volume = duzo "nabojow" do liquidation cascade
+- Analogia: to jak widziec ze wszystkie samochody na autostradzie jadą 200 km/h — jesli jeden zahamuje, bedzie karambol
+
+**[58] `predicted_funding`** — premium (napedza nastepny funding rate)
+```
+pred_funding = tanh(premium × 1000)
+```
+- BTC: -0.58 → negatywny funding → shorty placa longom
+- Extreme funding = pozycje beda zamykane → mean reversion
+
+#### Grupa C: Derived — obliczane z istniejacych candles
+
+Zero API calls — czysta matematyka na danych ktore juz mamy.
+
+**[59] `volume_momentum`** — czy volume przyspiesza czy zwalnia
+```
+ratio = sum(volume_last_4h) / sum(volume_prev_4h)
+norm = tanh(ratio - 1.0)  # center around 0
+```
+- BTC: +1.0 → volume EKSPLODOWAL w ostatnich 4h vs poprzednich
+- FARTCOIN: -0.05 → volume stabilny
+
+**[60] `price_acceleration`** — druga pochodna ceny
+```
+change_now = (close[-1] - close[-2]) / close[-2]
+change_prev = (close[-2] - close[-3]) / close[-3]
+acceleration = change_now - change_prev
+```
+- Ujemny = cena zwalnia (momentum slabnie)
+- Dodatni = cena przyspiesza (momentum rosnie)
+- Pierwsza pochodna (MACD) mowi "cena spada". Druga pochodna mowi "CZY spadek przyspiesza czy zwalnia?"
+
+**[61] `volume_price_divergence`** — gdy volume i cena ida w rozne strony
+```
+divergence = -(price_change × volume_change)
+```
+- Volume UP + Price DOWN = bearish divergence (sprzedaz pod volume)
+- Volume UP + Price UP = bullish confirmation (kupno z conviction)
+- Volume DOWN + Price UP = bearish warning (rally bez paliwa)
+
+### Dlaczego to dziala razem
+
+```
+Model PRZED (53 features):
+  "RSI=25, MACD negatywny → cena spadla" (patrzy wstecz)
+
+Model PO (62 features):
+  "RSI=25, MACD negatywny → cena spadla" (wstecz)
+  + "Orderbook: 80% askow → dalej spadnie" (przod)
+  + "OI/volume=10x → overleveraged → cascade risk" (strukturalny)
+  + "Volume spike + price flat → divergence → cos sie szykuje" (momentum)
+```
+
+Model dostaje obraz 3D zamiast 1D:
+1. **Co sie stalo** (technical indicators)
+2. **Co sie zaraz stanie** (orderbook pressure)
+3. **Jak niebezpieczny jest rynek** (leverage + divergence)
+
+### Backward compatibility — piata wersja
+
+```
+ Wersja  │ Features │ Padding
+─────────┼──────────┼────────────────────
+ v1 (stare)     │ 30 │ +32 zer
+ v2 (candle)    │ 45 │ +17 zer
+ v3 (multiday)  │ 49 │ +13 zer
+ v4 (btc cross) │ 53 │ +9 zer
+ v5 (tier-1)    │ 62 │ brak (current)
+```
+
+### API budget
+
+```
+PRZED (53 features):
+  9 hourly candles + 9 daily candles + 1 BTC hourly + 2 global = ~21 calls
+
+PO (62 features):
+  + 9 l2Book calls (1 per token) = ~30 calls
+
+Rate limit: Hyperliquid pozwala ~120 calls/min
+Nasz collector: ~30 calls co 15 min = ~2 calls/min — daleko od limitu
+```
