@@ -47,6 +47,41 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 66. BTC Cross-Market Features — XGBoost 49→53 features (28.02)
+
+**Problem:** Każdy token miał izolowany feature vector — kPEPE model nie widział co robi BTC. A kPEPE ma **95% korelację z BTC** (Pearson 24h). Gdy BTC spada 5%, kPEPE spada 10-15%, ale model tego nie wiedział.
+
+**Rozwiązanie:** 4 BTC cross-market features dodane do pipeline. BTC candles fetchowane raz w `main()`, przekazywane do `collect_token()` wszystkich tokenów.
+
+**Nowa funkcja `compute_btc_cross_features(token, btc_candles, token_candles)` w `xgboost_collect.py`:**
+
+| # | Feature | Opis | kPEPE (live) | ETH (live) |
+|---|---------|------|-------------|-----------|
+| [49] | `btc_change_1h` | BTC 1h zmiana, tanh(change/10) | +0.05 | +0.05 |
+| [50] | `btc_change_4h` | BTC 4h zmiana, tanh(change/20) | -0.17 | -0.17 |
+| [51] | `btc_rsi` | BTC RSI / 100 | 0.26 (oversold) | 0.26 |
+| [52] | `btc_token_corr_24h` | Pearson correlation BTC↔token 24h | **+0.95** | **+0.98** |
+
+**Dla BTC samego:** Features = `[0, 0, 0, 0]` (redundantne z istniejącymi tech features [4-6] i [0]).
+
+**Korelacja Pearson:** 24h hourly returns BTC vs token. Obliczana z co-variance / (std_btc × std_token). Clamp [-1, 1]. Wymaga min 20 wspólnych returnów.
+
+**API impact:** +1 API call per collect run (BTC hourly candles, fetchowane raz i współdzielone). Total: 9 token hourly + 9 token daily + 1 BTC hourly (shared) + 2 global (allMids, metaAndAssetCtxs) = ~21 calls.
+
+**Backward compatibility:** Trainer i predictor akceptują 30, 45, 49, lub 53 features (padding zerami).
+
+**Zmodyfikowane pliki (3):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_collect.py` | `compute_btc_cross_features()` (+60 LOC), BTC candles fetch w `main()`, pass do `collect_token()` |
+| `scripts/xgboost_train.py` | 4 feature names, NUM_FEATURES=53, backward compat (30/45/49→53) |
+| `src/prediction/models/XGBoostPredictor.ts` | 4 feature names, NUM_FEATURES=53, backward compat |
+
+**Deploy:** SCP 3 pliki + dist patch. Collector verified: 53 features na 9 tokenach. prediction-api: restarted, all models loaded.
+
+**Commit:** `5006c37`
+
 ### 65. XGBoost class completeness check — skip training when class missing (28.02)
 
 **Problem:** XGBoost training crashował z `ValueError: operands could not be broadcast together with shapes (74,3) (74,)` gdy jedna z 3 klas (SHORT/NEUTRAL/LONG) brakowała w train set. kPEPE h12 miał 0 LONG w test set.
@@ -2991,7 +3026,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
 - **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
-- **XGBoost data collection**: Co 15 min (cron), **49 features** per sample (11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day, od 28.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: trainer i predictor akceptują 30, 45, lub 49 features (padują zerami). Multi-day features: change_7d, change_10d, dist_from_7d_high, trend_slope_7d — obliczane z daily candles (14d lookback).
+- **XGBoost data collection**: Co 15 min (cron), **53 features** per sample (11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day + 4 btc_cross, od 28.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: trainer i predictor akceptują 30, 45, 49, lub 53 features (padują zerami). Multi-day features [45-48]: z daily candles (14d lookback). BTC cross-features [49-52]: btc_change_1h/4h, btc_rsi, btc_token_corr_24h — dają kontekst BTC price action dla altcoinów (kPEPE corr=0.95, ETH corr=0.98).
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".

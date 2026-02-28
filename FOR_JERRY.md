@@ -4981,3 +4981,98 @@ Multi-day Trend │ 10 dni   │ 4        │ ← NOWE: szeroki kontekst
 Model teraz widzi od **3 godzin** (candle patterns) do **10 dni** (multi-day trend). To daje mu pelniejszy obraz — krotkoterminowe patterns w kontekscie dlugoterminowego trendu.
 
 Analogia: Jak lekarz ktory patrzy na wynik badania z dzisiaj (candle pattern), ale tez na historie choroby z ostatniego miesiaca (multi-day trend). Samo dzisiejsze badanie moze byc mylace bez kontekstu.
+
+---
+
+## Rozdzial 27: BTC Cross-Market Features — "Model widzi co robi kapitan" (28.02.2026)
+
+### Problem: Kazdy token zyl w bance
+
+kPEPE model widzial TYLKO swoje dane — swoj RSI, swoj MACD, swoje candle patterns. Nie mial pojecia co robi BTC. A w krypto jest niepisana zasada:
+
+> **Gdy BTC spada, spada WSZYSTKO.**
+
+kPEPE ma **95% korelacje z BTC** (Pearson, 24h). ETH 98%. SOL 98%. To nie przypadek — altcoiny sa "dlugatorem" BTC. Wyobraz sobie tradera altcoinow ktory NIGDY nie patrzy na wykres BTC. Dokladnie to robil nasz model.
+
+### Rozwiazanie: BTC jako "kapitan rynku"
+
+Dodalismy 4 features ktore daja kazdemu tokenowi kontekst BTC:
+
+```
+[49] btc_change_1h       — "BTC spadl 2% w ostatnia godzine"
+[50] btc_change_4h       — "BTC spada od 4h"
+[51] btc_rsi             — "BTC jest oversold (RSI 26)"
+[52] btc_token_corr_24h  — "kPEPE koreluje z BTC w 95%"
+```
+
+### Pearson Correlation — matematyka w 30 sekund
+
+Korelacja Pearsona mierzy "jak bardzo dwa szeregi danych poruszaja sie razem":
+
+```
+Korelacja = +1.00  →  doskonale razem (BTC +1% = token +1%)
+Korelacja =  0.00  →  brak zwiazku
+Korelacja = -1.00  →  doskonale odwrotnie
+
+Nasze wyniki (live, 28.02):
+  kPEPE ↔ BTC:  0.95  ← prawie identycznie!
+  ETH   ↔ BTC:  0.98  ← prawie doskonale
+  SOL   ↔ BTC:  0.98
+```
+
+Jak to obliczamy? Bierzemy 24 ostatnie hourly returny (% zmiana) BTC i tokena, i liczymy **co-variance / (odchylenie BTC × odchylenie tokena)**. Wynik jest od -1 do +1.
+
+### Dlaczego BTC sam dostaje zera?
+
+Dla BTC samego te features = `[0, 0, 0, 0]`. Dlaczego? Bo `btc_change_1h` bylby taki sam jak istniejacy `change_1h` (feature [4]). `btc_rsi` = `rsi` (feature [0]). Redundancja nie pomaga modelowi — dodaje szum.
+
+### Architektura: "Fetch once, share everywhere"
+
+BTC candles sa fetchowane **jeden raz** w `main()` i przekazywane do kazdego `collect_token()`:
+
+```python
+# main():
+btc_candles = fetch_candles("BTC", "1h", 100)  # ← jeden fetch
+
+for token in TOKENS:
+    collect_token(token, mids, meta_ctx, btc_candles)  # ← wspoldzielone
+```
+
+To oszczedza API calls — zamiast 9 razy fetchowac BTC candles (raz per token), robimy to raz. Dobra praktyka: **nie fetchuj tych samych danych wielokrotnie**.
+
+### Pelna mapa features (53) — 6 grup
+
+```
+Grupa           │ Lookback │ Features │ Indeksy  │ Co widzi
+────────────────┼──────────┼──────────┼──────────┼────────────────────
+Technical       │ ~60h     │ 11       │ [0-10]   │ RSI, MACD, ATR, changes
+Nansen/SM       │ Snapshot │ 11       │ [11-21]  │ Kto shortuje, kto longuje
+Extra           │ 12h      │ 8        │ [22-29]  │ Funding, OI, pora dnia
+Candle Patterns │ 3h       │ 15       │ [30-44]  │ Hammer, engulfing, doji
+Multi-day Trend │ 10 dni   │ 4        │ [45-48]  │ Trend 7d/10d, slope
+BTC Cross       │ 24h      │ 4        │ [49-52]  │ ← NOWE: co robi kapitan
+```
+
+### Lekcja: Cross-Asset Features
+
+W tradycyjnym finance to sie nazywa **factor investing** — uzywanie informacji z jednego assetu do predykcji innego. Np:
+- Ropa w gore → airlines w dol (cross-asset)
+- S&P 500 w gore → VIX w dol (inverse correlation)
+- USD w gore → Gold w dol (macro factor)
+
+W krypto BTC jest **dominujacym faktorem** — single stock (BTC) wplywa na caly rynek. Dodanie BTC features to jak powiedzenie modelowi: "hej, zanim predyktujesz kPEPE, sprawdz co robi BTC — bo w 95% przypadkow kPEPE robi to samo".
+
+### Backward Compatibility — czwarty raz
+
+Pattern sie powtarza, ale teraz mamy 4 wersje danych w jednym pliku:
+
+```
+ Wersja  │ Features │ Padding
+─────────┼──────────┼────────────────────
+ v1 (stare) │ 30    │ +23 zer
+ v2 (candle) │ 45   │ +8 zer
+ v3 (multiday) │ 49  │ +4 zera
+ v4 (btc cross) │ 53 │ brak (current)
+```
+
+Kazda iteracja dodaje nowa warstwe padding. To dziala, ale jesli dodamy jeszcze 10 wersji, stanie sie nieczytelne. W przyszlosci rozwazymy **wersjonowanie datasetu** zamiast padding — nagłowek z wersja + automatyczna migracja. Ale na teraz padding jest prosty i dziala.
