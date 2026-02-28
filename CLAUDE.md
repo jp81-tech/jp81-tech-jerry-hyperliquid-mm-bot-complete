@@ -47,6 +47,47 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 72. XGBoost Performance Monitor — hourly bps attribution on Discord (28.02)
+
+**Cel:** Mierzyć ile basis pointów zysku/straty generuje prediction bias (XGBoost) vs gdyby go nie było. Raport co godzinę na Discord.
+
+**Nowy plik: `scripts/xgb_performance_monitor.ts`** (~590 LOC)
+
+**Jak działa:**
+1. Co godzinę (cron `:00`) fetchuje predykcje z prediction-api (`/predict/:token` + `/predict-xgb/:token`) dla 9 tokenów
+2. Zapisuje je w state (`/tmp/xgb_monitor_state.json`, 7-day rolling window)
+3. Scoruje stare predykcje: h1 (50-70 min temu), h4 (225-255 min temu) vs aktualna cena z HL API
+4. Oblicza estimated bps contribution: `est_bps = sign × |actual_bps| × strength × 0.125`
+5. Buduje raport → Discord webhook + console
+
+**Attribution formula:**
+```
+strength = min(|predicted_change| / 3.0, 1.0)
+bias_on = confidence >= 50% AND |change| >= 0.3%
+est_bps = direction_correct ? +|actual_bps| × strength × 0.125 : -|actual_bps| × strength × 0.125
+0.125 = conservative half of theoretical 0.25 effect (partial fills, other factors)
+```
+
+**Raport zawiera:**
+- Current predictions (h4) — hybrid direction + XGB direction + bias ON/OFF
+- Scoring z ostatniej godziny (h1 window) i z 4h temu (h4 window)
+- Rolling stats: direction accuracy (24h/7d), XGB bps attribution (24h/7d/all-time)
+- Per-token h4 breakdown
+
+**Discord webhook:** `https://discord.com/api/webhooks/1477245696687210601/...` (nowy kanał)
+
+**CLI:**
+```bash
+npx tsx scripts/xgb_performance_monitor.ts            # run + Discord
+npx tsx scripts/xgb_performance_monitor.ts --dry-run  # console only (state NOT saved)
+```
+
+**Cron:** `0 * * * * cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/xgb_performance_monitor.ts >> runtime/xgb_monitor.log 2>&1`
+
+**State:** `/tmp/xgb_monitor_state.json` — predictions + scores, trimmed to 7 days. Dry-run does NOT modify state.
+
+**Pliki:** `scripts/xgb_performance_monitor.ts` (NEW, ~590 LOC)
+
 ### 70. XGBoost Training Improvements — per-token thresholds, regularization, early stopping, class weighting (28.02)
 
 **Problem:** kPEPE h4 "58% accuracy" was inflated — with ±1.5% threshold, 67% of labels = NEUTRAL, so model learned "always predict NEUTRAL" and achieved 58% accuracy (near baseline). Zero actual directional edge. Also massive overfitting: train 90% vs test 37% on volatile tokens.

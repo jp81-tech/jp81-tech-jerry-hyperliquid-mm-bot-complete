@@ -5670,3 +5670,98 @@ Fix nie jest prosty — potrzeba albo wiecej danych z aktualnego rezimu, albo fe
 4. **Balansowanie klas to nie luksus, to koniecznosc** — Cel: 30-40% per klasa. Wyzej = model sie leniwi (predict majority). Nizej = za malo przykladow do nauki.
 
 5. **Temporal shift to cichy zabojca** — model na danych historycznych moze doskonale pasowac do przeszlosci ale byc bezwartosciowy w terazniejszosci. Szczegolnie na dlugich horyzontach (w1/m1) gdzie rezim rynkowy zmienia sie szybciej niz model sie uczy.
+
+---
+
+## Rozdzial 35: XGBoost Performance Monitor — "Ile Zarabiamy Dzieki ML?" (28.02.2026)
+
+### Problem: Skad wiesz, ze ML pomaga?
+
+Masz ML model. Ladnie produkuje predykcje. Dashboard swiateczny. Ale jedno pytanie wisi w powietrzu jak cien nad baseballisty:
+
+> "Czy ten model FAKTYCZNIE zarabia pieniadze, czy tylko ladnie wyglada?"
+
+To jak zatrudnienie konsultanta za $10K/miesiac — mowci madrzejsze rzeczy, ale jak wiesz, ze firma zarobia WIECEJ przez niego? Potrzebujesz POMIARU, nie wizerunku.
+
+### Jak mierzymy wplyw ML na bota?
+
+Bot nie handluje "bo ML powiedzial". ML *delikatnie* przesuwa rozmiary orderow:
+- BEARISH prediction → mniej kupuj (bid x0.92), wiecej shortuj (ask x1.08)
+- BULLISH prediction → wiecej kupuj (bid x1.08), mniej shortuj (ask x0.92)
+
+To jest "prediction bias" — soft +-15% adjustment na rozmiary. Pytanie: czy ten bias POMAGA zarabiac, czy SZKODZI?
+
+### Formula atrybucji
+
+```
+strength = min(|predicted_change| / 3.0, 1.0)    // sila predykcji, 0-1
+bias_on  = confidence >= 50% AND |change| >= 0.3% // czy bias w ogole dziala?
+
+est_bps = direction_correct
+  ? +|actual_move_bps| x strength x 0.125         // trafilismy → zysk
+  : -|actual_move_bps| x strength x 0.125          // pudlo → strata
+```
+
+`0.125` to konserwatywna polowa teoretycznego 0.25 (theoretical max directional exposure z biasu). Dlaczego polowa? Bo:
+- Nie wszystkie ordery sie filluja (partial fills)
+- Inne moduly (Momentum Guard, Toxicity) tez wplywaja na rozmiary
+- Lepiej niedoszacowac niz przeszacowac
+
+### Co mierzy monitor?
+
+Co godzine (cron `:00`):
+
+1. **Zbiera predykcje** — fetchuje z prediction-api aktualny h4 forecast dla 9 tokenow
+2. **Scoruje stare predykcje** — patrzy 1h wstecz (h1 window) i 4h wstecz (h4 window), porownuje z rzeczywista cena
+3. **Oblicza estimated bps** — ile zarobil/stracil prediction bias na kazdym tokenie
+4. **Wysyla raport na Discord** — z rolling stats (24h, 7d, all-time)
+
+### Czytanie raportu
+
+```
+BTC       BEAR -0.73% (49%)        | XGB: NEUTRAL 35%    | off
+SOL       BEAR -1.28% (52%)        | XGB: SHORT   35%    | ON
+```
+
+- `BEAR -0.73% (49%)` = Hybrid (rule-based + XGBoost blend) mowi: bearish, -0.73% predicted change, 49% confidence
+- `XGB: SHORT 35%` = Sam XGBoost (pure ML) mowi: SHORT z 35% confidence
+- `ON` / `off` = czy prediction bias jest aktywny (conf >= 50% AND |change| >= 0.3%)
+
+SOL ma bias ON bo confidence 52% > 50% i |change| 1.28% > 0.3%. BTC ma bias off bo 49% < 50%.
+
+### Dlaczego to wazne — lekcja inzynierska
+
+**Kazdy system ML powinien miec monitoring wplywu.** Nie wystarczy trenowac model i mierzyc accuracy na test set. Musisz wiedziec ile model ZARABIA w produkcji.
+
+Analogia: Masz GPS w samochodzie. GPS mowi "skrec w lewo". Mozesz zmierzyc:
+- **Accuracy offline**: "GPS prawidlowo przewidzial korki w 70% przypadkow" ← to co robimy w xgboost_train.py
+- **Impact online**: "Dzieki GPS dojezdzam srednio 8 minut szybciej" ← to co robi performance monitor
+
+Mozesz miec GPS z 90% accuracy ktory codziennie prowadzi cie uliczkami zamiast autostrada, i GPS z 60% accuracy ktory czasem pudluje ale ogolnie oszczedza czas. **Impact > accuracy.**
+
+### Architektura
+
+```
+prediction-api (:8090)     HL API (allMids)
+       |                        |
+       v                        v
+  xgb_performance_monitor.ts
+       |
+       v
+  /tmp/xgb_monitor_state.json  (7-day rolling)
+       |
+       v
+  Discord webhook  ──→  #xgb-monitor channel
+```
+
+State file przechowuje max 7 dni danych (auto-trim). Dry-run (`--dry-run`) NIE zapisuje state — mozesz testowac bez ryzyka.
+
+### Potencjalne pulapki
+
+1. **"Survivor bias"** — scorujesz tylko predykcje ktore bot widzial. Jesli prediction-api padlo na godzine, ta godzina jest niewidoczna w stats.
+
+2. **"Attribution is hard"** — `0.125` factor to przyblizone. Bot ma 8+ modulow ktore wplywaja na sizing jednoczesnie. Izolowanie wplywu ML jest z natury niedokladne.
+
+3. **"Short-term noise"** — 24h stats beda skakac +50bps / -30bps. Dopiero 7d+ rolling daje wiarygodny obraz. Nie panikuj po jednym zlym dniu.
+
+4. **"Correlation != causation"** — jesli ML mowi BEARISH i rynek spada, ale SM signals TEZ mowily SHORT (i bot podazal za SM), to ML nie "zarobil" — SM zarobilo. ML moze byc redundantne. Monitor tego nie odroznnia.
