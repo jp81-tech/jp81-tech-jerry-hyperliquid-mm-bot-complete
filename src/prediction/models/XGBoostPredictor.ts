@@ -44,7 +44,7 @@ export interface XGBMeta {
   }>;
 }
 
-interface XGBTree {
+interface XGBTreeNested {
   nodeid?: number;
   split?: number;          // feature index
   split_condition?: number;
@@ -52,8 +52,20 @@ interface XGBTree {
   no?: number;             // child node id for no (right)
   missing?: number;
   leaf?: number;           // leaf value (only on leaf nodes)
-  children?: XGBTree[];
+  children?: XGBTreeNested[];
 }
+
+interface XGBTreeFlat {
+  split_indices: number[];
+  split_conditions: number[];
+  left_children: number[];
+  right_children: number[];
+  default_left: number[];
+  base_weights: number[];
+  tree_param: { num_nodes: string };
+}
+
+type XGBTree = XGBTreeNested | XGBTreeFlat;
 
 interface XGBModel {
   trees: XGBTree[];
@@ -104,45 +116,66 @@ const RELOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes
 // --- Tree traversal ---
 
 /**
- * Build a node lookup map from XGBoost tree structure.
- * XGBoost JSON uses nodeid for referencing yes/no/missing children.
+ * Check if tree uses flat array format (XGBoost 3.x).
  */
-function buildNodeMap(tree: XGBTree): Map<number, XGBTree> {
-  const map = new Map<number, XGBTree>();
-
-  function walk(node: XGBTree): void {
-    if (node.nodeid !== undefined) {
-      map.set(node.nodeid, node);
-    }
-    if (node.children) {
-      for (const child of node.children) {
-        walk(child);
-      }
-    }
-  }
-
-  walk(tree);
-  return map;
+function isFlatTree(tree: XGBTree): tree is XGBTreeFlat {
+  return 'split_indices' in tree && 'left_children' in tree;
 }
 
 /**
- * Traverse a single decision tree and return the leaf value.
+ * Traverse a flat-format tree (XGBoost 3.x: split_indices[], left_children[], etc.)
  */
-function traverseTree(tree: XGBTree, features: number[]): number {
-  const nodeMap = buildNodeMap(tree);
+function traverseFlatTree(tree: XGBTreeFlat, features: number[]): number {
+  let nodeIdx = 0;
+
+  while (tree.left_children[nodeIdx] !== -1) {
+    const splitFeature = tree.split_indices[nodeIdx];
+    const splitCondition = tree.split_conditions[nodeIdx];
+    const val = features[splitFeature] ?? 0;
+    const valIsNaN = val !== val;
+
+    if (valIsNaN) {
+      // Go to default direction
+      nodeIdx = tree.default_left[nodeIdx]
+        ? tree.left_children[nodeIdx]
+        : tree.right_children[nodeIdx];
+    } else if (val < splitCondition) {
+      nodeIdx = tree.left_children[nodeIdx];
+    } else {
+      nodeIdx = tree.right_children[nodeIdx];
+    }
+
+    if (nodeIdx < 0 || nodeIdx >= tree.left_children.length) {
+      return 0; // safety
+    }
+  }
+
+  return tree.base_weights[nodeIdx];
+}
+
+/**
+ * Traverse a nested-format tree (XGBoost 1.x: nodeid, children[], etc.)
+ */
+function traverseNestedTree(tree: XGBTreeNested, features: number[]): number {
+  const map = new Map<number, XGBTreeNested>();
+  function walk(node: XGBTreeNested): void {
+    if (node.nodeid !== undefined) map.set(node.nodeid, node);
+    if (node.children) {
+      for (const child of node.children) walk(child);
+    }
+  }
+  walk(tree);
 
   let current = tree;
   while (current.leaf === undefined) {
     const splitFeature = current.split;
-    if (splitFeature === undefined || current.split_condition === undefined) {
-      return 0; // malformed node
-    }
+    if (splitFeature === undefined || current.split_condition === undefined) return 0;
 
     const val = features[splitFeature] ?? 0;
-    const isNaN = val !== val; // NaN check
+    const valIsNaN = val !== val;
 
     let nextId: number;
-    if (isNaN) {
+    if (valIsNaN) {
       nextId = current.missing ?? current.yes ?? 0;
     } else if (val < current.split_condition) {
       nextId = current.yes ?? 0;
@@ -150,14 +183,23 @@ function traverseTree(tree: XGBTree, features: number[]): number {
       nextId = current.no ?? 0;
     }
 
-    const next = nodeMap.get(nextId);
-    if (!next) {
-      return 0; // missing node
-    }
+    const next = map.get(nextId);
+    if (!next) return 0;
     current = next;
   }
 
   return current.leaf;
+}
+
+/**
+ * Traverse a single decision tree and return the leaf value.
+ * Supports both flat (XGBoost 3.x) and nested (XGBoost 1.x) formats.
+ */
+function traverseTree(tree: XGBTree, features: number[]): number {
+  if (isFlatTree(tree)) {
+    return traverseFlatTree(tree, features);
+  }
+  return traverseNestedTree(tree as XGBTreeNested, features);
 }
 
 /**

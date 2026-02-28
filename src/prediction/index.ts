@@ -35,6 +35,7 @@ export { HyperliquidDataLoader, INTERVALS } from './data/HyperliquidDataLoader.j
 export { HybridPredictor, PredictionResult, ModelWeights, PREDICTION_HORIZONS } from './models/HybridPredictor.js';
 export { XGBoostPredictor, XGBPrediction, FEATURE_NAMES } from './models/XGBoostPredictor.js';
 
+import { promises as fsp } from 'fs';
 import { HyperliquidDataLoader } from './data/HyperliquidDataLoader.js';
 import { TechnicalIndicators } from './features/TechnicalIndicators.js';
 import { NansenFeatures } from './features/NansenFeatures.js';
@@ -162,38 +163,60 @@ export class PricePredictionService {
       return { token, predictions: null, hasModel: false, timestamp: Date.now() };
     }
 
-    // Build feature vector
-    const [candles, nansenData] = await Promise.all([
-      this.dataLoader.fetchCandles(token, '1h', 100),
-      this.nansenFeatures.getAllFeatures(token),
-    ]);
+    // Read pre-computed 62-feature vector from Python collector
+    // Collector writes /tmp/xgboost_latest_{TOKEN}.json every 15 min
+    try {
+      const latestPath = `/tmp/xgboost_latest_${token}.json`;
+      const raw = await fsp.readFile(latestPath, 'utf-8');
+      const data = JSON.parse(raw);
+      const featureVector: number[] = data.features;
 
-    if (candles.length < 60) {
-      return { token, predictions: null, hasModel: true, timestamp: Date.now() };
+      if (!featureVector || featureVector.length < 30) {
+        console.warn(`[XGB] ${token}: Invalid feature vector in latest file (${featureVector?.length} features)`);
+        return { token, predictions: null, hasModel: true, timestamp: Date.now() };
+      }
+
+      const age = Math.round((Date.now() / 1000 - data.ts) / 60);
+      if (age > 60) {
+        console.warn(`[XGB] ${token}: Feature vector is ${age} min old (>60 min stale)`);
+      }
+
+      const predictions = xgb.predict(token, featureVector);
+      return { token, predictions, hasModel: true, timestamp: Date.now() };
+    } catch {
+      // Latest file doesn't exist — collector hasn't run yet with new code
+      // Fallback to old 30-feature method
+      const [candles, nansenData] = await Promise.all([
+        this.dataLoader.fetchCandles(token, '1h', 100),
+        this.nansenFeatures.getAllFeatures(token),
+      ]);
+
+      if (candles.length < 60) {
+        return { token, predictions: null, hasModel: true, timestamp: Date.now() };
+      }
+
+      const techFeatures = this.technicalIndicators.calculate(candles);
+      const latestTech = techFeatures[techFeatures.length - 1];
+      const normalizedTech = this.technicalIndicators.normalize(latestTech);
+
+      const now = new Date();
+      const hour = now.getUTCHours() + now.getUTCMinutes() / 60;
+      const dow = now.getUTCDay();
+
+      const featureVector = [
+        ...normalizedTech,
+        ...nansenData.normalized,
+        0, 0, 0,
+        Math.sin(2 * Math.PI * hour / 24),
+        Math.cos(2 * Math.PI * hour / 24),
+        Math.sin(2 * Math.PI * dow / 7),
+        Math.cos(2 * Math.PI * dow / 7),
+        0,
+      ];
+
+      const predictions = xgb.predict(token, featureVector);
+      return { token, predictions, hasModel: true, timestamp: Date.now() };
     }
-
-    const techFeatures = this.technicalIndicators.calculate(candles);
-    const latestTech = techFeatures[techFeatures.length - 1];
-    const normalizedTech = this.technicalIndicators.normalize(latestTech);
-
-    const now = new Date();
-    const hour = now.getUTCHours() + now.getUTCMinutes() / 60;
-    const dow = now.getUTCDay();
-
-    const featureVector = [
-      ...normalizedTech,
-      ...nansenData.normalized,
-      0, 0, 0,  // funding, oi_1h, oi_4h (not available in TS)
-      Math.sin(2 * Math.PI * hour / 24),
-      Math.cos(2 * Math.PI * hour / 24),
-      Math.sin(2 * Math.PI * dow / 7),
-      Math.cos(2 * Math.PI * dow / 7),
-      0,  // volatility_24h
-    ];
-
-    const predictions = xgb.predict(token, featureVector);
-
-    return { token, predictions, hasModel: true, timestamp: Date.now() };
   }
 
   /**

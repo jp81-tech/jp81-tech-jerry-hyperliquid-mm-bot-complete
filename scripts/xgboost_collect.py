@@ -957,6 +957,11 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
         "label_m1": None,
     }
 
+    # Save latest feature vector for prediction-api (real-time inference)
+    latest_path = os.path.join(DATASET_DIR, f"xgboost_latest_{token}.json")
+    with open(latest_path, "w") as f:
+        json.dump({"ts": row["ts"], "price": row["price"], "features": row["features"]}, f)
+
     # Append to JSONL file
     filepath = os.path.join(DATASET_DIR, f"xgboost_dataset_{token}.jsonl")
     with open(filepath, "a") as f:

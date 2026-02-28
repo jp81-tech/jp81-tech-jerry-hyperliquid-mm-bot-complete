@@ -47,6 +47,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 28 lutego 2026
 
+### 69. XGBoost Flat Tree Fix + Feature File Bridge — predictions from 33.3% uniform to real (28.02)
+
+**Problem:** XGBoost predictions returned 33.3%/33.3%/33.3% (uniform) for ALL tokens and ALL horizons — effectively random. Two independent root causes discovered and fixed.
+
+**Root Cause #1: Feature vector mismatch (30 vs 62 features)**
+`getXGBPrediction()` in `src/prediction/index.ts` built a 30-feature vector from TypeScript (11 tech + 11 nansen + 8 extra), but models were trained on 62 features. Features [30-61] (candle patterns, multi-day trends, BTC cross-market, orderbook, meta, derived) were all zeros. Model's top features (`trend_slope_7d` at [48], `dist_from_7d_high` at [47]) = 0 → model couldn't differentiate → uniform output.
+
+**Fix #1: Feature file bridge pattern**
+Python collector (`xgboost_collect.py`) now writes `/tmp/xgboost_latest_{TOKEN}.json` with full 62-feature vector every 15 min. TypeScript `getXGBPrediction()` reads that file instead of computing its own (incomplete) features. Fallback to old 30-feature method when file doesn't exist.
+
+**Root Cause #2: XGBoost 3.x flat tree format not supported**
+XGBoost 3.x exports models in flat array format (`split_indices[]`, `left_children[]`, `right_children[]`, `base_weights[]`, `default_left[]`, `split_conditions[]`) but TypeScript `traverseTree()` only handled nested format (XGBoost 1.x: `nodeid`, `children[]`, `split`, `split_condition`). Every tree returned leaf value 0 → `softmax([0,0,0])` = `[0.333, 0.333, 0.333]`.
+
+**Fix #2: Dual tree format support**
+- `isFlatTree()` — detects flat format via `'split_indices' in tree`
+- `traverseFlatTree()` — handles XGBoost 3.x flat arrays (leaf nodes: `left_children[i] === -1`, leaf values in `base_weights[i]`)
+- `traverseNestedTree()` — preserves old nested format support
+- `traverseTree()` — dispatcher
+
+**Results after fix:**
+
+| Token | h1 | h4 | h12 | w1 | m1 |
+|-------|-----|-----|------|-----|-----|
+| kPEPE | NEUTRAL 35.3% | NEUTRAL 43.7% | NEUTRAL 73.7% | NEUTRAL 78.8% | LONG 56.3% |
+| BTC | SHORT 39.6% | LONG 52.6% | NEUTRAL 78.3% | NEUTRAL 84.8% | — |
+| ETH | NEUTRAL 51.1% | SHORT 63.0% | NEUTRAL 43.7% | LONG 46.9% | SHORT 49.6% |
+
+**Zmodyfikowane pliki (3):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_collect.py` | Save latest feature vector to `/tmp/xgboost_latest_{TOKEN}.json` (+5 LOC) |
+| `src/prediction/index.ts` | `getXGBPrediction()` reads pre-computed features from file, `import fsp` (+35/-25 LOC) |
+| `src/prediction/models/XGBoostPredictor.ts` | `XGBTreeFlat` interface, `isFlatTree()`, `traverseFlatTree()`, `traverseNestedTree()` (+50/-20 LOC) |
+
+**Deploy:** SCP source → server, patch `dist/` files, `pm2 restart prediction-api`. All 44 models loaded, all 9 tokens producing meaningful predictions.
+
 ### 68. XGBoost Historical Backfiller — 4,460→39,001 rows (28.02)
 
 **Problem:** XGBoost collector zbierał dane co 15 min — po 6 dniach miał ~500 rows per token (4,460 total). Za mało na dobre modele. kPEPE h12 nie mógł się nawet wytrenować (class imbalance). Czekanie na wystarczające dane trwałoby tygodnie.

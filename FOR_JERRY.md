@@ -5357,3 +5357,93 @@ Re-backfill tylko jesli:
 - Zmienisz feature pipeline (nowe features do policzenia z candles)
 - Chcesz dluzsza historie (np. `--days 365` gdy token ma roczna historie)
 - Dodasz nowy token do systemu
+
+---
+
+## Rozdzial 32: XGBoost Flat Tree Fix — Kiedy Model Mowi "Nie Wiem" Na Wszystko
+
+### Problem: 33.3% / 33.3% / 33.3%
+
+Wyobraz sobie ze masz super-zaawansowany ML model wytrenowany na 39,000 wierszach danych, z 62 features, 300 drzewami decyzyjnymi... i na kazde pytanie odpowiada "nie wiem" (rowne prawdopodobienstwo dla kazdej klasy).
+
+To dokladnie co sie stalo. XGBoost predictions zwracaly **identyczne** 33.3% na SHORT/NEUTRAL/LONG dla KAZDEGO tokena, KAZDEGO horyzontu. Kompletnie bezuzyteczne.
+
+### Dwa niezalezne bugi (Double Whammy)
+
+To byl rzadki przypadek gdzie **dwa rożne bugi** produkowaly ten sam symptom. Naprawienie jednego NIE wystarczylo — trzeba bylo znalezc i naprawic oba.
+
+#### Bug #1: Feature Vector Mismatch (30 vs 62)
+
+TypeScript `getXGBPrediction()` budowal 30-feature vector (11 tech + 11 nansen + 8 extra). Ale modele byly wytrenowane na **62 features**. Co sie dzieje z brakujacymi 32 features? Predictor je padduje zerami.
+
+Problem: top features modelu (te ktore najbardziej wplywaja na decyzje) to `trend_slope_7d` (indeks [48]), `dist_from_7d_high` ([47]), `change_10d` ([46]) — wszystkie w zakresie [30-61], czyli **wszystkie zero**.
+
+To jak pytac doktora o diagnoze ale nie mowic mu wynikow badania krwi — moze miec najlepsza wiedze na swiecie, ale bez danych nie ma co oceniac.
+
+**Fix**: Python collector (ktory ma pelne 62 features) zapisuje je do pliku `/tmp/xgboost_latest_{TOKEN}.json`. TypeScript czyta ten plik zamiast budowac wlasny (niekompletny) vector. Prosty bridge pattern.
+
+#### Bug #2: XGBoost 3.x Flat Tree Format
+
+Nawet po naprawieniu featurow — nadal 33.3%. WTF?
+
+Okazalo sie ze XGBoost 3.x (zainstalowany na serwerze) eksportuje modele w zupelnie innym formacie niz XGBoost 1.x:
+
+```
+XGBoost 1.x (stary, nested):
+{
+  "nodeid": 0,
+  "split": 48,
+  "split_condition": 0.5,
+  "yes": 1, "no": 2,
+  "children": [
+    {"nodeid": 1, "leaf": 0.123},
+    {"nodeid": 2, "leaf": -0.456}
+  ]
+}
+
+XGBoost 3.x (nowy, flat arrays):
+{
+  "split_indices": [48, 0, 0],
+  "split_conditions": [0.5, 0, 0],
+  "left_children": [1, -1, -1],
+  "right_children": [2, -1, -1],
+  "base_weights": [0.0, 0.123, -0.456]
+}
+```
+
+Nasz TypeScript traversal szukal `tree.split`, `tree.children`, `tree.nodeid` — ale te pola **nie istnialy** w flat format! Kazde drzewo zwracalo `0` (safety fallback). 300 drzew × `0` = `softmax([0, 0, 0])` = `[0.333, 0.333, 0.333]`.
+
+**Fix**: Dodano `isFlatTree()` detector i `traverseFlatTree()` — odczytuje flat arrays, leaf nodes to `left_children[i] === -1`, leaf values w `base_weights[i]`.
+
+### Debugging journey
+
+To bylo jak sledztwo kryminalne:
+
+1. **Podejrzany #1: Feature mismatch** — znaleziony szybko, naprawiony. Ale symptom sie nie zmienil.
+2. **Podejrzany #2: Tree format** — znaleziony dopiero po recznym teście w Node.js: `Raw scores: [0.000000, 0.000000, 0.000000]`. Zbadanie jednego drzewa z modelu: `{"split_indices": [...], "left_children": [...]}` — aha!
+3. **Bonus bug: Python patcher stripped quotes** — patch ktory mial naprawic dist plik na serwerze zamienil `'split_indices' in tree` na `split_indices in tree` → `ReferenceError`. Naprawiony sedem.
+
+### Wyniki po fixie
+
+```
+PRZED (broken):
+kPEPE h1: SHORT 33.3% / NEUTRAL 33.3% / LONG 33.3%  ← useless
+BTC   h4: SHORT 33.3% / NEUTRAL 33.3% / LONG 33.3%  ← useless
+
+PO (working):
+kPEPE h1: SHORT 34.0% / NEUTRAL 35.3% / LONG 30.7%  ← differentiated!
+BTC   h4: SHORT 15.9% / NEUTRAL 31.5% / LONG 52.6%  ← strong signal!
+ETH   h4: SHORT 63.0% / NEUTRAL 31.9% / LONG 5.1%   ← very bearish!
+```
+
+### Lekcje
+
+1. **Jeden symptom, dwa bugi** — najgorszy rodzaj debugowania. Naprawiasz jedno, symptom sie nie zmienia, myslisz ze fix nie dzialal. W rzeczywistosci dzialal, ale drugi bug maskuje efekt. Zawsze testuj fix IZOLOWANY.
+
+2. **Wersje bibliotek zmieniaja formaty** — XGBoost 1.x vs 3.x to jak JSON vs XML. Ten sam model, kompletnie inny format eksportu. Jesli twoj kod parsuje output biblioteki — **sprawdz jaka wersje masz na produkcji**.
+
+3. **Feature file bridge > recomputing** — zamiast zmuszac TypeScript do obliczania 62 features (pol z nich wymaga API calls), lepiej niech Python (ktory juz je ma) zapisze do pliku. Prosciej, bezbledniej, zero duplikacji logiki.
+
+4. **`softmax([0,0,0])` = [0.333, 0.333, 0.333]** — uniforme wyjscie z softmax jest ZAWSZE czerwona flaga. Znaczy ze model nic nie obliczyl (wszystkie raw scores = 0). Dodaj assert/warning na to!
+
+5. **Dist patching to minefield** — Python script ktory patchuje JavaScript dist pliki na serwerze jest kruchy. Stripuje quotes, zmienia formatting, gubi edge cases. Lepsze rozwiazanie: `tsc` compile lokalne + SCP dist, lub budowanie Docker image.
