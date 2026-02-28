@@ -5,7 +5,7 @@ import { fetchAllFillsByTime } from '../src/utils/paginated_fills.js';
 
 config();
 
-const TOKENS = ['LIT', 'kPEPE'];
+const TOKENS = ['kPEPE'];
 
 async function main() {
   const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
