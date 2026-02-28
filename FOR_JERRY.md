@@ -4886,3 +4886,98 @@ Zmienilismy format danych z 30 na 45 features. Gdybysmy po prostu zmienili `asse
 3. Stare modele (trenowane na 30 features) by crashowaly na 45-feature input
 
 Backward compatibility to nie opcja — to **wymog produkcyjny**. Zawsze pytaj sie: "co sie stanie ze starymi danymi?"
+
+---
+
+## Rozdzial 26: Multi-day Trend Features — "Model widzi szerszy obraz" (28.02.2026)
+
+### Problem: Model byl krotkowzroczny
+
+Nasz XGBoost mial max lookback **24 godziny** (`change_24h`). Wyobraz sobie tradera ktory patrzy TYLKO na wykres 1-dniowy — nie widzi ze od 2 tygodni rynek spada. Dokladnie to robil nasz model.
+
+kPEPE spadl 14% w 7 dni (od 13 lutego). BTC spadl 9% od local high. Model tego nie widzial — patrzyl na ostatnie 24h i mowil "dzis spadlo 2%, moze jutro odbije?". Nie mial pojecia o kontekscie.
+
+To jak pytanie meteorologa o pogode na jutro, ale zabranianie mu patrzenia na mapy pogody z ostatniego tygodnia.
+
+### Rozwiazanie: Daily candles jako nowe zrodlo danych
+
+Do tej pory collector fetchowal **100 hourly candles** (100 × 1h = ~4.2 dni). Za malo na 7-10 dniowy lookback. Dodalismy osobny fetch **14 daily candles** z Hyperliquid API — to daje 14 dni historii w zaledwie 14 punktach danych.
+
+4 nowe features:
+
+```
+[45] change_7d         — "ile spadlismy/wzroslismy w 7 dni?"
+[46] change_10d        — "ile w 10 dni?"
+[47] dist_from_7d_high — "jak daleko jestesmy od 7-dniowego szczytu?"
+[48] trend_slope_7d    — "nachylenie linii trendu: ostro w dol, plasko, czy w gore?"
+```
+
+### Co te features mowia (live dane z 28.02)
+
+```
+BTC (cena $63,777):
+  change_7d:     -0.19  (spadek ~5.7% w tydzien)
+  change_10d:    -0.10  (spadek ~5% w 10 dni)
+  dist_from_high: -0.89 (8.9% ponizej 7-dniowego szczytu)
+  trend_slope:   -0.76  (silny trend spadkowy)
+
+kPEPE (cena $0.0035):
+  change_7d:     -0.42  (spadek ~14% w tydzien!)
+  change_10d:    -0.33  (spadek ~15%)
+  dist_from_high: -1.00 (>10% ponizej szczytu — SATURATED)
+  trend_slope:   -1.00  (ekstremalny downtrend — SATURATED)
+```
+
+**"Saturated"** znaczy ze wartosc osiagnela limit normalizacji (tanh). -1.00 = "maksymalnie bearish". Model wie: "to nie jest zwykly spadek, to crash".
+
+### Linear Regression jako miernik trendu
+
+`trend_slope_7d` uzywa **prostej regresji liniowej** — dopasowuje prosta linie do 7 zamkniec dziennych i mierzy nachylenie.
+
+```
+Cena ($)
+  |  ·                    Slope = -0.76
+  |    ·                  (silny spadek)
+  |      ·
+  |        ·  ·
+  |              ·
+  |                ·
+  +---+---+---+---+---+---+---→ Dni
+  1   2   3   4   5   6   7
+```
+
+Dlaczego regresja a nie prosty `(cena_teraz / cena_7d_temu - 1)`? Bo prosta roznica nie widzi KSZTALTU trendu:
+- "Spadl 10% w 7 dni" moze znaczyc: spadal codziennie po 1.5% (trend) ALBO spadl 10% w 1 dzien i teraz stoi (spike)
+- Slope rozroznia te sytuacje — rowny spadek daje wiekszy |slope| niz jednorazowy spike
+
+### Backward Compatibility — trzeci raz ten sam pattern
+
+To juz trzecia iteracja: 30→45→49. Schemat sie powtarza:
+
+```
+ Wersja  │ Features │ Padding (trainer + predictor)
+─────────┼──────────┼──────────────────────────────
+ v1      │ 30       │ +19 zer (15 candle + 4 multi-day)
+ v2      │ 45       │ +4 zera (4 multi-day)
+ v3      │ 49       │ brak paddingu (current)
+```
+
+Stare modele (trenowane na 45 features) dzialaja ze slowem "brak danych" (zeros) na nowych features. Po retrainie XGBoost zacznie korzystac z nowych 4 kolumn.
+
+### Lekcja: Feature Groups i ich horyzonty
+
+Teraz nasz model ma 5 grup features z roznym "zasiegiem":
+
+```
+Grupa           │ Lookback │ Features │ Co widzi
+────────────────┼──────────┼──────────┼─────────────────────
+Technical       │ ~60h     │ 11       │ RSI, MACD, ATR
+Nansen/SM       │ Snapshot │ 11       │ Kto shortuje, kto longuje
+Extra           │ 12h      │ 8        │ Funding, OI, pora dnia
+Candle Patterns │ 3h       │ 15       │ Hammer, engulfing, doji
+Multi-day Trend │ 10 dni   │ 4        │ ← NOWE: szeroki kontekst
+```
+
+Model teraz widzi od **3 godzin** (candle patterns) do **10 dni** (multi-day trend). To daje mu pelniejszy obraz — krotkoterminowe patterns w kontekscie dlugoterminowego trendu.
+
+Analogia: Jak lekarz ktory patrzy na wynik badania z dzisiaj (candle pattern), ale tez na historie choroby z ostatniego miesiaca (multi-day trend). Samo dzisiejsze badanie moze byc mylace bez kontekstu.

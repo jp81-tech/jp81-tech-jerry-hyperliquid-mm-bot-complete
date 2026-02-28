@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-27
+- Data: 2026-02-28
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -42,6 +42,73 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 28 lutego 2026
+
+### 65. XGBoost class completeness check — skip training when class missing (28.02)
+
+**Problem:** XGBoost training crashował z `ValueError: operands could not be broadcast together with shapes (74,3) (74,)` gdy jedna z 3 klas (SHORT/NEUTRAL/LONG) brakowała w train set. kPEPE h12 miał 0 LONG w test set.
+
+**Root cause:** `model.predict()` zwraca probabilities shape `(n,3)` zamiast labels `(n,)` gdy model wytrenowany z < 3 klasami.
+
+**Fix w `scripts/xgboost_train.py` (po class distribution printout):**
+```python
+train_classes = set(int(c) for c in np.unique(y_train))
+if len(train_classes) < 3:
+    missing = {0, 1, 2} - train_classes
+    print(f"    {horizon}: Missing class(es) {missing_names} in train set, skipping")
+    return None
+```
+
+**Verified:** kPEPE h12 now prints "Missing class(es) LONG in train set, skipping" zamiast crasha.
+
+**Pliki:** `scripts/xgboost_train.py` (+8)
+**Commit:** `975294e`
+
+### 64. Multi-day Trend Features — XGBoost 45→49 features (28.02)
+
+**Problem:** Model XGBoost miał max lookback 24h (`change_24h`). Nie widział multi-day trendów — np. spadek kPEPE od 13 lutego (14% w 7 dni) był niewidoczny. Model nie wiedział "czy jesteśmy w silnym trendzie spadkowym od 10 dni".
+
+**Rozwiązanie:** 4 nowe multi-day trend features obliczane z daily candles (1d interval, 14 candles) z Hyperliquid API.
+
+**Nowa funkcja `compute_multiday_features(token, price)` w `xgboost_collect.py`:**
+
+| # | Feature | Źródło | Normalizacja | Zakres |
+|---|---------|--------|-------------|--------|
+| [45] | `change_7d` | 7-day price change | tanh(change%/30) | [-1, 1] |
+| [46] | `change_10d` | 10-day price change | tanh(change%/50) | [-1, 1] |
+| [47] | `dist_from_7d_high` | odległość od 7d high | clamp(pct×10, -1, 0) | [-1, 0] |
+| [48] | `trend_slope_7d` | lin. regression slope 7d | tanh(slope×100/30) | [-1, 1] |
+
+**Pierwsze wartości live (28.02):**
+
+| Token | change_7d | change_10d | dist_from_high | slope_7d | Interpretacja |
+|-------|-----------|------------|----------------|----------|---------------|
+| BTC | -0.19 | -0.10 | -0.89 | -0.76 | Silny downtrend, 8.9% pod 7d high |
+| kPEPE | -0.42 | -0.33 | -1.00 | -1.00 | Ekstremalny downtrend, >10% pod high |
+
+**Backward compatibility:**
+- Trainer: akceptuje 30, 45, LUB 49 features. Stare 30-feature wiersze padowane zerami (+19). Stare 45-feature wiersze padowane zerami (+4).
+- Predictor: identyczny schemat paddingu.
+- Stare modele (wytrenowane na 45 feat) działają bez zmian — multi-day features = 0 → brak wpływu na drzewa.
+
+**API fetch:** `fetch_candles(token, "1d", 14)` — 14 daily candles = dodatkowe 1 API call per token per collect run. Łącznie 9 tokenów × 1 extra call = 9 calls (total ~18 API calls per run, wewnątrz rate limit).
+
+**Zmodyfikowane pliki (3):**
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/xgboost_collect.py` | `compute_multiday_features()` (+53 LOC), daily candle fetch, assert 49 |
+| `scripts/xgboost_train.py` | 4 feature names, NUM_FEATURES=49, backward compat (30→49, 45→49) |
+| `src/prediction/models/XGBoostPredictor.ts` | 4 feature names, NUM_FEATURES=49, backward compat |
+
+**Deploy:** SCP 3 pliki + dist patch na serwerze. Collector verified: 49 features na wszystkich 9 tokenach. prediction-api: restarted, all models loaded.
+
+**Timeline do efektywności:** ~50 nowych 49-feature rows (~12.5h) → retrain. Do tego czasu stare wiersze (padded zeros) = modele zachowują się identycznie.
+
+**Commit:** `b21c8c5`
 
 ---
 
@@ -2924,7 +2991,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction per-horizon weights (26.02)**: h1: tech 35% + momentum 30% + SM 10% (SM szum na 1h). h4: SM 30% (sweet spot). h12+: SM 40-65% (strukturalny sygnał). Mean-reversion dla h12+: RSI overbought → kontra-siła. Multiplier: h1=0.5, h4=1.0, h12=1.5, w1=3.0, m1=5.0. Config: `HORIZON_WEIGHTS` w `HybridPredictor.ts`.
 - **Prediction verification (26.02)**: Retrospective method — traktuje `timePrices` map jako historyczny zapis, szuka ceny N godzin po predykcji. Stary: ±10% time window → nigdy nie matchował. Nowy: `directionAccuracy` + `directionTotal` per-horizon. Endpoint: `/verify/:token`.
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
-- **XGBoost data collection**: Co 15 min (cron), **45 features** per sample (30 base + 15 candle patterns, od 27.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: stare 30-feature wiersze padowane zerami w trainerze i predictorze.
+- **XGBoost data collection**: Co 15 min (cron), **49 features** per sample (11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day, od 28.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h, w1 po 7 dniach, m1 po 30 dniach. `LABEL_BACKFILL_ROWS=0` skanuje wszystkie wiersze. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: trainer i predictor akceptują 30, 45, lub 49 features (padują zerami). Multi-day features: change_7d, change_10d, dist_from_7d_high, trend_slope_7d — obliczane z daily candles (14d lookback).
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
 - **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
