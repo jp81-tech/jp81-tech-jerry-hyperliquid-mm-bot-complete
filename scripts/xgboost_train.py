@@ -201,6 +201,15 @@ def train_model(
         test_count = int(np.sum(y_test == cls))
         print(f"    {horizon} class {name}: train={train_count}, test={test_count}")
 
+    # Skip if any class missing from train — XGBoost predict() breaks with < num_class classes
+    train_classes = set(int(c) for c in np.unique(y_train))
+    if len(train_classes) < 3:
+        missing = {0, 1, 2} - train_classes
+        names = {0: "SHORT", 1: "NEUTRAL", 2: "LONG"}
+        missing_names = ", ".join(names[c] for c in missing)
+        print(f"    {horizon}: Missing class(es) {missing_names} in train set, skipping")
+        return None
+
     # Train
     model = xgb.XGBClassifier(**XGB_PARAMS)
     model.fit(
