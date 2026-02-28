@@ -43,18 +43,15 @@ MIN_SAMPLES = {
     "h1":  50,
     "h4":  50,
     "h12": 50,
-    "w1":  30,
-    "m1":  20,
 }
 
 # Classification thresholds (price change %)
 # Threshold = "how big a move counts as directional" — must match token volatility
+# w1/m1 removed — MM bot profits from micro-moves, weekly/monthly = noise (temporal shift)
 THRESHOLDS = {
     "h1":  0.005,   # 0.5%
     "h4":  0.015,   # 1.5%
     "h12": 0.030,   # 3.0%
-    "w1":  0.080,   # 8.0%
-    "m1":  0.150,   # 15.0%
 }
 
 # Per-token threshold overrides — each token's volatility determines optimal thresholds
@@ -65,64 +62,46 @@ TOKEN_THRESHOLDS: dict[str, dict[str, float]] = {
         "h1":  0.0015,  # 0.15% (BTC median h1 ~0.21%, very low vol)
         "h4":  0.003,   # 0.3%  (BTC median h4 ~0.44%, default ±1.5% → 88% NEUTRAL!)
         "h12": 0.006,   # 0.6%  (BTC median h12 ~0.89%)
-        "w1":  0.028,   # 2.8%
-        "m1":  0.059,   # 5.9%
     },
     "ETH": {
         "h1":  0.002,   # 0.2%  (ETH median h1 ~0.29%)
         "h4":  0.004,   # 0.4%  (ETH median h4 ~0.60%, default ±1.5% → 79% NEUTRAL!)
         "h12": 0.009,   # 0.9%  (ETH median h12 ~1.23%)
-        "w1":  0.040,   # 4.0%
-        "m1":  0.077,   # 7.7%
     },
     "SOL": {
         "h1":  0.003,   # 0.3%  (SOL median h1 ~0.39%)
         "h4":  0.006,   # 0.6%  (SOL median h4 ~0.79%, default ±1.5% → 74% NEUTRAL!)
         "h12": 0.012,   # 1.2%  (SOL median h12 ~1.61%)
-        "w1":  0.047,   # 4.7%
-        "m1":  0.115,   # 11.5%
     },
     "XRP": {
         "h1":  0.003,   # 0.3%  (XRP median h1 ~0.35%)
         "h4":  0.005,   # 0.5%  (XRP median h4 ~0.68%, default ±1.5% → 77% NEUTRAL!)
         "h12": 0.010,   # 1.0%  (XRP median h12 ~1.37%)
-        "w1":  0.043,   # 4.3%
-        "m1":  0.096,   # 9.6%
     },
     "ZEC": {
-        "h1":  0.006,   # 0.6%  (ZEC median h1 ~0.78%, already ~OK with default)
-        "h4":  0.012,   # 1.2%  (ZEC median h4 ~1.62%, default ±1.5% → 47% neutral = OK)
+        "h1":  0.006,   # 0.6%  (ZEC median h1 ~0.78%)
+        "h4":  0.012,   # 1.2%  (ZEC median h4 ~1.62%)
         "h12": 0.022,   # 2.2%  (ZEC median h12 ~2.99%)
-        "w1":  0.080,   # 8.0%  (keep default)
-        "m1":  0.150,   # 15.0% (keep default)
     },
     "HYPE": {
         "h1":  0.004,
         "h4":  0.012,
         "h12": 0.025,
-        "w1":  0.070,
-        "m1":  0.130,
     },
     "kPEPE": {
         "h1":  0.003,   # 0.3% (kPEPE median h1 move ~0.5%)
         "h4":  0.008,   # 0.8% (kPEPE median h4 move ~1.0%)
         "h12": 0.020,   # 2.0% (kPEPE std h12 ~3.5%)
-        "w1":  0.060,   # 6.0%
-        "m1":  0.120,   # 12.0%
     },
     "LIT": {
         "h1":  0.004,
         "h4":  0.010,
         "h12": 0.025,
-        "w1":  0.070,
-        "m1":  0.130,
     },
     "FARTCOIN": {
         "h1":  0.004,   # 0.4%
         "h4":  0.010,   # 1.0%
         "h12": 0.025,   # 2.5%
-        "w1":  0.070,   # 7.0%
-        "m1":  0.130,   # 13.0%
     },
 }
 
@@ -259,16 +238,14 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
         return [], {}
 
     features = []
-    labels = {"h1": [], "h4": [], "h12": [], "w1": [], "m1": []}
-    skipped = {"h1": 0, "h4": 0, "h12": 0, "w1": 0, "m1": 0}
+    labels = {"h1": [], "h4": [], "h12": []}
+    skipped = {"h1": 0, "h4": 0, "h12": 0}
 
     # Collector uses "label_1h" format, but horizon keys are "h1" — map both
     LABEL_KEY_MAP = {
         "h1": ["label_h1", "label_1h"],
         "h4": ["label_h4", "label_4h"],
         "h12": ["label_h12", "label_12h"],
-        "w1": ["label_w1"],
-        "m1": ["label_m1"],
     }
 
     with open(filepath) as f:
@@ -297,7 +274,7 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
 
             features.append(feat)
 
-            for horizon in ["h1", "h4", "h12", "w1", "m1"]:
+            for horizon in ["h1", "h4", "h12"]:
                 val = None
                 for label_key in LABEL_KEY_MAP[horizon]:
                     val = row.get(label_key)
@@ -310,7 +287,7 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                     skipped[horizon] += 1
 
     print(f"  [{token}] Loaded {len(features)} rows")
-    for h in ["h1", "h4", "h12", "w1", "m1"]:
+    for h in ["h1", "h4", "h12"]:
         labeled = sum(1 for v in labels[h] if v is not None)
         print(f"    {h}: {labeled} labeled, {skipped[h]} unlabeled")
 
@@ -491,7 +468,7 @@ def train_token(token: str) -> dict | None:
         "horizons": {},
     }
 
-    for horizon in ["h1", "h4", "h12", "w1", "m1"]:
+    for horizon in ["h1", "h4", "h12"]:
         result = train_model(features, labels[horizon], horizon, token)
         if result:
             meta["horizons"][horizon] = result

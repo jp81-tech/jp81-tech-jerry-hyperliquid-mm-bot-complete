@@ -127,7 +127,7 @@ export class PricePredictionService {
       return this.predictor.verifyPredictions(token, currentPrice);
     }
     const result: Record<string, any> = {};
-    for (const key of ['h1', 'h4', 'h12', 'w1', 'm1', 'direction']) {
+    for (const key of ['h1', 'h4', 'h12', 'direction']) {
       result[key] = { accuracy: 0, total: 0, directionAccuracy: 0, directionTotal: 0 };
     }
     return result;
@@ -232,7 +232,7 @@ export class PricePredictionService {
   getXGBFeatureImportance(token: string): Record<string, Record<string, number> | null> {
     const xgb = this.predictor.getXGBoost();
     const result: Record<string, Record<string, number> | null> = {};
-    for (const hz of ['h1', 'h4', 'h12', 'w1', 'm1']) {
+    for (const hz of ['h1', 'h4', 'h12']) {
       result[hz] = xgb.getFeatureImportance(token, hz);
     }
     return result;

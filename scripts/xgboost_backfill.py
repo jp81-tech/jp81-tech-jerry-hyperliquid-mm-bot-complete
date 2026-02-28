@@ -223,13 +223,11 @@ def compute_labels(hourly: list[dict], idx: int) -> dict:
     """
     price = hourly[idx]["c"]
     if price <= 0:
-        return {"label_1h": None, "label_4h": None, "label_12h": None,
-                "label_w1": None, "label_m1": None}
+        return {"label_1h": None, "label_4h": None, "label_12h": None}
 
     n = len(hourly)
     labels = {}
-    for key, offset in [("label_1h", 1), ("label_4h", 4), ("label_12h", 12),
-                         ("label_w1", 168), ("label_m1", 720)]:
+    for key, offset in [("label_1h", 1), ("label_4h", 4), ("label_12h", 12)]:
         future = idx + offset
         if future < n and hourly[future]["c"] > 0:
             labels[key] = round(hourly[future]["c"] / price - 1, 6)
@@ -429,19 +427,7 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
 
     # Label stats
     if total_rows > 0:
-        labeled = {"h1": 0, "h4": 0, "h12": 0, "w1": 0, "m1": 0}
-        with open(filepath) as f_read:
-            for line in f_read:
-                try:
-                    r = json.loads(line.strip())
-                    for k in labeled:
-                        if r.get(f"label_{k.replace('h','').replace('w','').replace('m','')}") is not None \
-                           or r.get(f"label_{k}") is not None:
-                            labeled[k] += 1
-                except:
-                    continue
-        # Better label counting
-        labeled = {"1h": 0, "4h": 0, "12h": 0, "w1": 0, "m1": 0}
+        labeled = {"1h": 0, "4h": 0, "12h": 0}
         with open(filepath) as f_read:
             for line in f_read:
                 try:
@@ -449,12 +435,9 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
                     if r.get("label_1h") is not None: labeled["1h"] += 1
                     if r.get("label_4h") is not None: labeled["4h"] += 1
                     if r.get("label_12h") is not None: labeled["12h"] += 1
-                    if r.get("label_w1") is not None: labeled["w1"] += 1
-                    if r.get("label_m1") is not None: labeled["m1"] += 1
                 except:
                     continue
-        print(f"  [{token}] Labels: h1={labeled['1h']}, h4={labeled['4h']}, "
-              f"h12={labeled['12h']}, w1={labeled['w1']}, m1={labeled['m1']}")
+        print(f"  [{token}] Labels: h1={labeled['1h']}, h4={labeled['4h']}, h12={labeled['12h']}")
 
     return new_rows
 

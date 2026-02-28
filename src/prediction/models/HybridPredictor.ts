@@ -37,12 +37,12 @@ export interface ModelWeights {
   trend: number;
 }
 
+// w1/m1 removed — MM bot profits from micro-moves (h1-h4), weekly/monthly predictions
+// are noise from a different market regime (temporal shift). Zero impact on grid engine.
 export const PREDICTION_HORIZONS = [
   { key: 'h1',  hours: 1,   multiplier: 0.5, confMax: 80, confBase: 50, confScale: 30 },
   { key: 'h4',  hours: 4,   multiplier: 1.0, confMax: 70, confBase: 45, confScale: 25 },
   { key: 'h12', hours: 12,  multiplier: 1.5, confMax: 60, confBase: 40, confScale: 20 },
-  { key: 'w1',  hours: 168, multiplier: 3.0, confMax: 45, confBase: 30, confScale: 15 },
-  { key: 'm1',  hours: 720, multiplier: 5.0, confMax: 30, confBase: 20, confScale: 10 },
 ];
 
 // Per-horizon weight overrides: short horizons = technical/momentum dominant, long = SM dominant
@@ -50,8 +50,6 @@ const HORIZON_WEIGHTS: Record<string, { technical: number; momentum: number; sma
   h1:  { technical: 0.35, momentum: 0.30, smartMoney: 0.10, volume: 0.15, trend: 0.10 },
   h4:  { technical: 0.25, momentum: 0.20, smartMoney: 0.30, volume: 0.10, trend: 0.15 },
   h12: { technical: 0.20, momentum: 0.15, smartMoney: 0.40, volume: 0.10, trend: 0.15 },
-  w1:  { technical: 0.10, momentum: 0.10, smartMoney: 0.55, volume: 0.05, trend: 0.20 },
-  m1:  { technical: 0.05, momentum: 0.05, smartMoney: 0.65, volume: 0.05, trend: 0.20 },
 };
 
 // Per-token weight overrides — tokens where SM signal is dead/unreliable
@@ -62,8 +60,6 @@ const TOKEN_WEIGHT_OVERRIDES: Record<string, typeof HORIZON_WEIGHTS> = {
     h1:  { technical: 0.40, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.15 },
     h4:  { technical: 0.35, momentum: 0.30, smartMoney: 0.00, volume: 0.15, trend: 0.20 },
     h12: { technical: 0.30, momentum: 0.25, smartMoney: 0.00, volume: 0.15, trend: 0.30 },
-    w1:  { technical: 0.25, momentum: 0.20, smartMoney: 0.00, volume: 0.15, trend: 0.40 },
-    m1:  { technical: 0.20, momentum: 0.15, smartMoney: 0.00, volume: 0.15, trend: 0.50 },
   },
 };
 
@@ -432,8 +428,6 @@ export class HybridPredictor {
       h1:  { ageHours: 1,   errorThreshold: 2 },
       h4:  { ageHours: 4,   errorThreshold: 4 },
       h12: { ageHours: 12,  errorThreshold: 8 },
-      w1:  { ageHours: 168, errorThreshold: 15 },
-      m1:  { ageHours: 720, errorThreshold: 25 },
     };
 
     const emptyResult: Record<string, { accuracy: number; total: number }> = { direction: { accuracy: 0, total: 0 } };

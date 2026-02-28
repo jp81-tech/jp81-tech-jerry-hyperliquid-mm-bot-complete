@@ -51,7 +51,7 @@ BIAS_FILE = "/tmp/nansen_bias.json"
 SIGNAL_STATE_FILE = "/tmp/nansen_mm_signal_state.json"
 OI_SNAPSHOT_FILE = "/tmp/xgboost_oi_snapshots.json"
 
-LABEL_BACKFILL_ROWS = 0  # 0 = scan all rows (needed for m1 labels — 30 days lookback)
+LABEL_BACKFILL_ROWS = 500  # scan last N rows for label backfill (h12 = 12h lookback max)
 CANDLE_COUNT = 100  # 100 hourly candles
 
 
@@ -855,7 +855,7 @@ def backfill_labels(filepath: str, current_price: float) -> int:
             if line:
                 lines.append(line)
 
-    # Process rows for backfill (0 = scan all, needed for m1 30-day lookback)
+    # Process recent rows for label backfill (h1/h4/h12 only — w1/m1 removed)
     start_idx = max(0, len(lines) - LABEL_BACKFILL_ROWS) if LABEL_BACKFILL_ROWS > 0 else 0
     modified = False
 
@@ -887,18 +887,6 @@ def backfill_labels(filepath: str, current_price: float) -> int:
 
         if age >= 43200 and row.get("label_12h") is None:
             row["label_12h"] = round(change, 6)
-            lines[i] = json.dumps(row)
-            modified = True
-            updated += 1
-
-        if age >= 604800 and row.get("label_w1") is None:   # 7 days
-            row["label_w1"] = round(change, 6)
-            lines[i] = json.dumps(row)
-            modified = True
-            updated += 1
-
-        if age >= 2592000 and row.get("label_m1") is None:  # 30 days
-            row["label_m1"] = round(change, 6)
             lines[i] = json.dumps(row)
             modified = True
             updated += 1
@@ -953,8 +941,6 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
         "label_1h": None,
         "label_4h": None,
         "label_12h": None,
-        "label_w1": None,
-        "label_m1": None,
     }
 
     # Save latest feature vector for prediction-api (real-time inference)

@@ -5765,3 +5765,62 @@ State file przechowuje max 7 dni danych (auto-trim). Dry-run (`--dry-run`) NIE z
 3. **"Short-term noise"** — 24h stats beda skakac +50bps / -30bps. Dopiero 7d+ rolling daje wiarygodny obraz. Nie panikuj po jednym zlym dniu.
 
 4. **"Correlation != causation"** — jesli ML mowi BEARISH i rynek spada, ale SM signals TEZ mowily SHORT (i bot podazal za SM), to ML nie "zarobil" — SM zarobilo. ML moze byc redundantne. Monitor tego nie odroznnia.
+
+---
+
+## Rozdzial 36: Usuniecie w1/m1 — Temporal Shift i dlaczego "wiecej" nie znaczy "lepiej"
+
+### Problem: Model ktory patrzy zbyt daleko
+
+Wyobraz sobie ze jestes taksowkarzem w Krakowie. Masz GPS ktory podpowiada ci skrecanie na najblizsych 3 skrzyzowaniach (h1, h4, h12). Dziala super.
+
+Pewnego dnia ktos mowi: "hej, dodajmy prognozowanie ruchu na CALY TYDZIEN do przodu (w1) i CALY MIESIAC (m1)!". Brzmi madrzej, prawda? Wiecej danych = lepsze decyzje?
+
+**Nie.** Oto dlaczego:
+
+1. **Taksowkarz zarabia na TERAZ** — na nastepnym skrzyzowaniu, nie za tydzien. Bot MM zarabia na spreadzie h1-h4, nie na tygodniowych zakładach kierunkowych. Prognoza "BTC spadnie 5% w ciagu miesiaca" nie pomaga ci zdecydowac jaki spread ustawic TERAZ.
+
+2. **Dane z przeszlosci = inny swiat** — nasz backfill siega 180 dni (polowa 2025). Wtedy rynek byl w fazie "akumulacji/nudy" — niski wolumen, male ruchy. Teraz (luty 2026) jestesmy w fazie "euforii/strachu" — ogromne ruchy, panika, liquidacje. Model w1/m1 uczyl sie na danych z INNEGO swiata.
+
+To wlasnie jest **temporal shift** (przesuniecie czasowe) — model patrzy na stare dane i mysli "tak wygladal rynek", ale rynek sie zmienil. To jak uczyc kogos prowadzenia w lecie i oczekiwac ze bedzie dobrze jezdzic po lodzie.
+
+### Dowody
+
+Sprawdzilismy edge (przewage nad losowym zgadywaniem) dla w1/m1:
+
+| Token | w1 edge | m1 edge | h4 edge |
+|-------|---------|---------|---------|
+| BTC | **-18%** (gorszy niz random!) | brak danych | +0.9% |
+| ETH | -12% | -24% | +3.5% |
+| SOL | -5% | +10% (podejrzane) | +4.2% |
+| kPEPE | -8% | +15% (artifact: 1 klasa) | +2.4% |
+
+w1 i m1 mialy **negatywny edge** dla wiekszosci tokenow. Model ktory jest gorszy niz rzut moneta to nie model — to szum.
+
+### Co zrobilismy
+
+Agresywna amputacja — kompletne usuniecie w1/m1 z calego pipeline:
+
+```
+PRZED:  h1 → h4 → h12 → w1 → m1    (5 horyzontow)
+PO:     h1 → h4 → h12               (3 horyzonty)
+```
+
+7 plikow zmodyfikowanych, -66 linii kodu netto. Czyszczenie, nie dodawanie.
+
+### Lekcja inzynierska: "Mniej znaczy wiecej"
+
+W ML jest pokusa dodawania: wiecej features, wiecej horyzontow, wiecej danych. Ale kazda dodana zmienna moze byc **szumem** zamiast sygnalem. A szum jest gorszy niz brak danych, bo:
+
+- Szum zuzywa pojemnosc modelu (drzewa decyzyjne maja ograniczona glebokosc)
+- Szum moze zdominowac slaby sygnal (w1/m1 mowily "NEUTRAL" a h4 mowilo "SHORT" → blend byl rozwodniony)
+- Szum zuzywa czas treningu (40% mniej training time po usunieciu)
+- Szum zuzywa zasoby (collector nie musi skanowac 4000+ wierszy dla m1 30-day lookback)
+
+Analogia: Masz 5 doradcow. 3 z nich sa dobrzy (h1, h4, h12). 2 z nich sa pijani (w1, m1) — mowia losowe rzeczy. Jesli uswednisz opinie wszystkich 5, pijani rozwadniaja madrosc trzech trzezwych. Lepiej ich wyrzucic.
+
+To sie nazywa **"feature pruning"** w ML — swiadome usuwanie elementow ktore nie pomagaja. Przeciwintuicyjne, ale kluczowe.
+
+### Kiedy wrocic do dlugich horyzontow?
+
+Jesli zbieramy >1 rok danych (obejmujacych wiele rezimow rynkowych: byk, niedzwiedz, konsolidacja, panika), wtedy w1 moze byc ponownie rozpatrzony. Ale m1 (30-dniowy horyzont) to prawdopodobnie zawsze szum dla bota MM — bot nie trzyma pozycji miesiac.

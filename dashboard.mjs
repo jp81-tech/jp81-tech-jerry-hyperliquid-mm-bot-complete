@@ -154,8 +154,6 @@ const HTML = `<!DOCTYPE html>
                     '  <div class="pred-row"><span>1h:</span><span id="pred1h-' + coin + '">---</span></div>' +
                     '  <div class="pred-row"><span>4h:</span><span id="pred4h-' + coin + '">---</span></div>' +
                     '  <div class="pred-row"><span>12h:</span><span id="pred12h-' + coin + '">---</span></div>' +
-                    '  <div class="pred-row"><span>1w:</span><span id="predw1-' + coin + '">---</span></div>' +
-                    '  <div class="pred-row"><span>1m:</span><span id="predm1-' + coin + '">---</span></div>' +
                     '  <div class="pred-row"><span>Confidence:</span><span id="conf-' + coin + '">---</span></div>' +
                     '</div>' +
                     '<div class="signals-box">' +
@@ -305,9 +303,7 @@ const HTML = `<!DOCTYPE html>
                 const horizons = [
                     { key: "h1", color: "#3fb950", lbl: "h1" },
                     { key: "h4", color: "#d29922", lbl: "h4" },
-                    { key: "h12", color: "#f85149", lbl: "h12" },
-                    { key: "w1", color: "#a371f7", lbl: "w1" },
-                    { key: "m1", color: "#39c5cf", lbl: "m1" }
+                    { key: "h12", color: "#f85149", lbl: "h12" }
                 ];
                 let offsetY = 0;
                 horizons.forEach((hz, idx) => {
@@ -401,7 +397,7 @@ const HTML = `<!DOCTYPE html>
             if (!pred) {
                 const dirEl = document.getElementById("direction-" + coin);
                 if (dirEl) dirEl.textContent = "No data";
-                ["pred1h","pred4h","pred12h","predw1","predm1","conf"].forEach(id => {
+                ["pred1h","pred4h","pred12h","conf"].forEach(id => {
                     const el = document.getElementById(id + "-" + coin);
                     if (el) el.textContent = "---";
                 });
@@ -422,9 +418,9 @@ const HTML = `<!DOCTYPE html>
             };
 
             const preds = pred.predictions || {};
-            ["h1","h4","h12","w1","m1"].forEach(hz => {
+            ["h1","h4","h12"].forEach(hz => {
                 const p = preds[hz];
-                const elId = hz === "w1" ? "predw1" : hz === "m1" ? "predm1" : "pred" + hz;
+                const elId = "pred" + hz;
                 const el = document.getElementById(elId + "-" + coin);
                 if (el) el.innerHTML = '<span class="' + (p && p.change >= 0 ? "green" : "red") + '">' + formatPred(p) + '</span>';
             });
@@ -465,9 +461,7 @@ const HTML = `<!DOCTYPE html>
                 predictions: {
                     h1: { price: currentPrice * (1 + slopePct * 1 / 100), change: slopePct * 1 },
                     h4: { price: currentPrice * (1 + slopePct * 4 / 100), change: slopePct * 4 },
-                    h12: { price: currentPrice * (1 + slopePct * 12 / 100), change: slopePct * 12 },
-                    w1: { price: currentPrice * (1 + slopePct * 168 / 100), change: slopePct * 168 },
-                    m1: { price: currentPrice * (1 + slopePct * 720 / 100), change: slopePct * 720 }
+                    h12: { price: currentPrice * (1 + slopePct * 12 / 100), change: slopePct * 12 }
                 },
                 signals: { technical: 0, momentum: slopePct / 5, smartMoney: 0, volume: 0 },
                 keyFactors: ["Fallback: Linear Regression (ML offline)"]

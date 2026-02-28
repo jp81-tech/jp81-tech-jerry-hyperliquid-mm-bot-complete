@@ -21,7 +21,7 @@ export interface XGBPrediction {
   direction: 'LONG' | 'SHORT' | 'NEUTRAL';
   confidence: number;        // 0-100, from max probability
   probabilities: { long: number; short: number; neutral: number };
-  horizon: string;           // 'h1', 'h4', 'h12', 'w1', 'm1'
+  horizon: string;           // 'h1', 'h4', 'h12'
 }
 
 export interface XGBMeta {
@@ -109,7 +109,7 @@ export const FEATURE_NAMES = [
 
 const NUM_FEATURES = 62;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
-const HORIZONS = ['h1', 'h4', 'h12', 'w1', 'm1'] as const;
+const HORIZONS = ['h1', 'h4', 'h12'] as const;
 const MODEL_DIR = '/tmp';
 const RELOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
@@ -388,8 +388,8 @@ export class XGBoostPredictor {
     const preds = this.predict(token, features);
     if (!preds || preds.length === 0) return null;
 
-    // Prefer h4, then h1, h12, w1, m1
-    const preference = ['h4', 'h1', 'h12', 'w1', 'm1'];
+    // Prefer h4, then h1, h12
+    const preference = ['h4', 'h1', 'h12'];
     for (const hz of preference) {
       const found = preds.find(p => p.horizon === hz);
       if (found) return found;
