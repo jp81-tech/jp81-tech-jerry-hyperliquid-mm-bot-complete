@@ -56,7 +56,7 @@ from xgboost_collect import (
 # --- Configuration ---
 TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
 DATASET_DIR = "/tmp"
-NUM_FEATURES = 62
+NUM_FEATURES = 65
 MIN_CANDLES = 60  # Need 60+ hourly candles for RSI/MACD/BB
 API_CHUNK_DAYS = 180  # HL API returns max ~5000 hourly candles (~208 days)
 
@@ -388,8 +388,11 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
             # [59-61] Derived
             derived = compute_derived_features(candles)
 
+            # [62-64] BTC prediction proxy — not available historically
+            btc_pred_feat = [0.0] * 3
+
             # Assemble
-            features = tech + nansen + extra + candle_feat + multiday + btc_cross + orderbook + meta_extra + derived
+            features = tech + nansen + extra + candle_feat + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat
             assert len(features) == NUM_FEATURES, f"Expected {NUM_FEATURES}, got {len(features)}"
 
             # Compute labels (look-ahead — we know the future price!)
@@ -460,7 +463,7 @@ def main():
     print(f"  Tokens: {tokens}")
     print(f"  Days: {args.days}")
     print(f"  Dataset dir: {DATASET_DIR}")
-    print(f"  Features: {NUM_FEATURES} total, ~38 computable from candles, ~24 zeros")
+    print(f"  Features: {NUM_FEATURES} total, ~38 computable from candles, ~27 zeros")
 
     if args.dry_run:
         print("\n  DRY RUN — estimating rows:")

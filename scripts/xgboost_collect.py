@@ -9,7 +9,7 @@ Runs every 15 min via cron. Computes 62 features from:
 Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
 Backfills labels (1h, 4h, 12h price change) for older rows.
 
-Feature vector (62 features):
+Feature vector (65 features):
   [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
           tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
           volumeRatio/5, volatility/10, bbWidth/20, ATR_%
@@ -26,6 +26,8 @@ Feature vector (62 features):
   [53-55] Orderbook: bid_ask_imbalance, spread_bps, book_depth_ratio
   [56-58] MetaCtx: mark_oracle_spread, oi_normalized, predicted_funding (premium)
   [59-61] Derived: volume_momentum, price_acceleration, volume_price_divergence
+  [62-64] BTC prediction proxy: btc_pred_direction (-1/0/+1), btc_pred_change (tanh),
+          btc_pred_confidence (0-1)
 """
 
 import json
@@ -839,6 +841,57 @@ def compute_derived_features(candles: list[dict]) -> list[float]:
     return [vol_momentum_norm, accel_norm, div_norm]
 
 
+def fetch_btc_prediction() -> dict | None:
+    """Fetch BTC h4 prediction from prediction-api (localhost:8090).
+
+    Returns dict with direction (-1/0/+1), change (%), confidence (0-100), or None on error.
+    """
+    try:
+        resp = requests.get("http://localhost:8090/predict/BTC", timeout=5)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        pred = data.get("prediction", {})
+        preds = pred.get("predictions", {})
+        h4 = preds.get("h4")
+        if not h4:
+            return None
+        direction_str = pred.get("direction", "NEUTRAL")
+        direction = 1 if direction_str == "BULLISH" else (-1 if direction_str == "BEARISH" else 0)
+        return {
+            "direction": direction,
+            "change": h4.get("change", 0),
+            "confidence": h4.get("confidence", 50),
+        }
+    except Exception:
+        return None
+
+
+def compute_btc_pred_features(btc_pred: dict | None, token: str) -> list[float]:
+    """Compute 3 BTC prediction proxy features [62-64].
+
+    For BTC itself: returns [0, 0, 0] (redundant with own technical features).
+    For all other tokens: injects BTC h4 prediction as cross-market intelligence.
+
+    Features:
+      [62] btc_pred_direction  — -1 (SHORT/BEARISH), 0 (NEUTRAL), +1 (LONG/BULLISH)
+      [63] btc_pred_change     — predicted h4 % change, tanh(change/5) normalized to [-1, 1]
+      [64] btc_pred_confidence — confidence / 100, [0, 1]
+    """
+    if token == "BTC" or btc_pred is None:
+        return [0.0, 0.0, 0.0]
+
+    direction = float(btc_pred.get("direction", 0))
+    change = btc_pred.get("change", 0)
+    confidence = btc_pred.get("confidence", 50)
+
+    return [
+        direction,
+        math.tanh(change / 5),
+        confidence / 100.0,
+    ]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -899,7 +952,7 @@ def backfill_labels(filepath: str, current_price: float) -> int:
     return updated
 
 
-def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | None, btc_candles: list[dict] | None = None) -> None:
+def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | None, btc_candles: list[dict] | None = None, btc_pred: dict | None = None) -> None:
     """Collect features for a single token and append to dataset."""
     print(f"\n  [{token}] Collecting features...")
 
@@ -929,9 +982,10 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     orderbook = compute_orderbook_features(token, meta_ctx)
     meta_extra = compute_meta_extra_features(token, meta_ctx)
     derived = compute_derived_features(candles)
+    btc_pred_feat = compute_btc_pred_features(btc_pred, token)
 
-    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived
-    assert len(features) == 62, f"Expected 62 features, got {len(features)}"
+    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat
+    assert len(features) == 65, f"Expected 65 features, got {len(features)}"
 
     # Build row
     row = {
@@ -983,10 +1037,19 @@ def main():
     btc_candles = fetch_candles("BTC", "1h", CANDLE_COUNT)
     print(f"  BTC candles: {len(btc_candles)}")
 
+    # Fetch BTC h4 prediction from prediction-api (cross-token proxy)
+    print("  Fetching BTC prediction from prediction-api...")
+    btc_pred = fetch_btc_prediction()
+    if btc_pred:
+        dir_str = {1: "BULLISH", -1: "BEARISH"}.get(btc_pred["direction"], "NEUTRAL")
+        print(f"  BTC prediction: {dir_str} {btc_pred['change']:+.2f}% (conf={btc_pred['confidence']:.0f}%)")
+    else:
+        print("  BTC prediction: unavailable (prediction-api down or no data)")
+
     # Collect per token
     for token in TOKENS:
         try:
-            collect_token(token, mids, meta_ctx, btc_candles)
+            collect_token(token, mids, meta_ctx, btc_candles, btc_pred)
         except Exception as e:
             print(f"  [{token}] ERROR: {e}")
 

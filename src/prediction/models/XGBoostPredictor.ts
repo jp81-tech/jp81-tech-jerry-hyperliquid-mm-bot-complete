@@ -105,9 +105,11 @@ export const FEATURE_NAMES = [
   'mark_oracle_spread', 'oi_normalized', 'predicted_funding',
   // Derived (3)
   'volume_momentum', 'price_acceleration', 'volume_price_divergence',
+  // BTC prediction proxy (3)
+  'btc_pred_direction', 'btc_pred_change', 'btc_pred_confidence',
 ];
 
-const NUM_FEATURES = 62;
+const NUM_FEATURES = 65;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12'] as const;
 const MODEL_DIR = '/tmp';
@@ -323,16 +325,18 @@ export class XGBoostPredictor {
       return null;
     }
 
-    // Accept 30/45/49/53/62-feature vectors, pad old ones with zeros
+    // Accept 30/45/49/53/62/65-feature vectors, pad old ones with zeros
     let paddedFeatures = features;
     if (features.length === 30) {
-      paddedFeatures = [...features, ...new Array(32).fill(0)];
+      paddedFeatures = [...features, ...new Array(35).fill(0)];
     } else if (features.length === 45) {
-      paddedFeatures = [...features, ...new Array(17).fill(0)];
+      paddedFeatures = [...features, ...new Array(20).fill(0)];
     } else if (features.length === 49) {
-      paddedFeatures = [...features, ...new Array(13).fill(0)];
+      paddedFeatures = [...features, ...new Array(16).fill(0)];
     } else if (features.length === 53) {
-      paddedFeatures = [...features, ...new Array(9).fill(0)];
+      paddedFeatures = [...features, ...new Array(12).fill(0)];
+    } else if (features.length === 62) {
+      paddedFeatures = [...features, ...new Array(3).fill(0)];
     } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;

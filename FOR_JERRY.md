@@ -5824,3 +5824,81 @@ To sie nazywa **"feature pruning"** w ML — swiadome usuwanie elementow ktore n
 ### Kiedy wrocic do dlugich horyzontow?
 
 Jesli zbieramy >1 rok danych (obejmujacych wiele rezimow rynkowych: byk, niedzwiedz, konsolidacja, panika), wtedy w1 moze byc ponownie rozpatrzony. Ale m1 (30-dniowy horyzont) to prawdopodobnie zawsze szum dla bota MM — bot nie trzyma pozycji miesiac.
+
+---
+
+## Rozdzial 37: BTC Prediction Proxy — "Smycz Bitcoina"
+
+### Analogia
+
+Wyobraz sobie ze masz 10 psow na spacerze. Kazdy pies (kPEPE, SOL, ETH, FARTCOIN...) biega troche inaczej — jeden szybciej, drugi wolniej, jeden skacze na lewo, drugi na prawo. Ale WSZYSTKIE sa na smyczy trzymanej przez jednego wlasciciela: **Bitcoina**.
+
+Jesli wlasciciel (BTC) skreca w lewo, 95% psow tez skreci w lewo. Moze z opoznieniem, moze z wieksza amplituda, ale kierunek jest ten sam.
+
+Do tej pory model kPEPE probowal sam zgadnac "gdzie idzie wlasciciel", patrzac na swoje wlasne dane techniczne (RSI, MACD, momentum). To tak jakby pies probwoal zgadnac plan spaceru patrzac na swoje wlasne lapy zamiast na wlasciciela.
+
+### Co zrobilismy
+
+Dodalismy 3 nowe features [62-64] ktore mowia modelowi kPEPE **co BTC zamierza zrobic** — nie surowe dane BTC (te juz mielismy w [49-52]), ale GOTOWA PREDYKCJA z modelu BTC:
+
+```
+SUROWE DANE BTC (juz mielismy):
+  [49] btc_change_1h = "BTC spadl 0.5% w ostatniej godzinie"
+  [50] btc_change_4h = "BTC spadl 3% w 4 godziny"
+  [51] btc_rsi = "BTC jest oversold (RSI=28)"
+  [52] btc_correlation = "kPEPE koreluje z BTC w 95%"
+
+NOWE — PREDYKCJA BTC (od teraz):
+  [62] btc_pred_direction = "Model BTC mowi: BEARISH (-1)"
+  [63] btc_pred_change = "Model BTC przewiduje: -0.79% w 4h"
+  [64] btc_pred_confidence = "Model BTC jest pewny w 50%"
+```
+
+Roznica jest kluczowa. Surowe dane mowia "co sie stalo". Predykcja mowi "co sie stanie". To jak roznica miedzy "widzialem wlasciciela skrecajacego w lewo" a "wlasciciel ZAMIERZA skrecic w lewo bo wlasnie sprawdzil mape i ustawil GPS".
+
+### Dlaczego to dziala
+
+Model kPEPE ma 30/62 dead features (zero SM data — nie ma whale_tracker dla kPEPE). Model BTC ma PELNE dane — 11 SM features, funding, orderbook. BTC prediction proxy pozwala kPEPE **pozyczac madrosc BTC** bez bezposredniego dostepu do SM data.
+
+```
+MODEL BTC (bogaty w dane):
+  - 62 features, w tym 11 SM features
+  - whale_tracker: $150M SHORT consensus
+  - orderbook: bid/ask imbalance
+  - funding: negatywny (bearish)
+       |
+       v
+  BTC PREDICTION: BEARISH -0.79% (50% confidence)
+       |
+       v
+MODEL kPEPE (biedny w dane):
+  - 65 features, ale 30 = zera (brak SM)
+  - NOWE: [62-64] = [-1, -0.16, 0.50]  ← "smycz Bitcoina"
+  - Teraz widzi: "BTC idzie w dol → ja pewnie tez"
+```
+
+### Szczegoly techniczne
+
+- **Collector** (`xgboost_collect.py`) fetchuje `localhost:8090/predict/BTC` raz na run (co 15 min)
+- Dla BTC samego: features [62-64] = `[0, 0, 0]` (redundantne — BTC nie potrzebuje predykcji samego siebie)
+- Jesli prediction-api nie odpowie: `[0, 0, 0]` (graceful degradation)
+- Normalizacja: direction = -1/0/+1 (bezposrednio), change = `tanh(change/5)` (|5%| → ~0.76), confidence = `conf/100` (50% → 0.5)
+
+### Kiedy zobaczymy efekt?
+
+**Natychmiast**: zero. Stare modele byly trenowane na 62 features. Nowe [62-64] sa padowane zerami → drzewa ich ignoruja.
+
+**Po retrainingu** (~100 nowych 65-feature wierszy, ~25h): XGBoost zacznie budowac drzewa ktore splituja na `btc_pred_direction` i `btc_pred_change`. Jesli BTC prediction proxy rzeczywiscie pomaga przewidywac kPEPE, te features pojawia sie w **feature importance**.
+
+Spodziewamy sie ze `btc_pred_direction` bedzie jednym z top-5 features dla kPEPE (memecoin na 95% smyczy BTC). Dla BTC samego — zero importance (wyzerowane). Dla ETH/SOL — umiarkowane (80-90% korelacja, mniej niz memecoiny).
+
+### Lekcja inzynierska: "Feature engineering > more data"
+
+W ML sa trzy sposoby poprawy modelu:
+1. **Wiecej danych** — zbierasz dluzej (tygodnie, miesiace)
+2. **Lepszy model** — zmieniasz architekture, hyperparametry
+3. **Lepsze features** — dajesz modelowi MADRZEJSZE informacje
+
+#3 jest zwykle najskuteczniejsze i najtansze. Zamiast czekac miesiace na dane albo tuniwac hyperparametry w nieskonczonosc, dalismy modelowi **gotowa odpowiedz na najwazniejsze pytanie**: "co robi Bitcoin?".
+
+To jest esencja "feature engineering" — nie dodawaj wiecej danych, dodaj **madrzejsze** dane.

@@ -226,9 +226,11 @@ FEATURE_NAMES = [
     "mark_oracle_spread", "oi_normalized", "predicted_funding",
     # Derived (3)
     "volume_momentum", "price_acceleration", "volume_price_divergence",
+    # BTC prediction proxy (3)
+    "btc_pred_direction", "btc_pred_change", "btc_pred_confidence",
 ]
 
-NUM_FEATURES = 62  # 11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived
+NUM_FEATURES = 65  # 62 base + 3 btc_pred
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -259,18 +261,20 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) not in (30, 45, 49, 53, NUM_FEATURES):
+            if not feat or len(feat) not in (30, 45, 49, 53, 62, NUM_FEATURES):
                 continue
 
             # Backward compat: pad old rows with zeros
             if len(feat) == 30:
-                feat = feat + [0.0] * 32  # 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived
+                feat = feat + [0.0] * 35  # 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
             elif len(feat) == 45:
-                feat = feat + [0.0] * 17  # 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived
+                feat = feat + [0.0] * 20  # 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
             elif len(feat) == 49:
-                feat = feat + [0.0] * 13  # 4 btc_cross + 3 orderbook + 3 meta + 3 derived
+                feat = feat + [0.0] * 16  # 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
             elif len(feat) == 53:
-                feat = feat + [0.0] * 9   # 3 orderbook + 3 meta + 3 derived
+                feat = feat + [0.0] * 12  # 3 orderbook + 3 meta + 3 derived + 3 btc_pred
+            elif len(feat) == 62:
+                feat = feat + [0.0] * 3   # 3 btc_pred
 
             features.append(feat)
 
