@@ -87,9 +87,15 @@ export const FEATURE_NAMES = [
   'change_7d', 'change_10d', 'dist_from_7d_high', 'trend_slope_7d',
   // BTC cross-market (4)
   'btc_change_1h', 'btc_change_4h', 'btc_rsi', 'btc_token_corr_24h',
+  // Orderbook (3)
+  'bid_ask_imbalance', 'spread_bps', 'book_depth_ratio',
+  // MetaCtx (3)
+  'mark_oracle_spread', 'oi_normalized', 'predicted_funding',
+  // Derived (3)
+  'volume_momentum', 'price_acceleration', 'volume_price_divergence',
 ];
 
-const NUM_FEATURES = 53;
+const NUM_FEATURES = 62;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12', 'w1', 'm1'] as const;
 const MODEL_DIR = '/tmp';
@@ -275,14 +281,16 @@ export class XGBoostPredictor {
       return null;
     }
 
-    // Accept 30/45/49/53-feature vectors, pad old ones with zeros
+    // Accept 30/45/49/53/62-feature vectors, pad old ones with zeros
     let paddedFeatures = features;
     if (features.length === 30) {
-      paddedFeatures = [...features, ...new Array(23).fill(0)];  // 15 candle + 4 multi-day + 4 btc_cross
+      paddedFeatures = [...features, ...new Array(32).fill(0)];
     } else if (features.length === 45) {
-      paddedFeatures = [...features, ...new Array(8).fill(0)];   // 4 multi-day + 4 btc_cross
+      paddedFeatures = [...features, ...new Array(17).fill(0)];
     } else if (features.length === 49) {
-      paddedFeatures = [...features, ...new Array(4).fill(0)];   // 4 btc_cross
+      paddedFeatures = [...features, ...new Array(13).fill(0)];
+    } else if (features.length === 53) {
+      paddedFeatures = [...features, ...new Array(9).fill(0)];
     } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;

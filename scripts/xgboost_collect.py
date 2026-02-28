@@ -2,14 +2,14 @@
 """
 XGBoost Data Collector for MM Bot Prediction API
 
-Runs every 15 min via cron. Computes 45 features from:
-  - Hyperliquid API (candles, funding, OI, allMids)
+Runs every 15 min via cron. Computes 62 features from:
+  - Hyperliquid API (candles, funding, OI, allMids, L2 orderbook)
   - SM data files (/tmp/smart_money_data.json, nansen_bias.json, nansen_mm_signal_state.json)
 
 Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
 Backfills labels (1h, 4h, 12h price change) for older rows.
 
-Feature vector (53 features):
+Feature vector (62 features):
   [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
           tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
           volumeRatio/5, volatility/10, bbWidth/20, ATR_%
@@ -23,6 +23,9 @@ Feature vector (53 features):
           inside_bar, three_crows, three_soldiers, spinning_top, body_ratio, wick_skew
   [45-48] Multi-day trend: change_7d, change_10d, distance_from_7d_high, trend_slope_7d
   [49-52] BTC cross: btc_change_1h, btc_change_4h, btc_rsi, btc_token_corr_24h
+  [53-55] Orderbook: bid_ask_imbalance, spread_bps, book_depth_ratio
+  [56-58] MetaCtx: mark_oracle_spread, oi_normalized, predicted_funding (premium)
+  [59-61] Derived: volume_momentum, price_acceleration, volume_price_divergence
 """
 
 import json
@@ -109,6 +112,14 @@ def fetch_clearinghouse_meta_and_ctx() -> list[dict] | None:
     """Fetch metaAndAssetCtxs for OI and funding."""
     data = hl_post({"type": "metaAndAssetCtxs"})
     if not data or not isinstance(data, list) or len(data) < 2:
+        return None
+    return data
+
+
+def fetch_l2_book(coin: str) -> dict | None:
+    """Fetch L2 orderbook for a coin. Returns {"levels": [[bids], [asks]]}."""
+    data = hl_post({"type": "l2Book", "coin": coin})
+    if not data or not isinstance(data, dict):
         return None
     return data
 
@@ -683,6 +694,151 @@ def compute_btc_cross_features(token: str, btc_candles: list[dict], token_candle
     ]
 
 
+def compute_orderbook_features(token: str, meta_ctx: list[dict] | None) -> list[float]:
+    """Compute 3 orderbook features from L2 book data.
+
+    Features [53-55]:
+      [53] bid_ask_imbalance  — (bid_depth - ask_depth) / total [-1, 1]
+      [54] spread_bps         — bid-ask spread in bps, min(spread/50, 1) [0, 1]
+      [55] book_depth_ratio   — total depth / 24h volume [0, 1]
+    """
+    zeros = [0.0] * 3
+
+    book = fetch_l2_book(token)
+    if not book or "levels" not in book:
+        return zeros
+
+    levels = book["levels"]
+    if not levels or len(levels) < 2:
+        return zeros
+
+    # REST API: levels[0] = bids, levels[1] = asks
+    bids = levels[0] if levels[0] else []
+    asks = levels[1] if levels[1] else []
+
+    if not bids or not asks:
+        return zeros
+
+    # [53] Bid/ask imbalance — top 5 levels USD depth
+    bid_depth = sum(float(l["px"]) * float(l["sz"]) for l in bids[:5])
+    ask_depth = sum(float(l["px"]) * float(l["sz"]) for l in asks[:5])
+    total_depth = bid_depth + ask_depth
+    imbalance = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+
+    # [54] Spread in bps
+    best_bid = float(bids[0]["px"])
+    best_ask = float(asks[0]["px"])
+    mid = (best_bid + best_ask) / 2
+    spread_bps = (best_ask - best_bid) / mid * 10000 if mid > 0 else 0
+    spread_norm = min(spread_bps / 50, 1.0)  # 50bps = 1.0
+
+    # [55] Book depth / 24h volume ratio
+    volume_24h = 0.0
+    if meta_ctx and len(meta_ctx) >= 2:
+        universe = meta_ctx[0].get("universe", [])
+        ctx_list = meta_ctx[1]
+        for i, asset in enumerate(universe):
+            if asset.get("name") == token and i < len(ctx_list):
+                volume_24h = float(ctx_list[i].get("dayNtlVlm", 0) or 0)
+                break
+    depth_ratio = total_depth / volume_24h if volume_24h > 0 else 0
+    depth_norm = min(depth_ratio, 1.0)
+
+    return [
+        max(-1.0, min(1.0, imbalance)),  # [53] bid_ask_imbalance
+        spread_norm,                      # [54] spread_bps
+        depth_norm,                       # [55] book_depth_ratio
+    ]
+
+
+def compute_meta_extra_features(token: str, meta_ctx: list[dict] | None) -> list[float]:
+    """Compute 3 extra features from metaAndAssetCtxs (already fetched, zero API calls).
+
+    Features [56-58]:
+      [56] mark_oracle_spread  — (mark - oracle) / oracle, scaled ×100 [-1, 1]
+      [57] oi_normalized       — OI / 24h volume ratio [0, 1]
+      [58] predicted_funding   — premium field (drives next funding) [-1, 1]
+    """
+    zeros = [0.0] * 3
+
+    if not meta_ctx or len(meta_ctx) < 2:
+        return zeros
+
+    universe = meta_ctx[0].get("universe", [])
+    ctx_list = meta_ctx[1]
+
+    for i, asset in enumerate(universe):
+        if asset.get("name") == token and i < len(ctx_list):
+            ctx = ctx_list[i]
+
+            # [56] Mark-Oracle spread
+            mark_px = float(ctx.get("markPx", 0) or 0)
+            oracle_px = float(ctx.get("oraclePx", 0) or 0)
+            if oracle_px > 0 and mark_px > 0:
+                spread = (mark_px - oracle_px) / oracle_px
+                mark_oracle = max(-1.0, min(1.0, spread * 100))  # ×100 to scale up
+            else:
+                mark_oracle = 0.0
+
+            # [57] OI normalized by 24h volume
+            oi = float(ctx.get("openInterest", 0) or 0)
+            vol_24h = float(ctx.get("dayNtlVlm", 0) or 0)
+            oi_norm = min(oi / vol_24h / 10, 1.0) if vol_24h > 0 else 0.0  # ratio/10 → [0,1]
+
+            # [58] Predicted funding (premium as proxy — drives next funding rate)
+            premium = float(ctx.get("premium", 0) or 0)
+            pred_funding = math.tanh(premium * 1000)  # typically ±0.001 → tanh(±1)
+
+            return [mark_oracle, oi_norm, pred_funding]
+
+    return zeros
+
+
+def compute_derived_features(candles: list[dict]) -> list[float]:
+    """Compute 3 derived features from existing candle data (zero API calls).
+
+    Features [59-61]:
+      [59] volume_momentum         — recent 4h volume / previous 4h volume, centered [-1, 1]
+      [60] price_acceleration      — 2nd derivative: change_now - change_prev [-1, 1]
+      [61] volume_price_divergence — volume up + price down (or vice versa) [-1, 1]
+    """
+    zeros = [0.0] * 3
+
+    closes = [c["c"] for c in candles]
+    volumes = [c["v"] for c in candles]
+
+    # [59] Volume momentum: last 4h volume vs previous 4h
+    vol_momentum_norm = 0.0
+    if len(volumes) >= 8:
+        recent_4h = sum(volumes[-4:])
+        previous_4h = sum(volumes[-8:-4])
+        if previous_4h > 0:
+            vol_momentum = recent_4h / previous_4h
+            vol_momentum_norm = math.tanh(vol_momentum - 1.0)  # center around 0
+
+    # [60] Price acceleration (2nd derivative of price)
+    accel_norm = 0.0
+    if len(closes) >= 3 and closes[-2] > 0 and closes[-3] > 0:
+        change_now = (closes[-1] - closes[-2]) / closes[-2] * 100
+        change_prev = (closes[-2] - closes[-3]) / closes[-3] * 100
+        acceleration = change_now - change_prev
+        accel_norm = math.tanh(acceleration / 5)
+
+    # [61] Volume-price divergence
+    div_norm = 0.0
+    if len(closes) >= 5 and len(volumes) >= 8 and closes[-5] > 0:
+        price_change = (closes[-1] - closes[-5]) / closes[-5]
+        vol_avg_recent = sum(volumes[-4:]) / 4
+        vol_avg_prev = sum(volumes[-8:-4]) / 4
+        if vol_avg_prev > 0:
+            vol_change = (vol_avg_recent - vol_avg_prev) / vol_avg_prev
+            # Positive when they diverge (volume up + price down, or vice versa)
+            divergence = -price_change * vol_change
+            div_norm = math.tanh(divergence * 50)
+
+    return [vol_momentum_norm, accel_norm, div_norm]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -782,9 +938,12 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     candle = compute_candle_features(candles)
     multiday = compute_multiday_features(token, price)
     btc_cross = compute_btc_cross_features(token, btc_candles or [], candles)
+    orderbook = compute_orderbook_features(token, meta_ctx)
+    meta_extra = compute_meta_extra_features(token, meta_ctx)
+    derived = compute_derived_features(candles)
 
-    features = tech + nansen + extra + candle + multiday + btc_cross
-    assert len(features) == 53, f"Expected 53 features, got {len(features)}"
+    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived
+    assert len(features) == 62, f"Expected 62 features, got {len(features)}"
 
     # Build row
     row = {
