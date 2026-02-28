@@ -9,7 +9,7 @@ Runs every 15 min via cron. Computes 45 features from:
 Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
 Backfills labels (1h, 4h, 12h price change) for older rows.
 
-Feature vector (45 features):
+Feature vector (49 features):
   [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
           tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
           volumeRatio/5, volatility/10, bbWidth/20, ATR_%
@@ -21,6 +21,7 @@ Feature vector (45 features):
   [30-44] Candle patterns: hammer, shooting_star, engulfing_bull, engulfing_bear,
           doji, pin_bar_bull, pin_bar_bear, marubozu_bull, marubozu_bear,
           inside_bar, three_crows, three_soldiers, spinning_top, body_ratio, wick_skew
+  [45-48] Multi-day trend: change_7d, change_10d, distance_from_7d_high, trend_slope_7d
 """
 
 import json
@@ -535,6 +536,75 @@ def compute_candle_features(candles: list[dict]) -> list[float]:
     ]
 
 
+def compute_multiday_features(token: str, current_price: float) -> list[float]:
+    """Compute 4 multi-day trend features from daily candles.
+
+    Features [45-48]:
+      [45] change_7d       — 7-day price change, tanh(change/30) [-1, 1]
+      [46] change_10d      — 10-day price change, tanh(change/50) [-1, 1]
+      [47] dist_from_7d_high — distance from 7d high [0, -1] (0=at high, -1=10%+ below)
+      [48] trend_slope_7d  — 7d linear regression slope, tanh(slope×100) [-1, 1]
+    """
+    zeros = [0.0] * 4
+
+    # Fetch 14 daily candles (need 10d lookback + margin)
+    daily_candles = fetch_candles(token, "1d", 14)
+    if len(daily_candles) < 7:
+        return zeros
+
+    daily_closes = [c["c"] for c in daily_candles]
+    daily_highs = [c["h"] for c in daily_candles]
+    n = len(daily_closes)
+
+    # [45] change_7d: price change over 7 days
+    change_7d = 0.0
+    if n >= 7 and daily_closes[-7] > 0:
+        change_7d = (current_price / daily_closes[-7] - 1) * 100  # in %
+    change_7d_norm = math.tanh(change_7d / 30)  # ±30% maps to ±0.76
+
+    # [46] change_10d: price change over 10 days
+    change_10d = 0.0
+    if n >= 10 and daily_closes[-10] > 0:
+        change_10d = (current_price / daily_closes[-10] - 1) * 100
+    elif n >= 7 and daily_closes[-7] > 0:
+        # Fallback to 7d if not enough data for 10d
+        change_10d = change_7d
+    change_10d_norm = math.tanh(change_10d / 50)  # ±50% maps to ±0.76
+
+    # [47] distance from 7d high: how far below the 7-day high
+    high_7d = max(daily_highs[-7:]) if len(daily_highs) >= 7 else max(daily_highs)
+    dist_from_high = 0.0
+    if high_7d > 0:
+        dist_from_high = (current_price / high_7d - 1)  # negative = below high
+    # Clamp to [-1, 0]: 0 = at high, -1 = 10%+ below
+    dist_from_high_norm = max(dist_from_high * 10, -1.0)
+
+    # [48] trend_slope_7d: linear regression slope of last 7 daily closes
+    slope_7d = 0.0
+    lookback = min(n, 7)
+    if lookback >= 3:
+        segment = daily_closes[-lookback:]
+        # Normalize to % change from first point
+        base = segment[0]
+        if base > 0:
+            norm_seg = [(p / base - 1) * 100 for p in segment]
+            # Simple linear regression: y = mx + b
+            x_mean = (lookback - 1) / 2.0
+            y_mean = sum(norm_seg) / lookback
+            num = sum((i - x_mean) * (norm_seg[i] - y_mean) for i in range(lookback))
+            den = sum((i - x_mean) ** 2 for i in range(lookback))
+            if den > 0:
+                slope_7d = num / den  # % per day
+    slope_7d_norm = math.tanh(slope_7d * 100 / 30)  # ±0.3%/day maps to ±0.76
+
+    return [
+        change_7d_norm,       # [45] 7d change
+        change_10d_norm,      # [46] 10d change
+        dist_from_high_norm,  # [47] distance from 7d high
+        slope_7d_norm,        # [48] trend slope 7d
+    ]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -632,9 +702,10 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     extra = compute_extra_features(token, candles, meta_ctx)
 
     candle = compute_candle_features(candles)
+    multiday = compute_multiday_features(token, price)
 
-    features = tech + nansen + extra + candle
-    assert len(features) == 45, f"Expected 45 features, got {len(features)}"
+    features = tech + nansen + extra + candle + multiday
+    assert len(features) == 49, f"Expected 49 features, got {len(features)}"
 
     # Build row
     row = {

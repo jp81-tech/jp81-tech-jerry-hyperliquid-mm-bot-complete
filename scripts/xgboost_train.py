@@ -91,9 +91,11 @@ FEATURE_NAMES = [
     "marubozu_bull", "marubozu_bear", "inside_bar",
     "three_crows", "three_soldiers", "spinning_top",
     "body_ratio", "wick_skew",
+    # Multi-day trend (4)
+    "change_7d", "change_10d", "dist_from_7d_high", "trend_slope_7d",
 ]
 
-NUM_FEATURES = 45  # 11 tech + 11 nansen + 8 extra + 15 candle
+NUM_FEATURES = 49  # 11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -126,12 +128,14 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) not in (30, NUM_FEATURES):
+            if not feat or len(feat) not in (30, 45, NUM_FEATURES):
                 continue
 
-            # Backward compat: pad old 30-feature rows with zeros (candle features = "no pattern")
+            # Backward compat: pad old rows with zeros
             if len(feat) == 30:
-                feat = feat + [0.0] * 15
+                feat = feat + [0.0] * 19  # 15 candle + 4 multi-day
+            elif len(feat) == 45:
+                feat = feat + [0.0] * 4   # 4 multi-day
 
             features.append(feat)
 
