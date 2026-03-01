@@ -6305,3 +6305,132 @@ Ten bug istniał od tygodni. Nikt nie sprawdził CZY proximity faktycznie cokolw
 |------|--------|
 | `src/signals/market_vision.ts` | Nowe pola `supportBody12h` / `resistanceBody12h` z 24 candles 1h |
 | `src/mm_hl.ts` | MG proximity używa 1h S/R z fallback na 4h, S/R values w logu |
+
+---
+
+## Rozdział 21: Nuclear Fix vs PURE_MM — Gdy Generał Rozkazuje Nie Temu Żołnierzowi (01.03.2026)
+
+### Bug w jednym zdaniu
+
+Bot kPEPE (PURE_MM market maker) miał zablokowane kupowanie przez 142 minuty w nocy, bo Nuclear Fix — mechanizm przeznaczony dla SM-following botów — przypadkowo zadziałał na PURE_MM bota.
+
+### Kontekst: Dwa Boty, Jeden Kod
+
+Na serwerze działają dwa boty:
+
+| Bot | PM2 | Tryb | Tokeny | Co robi |
+|-----|-----|------|--------|---------|
+| **mm-pure** | id 48 | PURE_MM | kPEPE | Market making — kupuj i sprzedawaj, łap spread |
+| **mm-follower** | id 45 | SM_FOLLOWER | BTC,ETH,SOL,HYPE,FARTCOIN | Podążaj za Smart Money — shortuj gdy wieloryby shortują |
+
+Oba boty uruchamiają **ten sam kod** (`src/mm_hl.ts`), ale z różnymi zmiennymi środowiskowymi:
+- mm-pure: `BOT_MODE=PURE_MM`
+- mm-follower: `BOT_MODE=SM_FOLLOWER`
+
+### Nuclear Fix — Przypomnienie
+
+Nuclear Fix to mechanizm z "Doktryny Wojennej" (styczeń 2026). Gdy Smart Money shortują masywnie:
+```
+bidMultiplier = 0.00  →  ZERO kupowania
+askMultiplier = 1.50  →  Agresywne shortowanie
+```
+
+To działa świetnie dla mm-follower — podąża za wielorybami. Ale dla mm-pure to **katastrofa** — market maker MUSI kupować i sprzedawać. Bez bidów nie zarabia spreadu, nie zamyka shortów, nie robi mean-reversion.
+
+### Jak Doszło do Buga
+
+Wyobraź sobie dwa biura w jednym budynku:
+
+- **Biuro A (mm-follower)**: "Generał mówi SHORT → shortujemy!"
+- **Biuro B (mm-pure)**: "Ignorujemy Generała, robimy swoje market making"
+
+Problem: oba biura dzielą **tę samą szafkę na dokumenty** (`cachedAnalysis` w SmAutoDetector.ts).
+
+```
+loadAndAnalyzeAllTokens()  ← wywoływane przez OBA boty
+  → analizuje WSZYSTKIE tokeny (nie tylko te przypisane do bota)
+  → whale_tracker mówi: kPEPE score -46 (silny SM SHORT)
+  → zapisuje do cache: kPEPE → FOLLOW_SM_SHORT
+```
+
+Biuro B (mm-pure) prawidłowo ignorowało Generała na frontowych drzwiach:
+```typescript
+function getSignalEngineForPair(pair) {
+  if (IS_PURE_MM_BOT) return { mode: PURE_MM, ... }  // ✅ Generał odrzucony
+}
+```
+
+Ale boczne drzwi były otwarte:
+```typescript
+const holdTp = shouldHoldForTp(pair, 'short')  // ← czyta prosto z cache!
+if (holdTp) { permissions.allowLongs = false }  // → bid=0 😱
+```
+
+`shouldHoldForTp()` nie sprawdzał `IS_PURE_MM_BOT` — szło bezpośrednio do cache, widziało `FOLLOW_SM_SHORT`, i blokowało bidy.
+
+### Analogia: Restauracja
+
+Wyobraź sobie restaurację z dwoma szefami kuchni:
+
+- **Szef A** (mm-follower): gotuje tylko to, co mówi krytyk kulinarny (SM)
+- **Szef B** (mm-pure): gotuje własne menu, ignoruje krytyków
+
+Obaj używają **tej samej tablicy zamówień** w kuchni. Krytyk pisze na tablicy: "NIE SERWOWAĆ ZUPY!" (= nie kupuj, bid=0).
+
+Szef B ma instrukcję "ignoruj krytyka" (= `getSignalEngineForPair` zwraca PURE_MM). I prawidłowo ignoruje. Ale kelner sprawdza tablicę bezpośrednio (= `shouldHoldForTp` czyta cache) i mówi klientom "zupy nie ma". Nawet nie pyta Szefa B.
+
+### Fix: 5 Bocznych Drzwi Zamkniętych
+
+Dodaliśmy `!IS_PURE_MM_BOT` guard do 5 miejsc w mm_hl.ts:
+
+```typescript
+// Wzorzec: zamiast
+const holdTp = shouldHoldForTp(pair, side);
+
+// Teraz:
+const holdTp = IS_PURE_MM_BOT ? false : shouldHoldForTp(pair, side);
+```
+
+Efekt: PURE_MM bot nigdy nie "trzyma pozycji dla take-profit" — to koncept SM-following, nie market making.
+
+### Dlaczego to Ważne
+
+| Metryka | Przed (bug) | Po (fix) |
+|---------|-------------|----------|
+| kPEPE bidy | 0 (zablokowane) | 8 (pełny grid) |
+| bidMultiplier | 0.00 | 1.21 |
+| Mean-reversion | WYŁĄCZONE | Działa |
+| Gap w handlu | 142 minut w nocy | Zero |
+
+Bot tracił ~$10-15 potencjalnego zysku za każdą noc z zablokowanymi bidami (bazując na średnim daily PnL kPEPE ~$80/dzień).
+
+### Lekcje
+
+1. **Shared state jest niebezpieczny** — `cachedAnalysis` to globalny cache używany przez oba boty. Funkcje jak `shouldHoldForTp()` nie wiedzą, kto je wywołuje. Zawsze sprawdzaj kontekst wywołania.
+
+2. **"Frontowe drzwi zamknięte" nie wystarczy** — `getSignalEngineForPair()` poprawnie odrzucał SM sygnały dla PURE_MM. Ale 5 innych miejsc w kodzie omijało ten guard i czytało bezpośrednio z cache.
+
+3. **Testuj z perspektywy drugiego bota** — Bug nie występował na mm-follower (tam Nuclear Fix jest pożądany). Trzeba było uruchomić mm-pure i sprawdzić CZY bidy działają.
+
+4. **PM2 env vars nie propagują** — `DRY_RUN=true pm2 restart mm-follower` NIE działa. Env var musi być w `ecosystem.config.cjs` + restart z `--update-env`. To klasyczny PM2 gotcha.
+
+### Bonus: Przegląd 24h Logów
+
+Przy okazji przejrzeliśmy logi z ostatnich 24h i znaleźliśmy kilka problemów:
+
+| Problem | Ważność | Status |
+|---------|---------|--------|
+| BTC 57% drawdown na mm-follower, AUTO-PAUSED | Krytyczny | mm-follower → DRY_RUN |
+| ETH CRITICAL LONG SQUEEZE RISK warnings | Warning | Monitorowany |
+| ai-executor fetch failed loop | Error | Znany (brak backendu) |
+| Nansen API 403 kill switch (5 consecutive) | Warning | Auto-recovery 30 min |
+| copy-general xyz:GOLD cloid format bug | Error | Znany (xyz: prefix w cloid) |
+| AlphaEngine XRP/LIT CLOSE_SHORT spam | Info | Kosmetyczny |
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | 5 miejsc z `!IS_PURE_MM_BOT` guard na `shouldHoldForTp()` |
+| `src/config/short_only_config.ts` | `lowVolL1Bps` 28→14 |
+| `ecosystem.config.cjs` (serwer) | `DRY_RUN: "true"` dla mm-follower |

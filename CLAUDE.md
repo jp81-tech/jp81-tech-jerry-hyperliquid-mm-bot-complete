@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-02-28
+- Data: 2026-03-01
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -105,6 +105,61 @@ PO:    res=0.003682 (0.3% od ceny)  → prox=0.80, score=0.16
 **Dotyczy WSZYSTKICH par** w activePairs (kPEPE, LIT, ETH, BTC, HYPE, SOL) — 1h candles już fetchowane przez MarketVision, zero dodatkowych API calls.
 
 **Pliki:** `src/signals/market_vision.ts` (+12), `src/mm_hl.ts` (+8/-3)
+
+### 79. Nuclear Fix disabled for PURE_MM — kPEPE bid=0 bug fixed (01.03)
+
+**Problem:** kPEPE (PURE_MM bot, mm-pure) miał bidy zablokowane (bid=0) przez Nuclear Fix mimo że `getSignalEngineForPair()` poprawnie zwracał `PURE_MM`. Bot nie kupował przez ~142 minut w nocy (3 AM gap), nie zamykał shortów, nie robił mean-reversion.
+
+**Root cause:** `shouldHoldForTp()` w `SmAutoDetector.ts` czyta z globalnego `cachedAnalysis` map. `loadAndAnalyzeAllTokens()` analizuje WSZYSTKIE tokeny (nie tylko te przypisane do bota) i zapisuje wyniki w cache. Gdy whale_tracker.py pokazał silny SM SHORT dla kPEPE (score -46), cache się zaktualizował → `shouldHoldForTp('kPEPE', 'short')` zwracał `true` nawet na PURE_MM bot. To triggerowało Nuclear Fix: `permissions.allowLongs = false` → `bidMultiplier = 0` → zero bidów.
+
+**Kluczowy bug (linia 7727):** Wewnątrz bloku `if (isPureMmMode)` (linia 7722), kod sprawdzał `shouldHoldForTp()` które obchodziło PURE_MM guard:
+```typescript
+// PRZED (bug): PURE_MM mode, ale shouldHoldForTp czyta z globalnego cache
+const holdTp = shouldHoldForTp(pair, positionSideCheck);
+if (holdTp) { permissions.allowLongs = false; } // → bid=0!
+
+// PO (fix):
+const holdTp = IS_PURE_MM_BOT ? false : shouldHoldForTp(pair, positionSideCheck);
+```
+
+**5 miejsc naprawionych z `!IS_PURE_MM_BOT` guard:**
+
+| Linia | Blok | Co robiło źle |
+|-------|------|---------------|
+| 6647 | Bid restore block | Blokował przywracanie bidów po HOLD_FOR_TP |
+| 6842 | SM-aligned TP skip | Blokował take-profit gdy SM-aligned |
+| 7085-7088 | Skew override | Fałszował inventorySkew na +30% |
+| **7727** | **Permissions override** | **allowLongs=false → bid=0 (THE KEY BUG)** |
+| 8597 | Grid bid removal | Usuwał bidy z grid orders |
+
+**Wynik live po fix:**
+```
+PRZED: kPEPE bids=0 asks=8, bidMult=0.00 — bot zamrożony (tylko aski)
+PO:    kPEPE bids=8 asks=8, bidMult=1.21 askMult=1.04 — pełny market making
+```
+
+**Dodatkowa zmiana:** `lowVolL1Bps` 28→14 w `short_only_config.ts` (Dynamic Spread). W niskiej zmienności L1 teraz 14bps zamiast 28bps — tighter quotes.
+
+**Pliki:** `src/mm_hl.ts` (+5/-5), `src/config/short_only_config.ts` (+1/-1)
+
+### 80. mm-follower → DRY_RUN, copy-general → LIVE (01.03)
+
+**Problem:** mm-follower miał otwarte pozycje (BTC 57% drawdown, AUTO-PAUSED). copy-general był w dry-run mimo że config mówił `--live`.
+
+**Zmiany:**
+
+| Bot | Przed | Po | Jak |
+|-----|-------|----|-----|
+| mm-follower | LIVE (handlował) | **DRY_RUN** (paper) | `DRY_RUN: "true"` w ecosystem.config.cjs + `--update-env` |
+| copy-general | DRY_RUN (nie startował z --live) | **LIVE** | `pm2 restart copy-general --update-env` |
+
+**mm-follower w DRY_RUN:** Bot działa ale nie tworzy LiveTrading instance → `getAlphaShiftBps` undefined na wszystkich 5 parach. PnL = $0.00 (brak tradingu). Błędy w logach są kosmetyczne — bot jest bezpieczny.
+
+**PM2 env propagation:** Shell env vars (`DRY_RUN=true`) przed `pm2 restart` NIE przechodzą do procesu app. Trzeba dodać do `ecosystem.config.cjs` env section i restartować z `--update-env`.
+
+**PM2 save:** Stan zapisany po zmianach.
+
+**Pliki:** `ecosystem.config.cjs` na serwerze (+1 linia: `DRY_RUN: "true"`)
 
 ---
 
