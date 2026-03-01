@@ -362,7 +362,7 @@ export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
   baseL1Bps: 18,
   lowVolAtrPctThreshold: 0.30,   // ATR% < 0.30% = low vol (kPEPE normally 0.3-0.8%)
   highVolAtrPctThreshold: 0.80,  // ATR% > 0.80% = high vol
-  lowVolL1Bps: 28,               // Widen L1 to 28bps in choppy market
+  lowVolL1Bps: 14,               // Widen L1 to 28bps in choppy market
   highVolL1Bps: 14,              // Tighten L1 to 14bps in trending market
   l2Ratio: 1.67,                 // 30/18
   l3Ratio: 2.50,                 // 45/18
