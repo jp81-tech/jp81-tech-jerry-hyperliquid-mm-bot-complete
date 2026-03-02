@@ -37,6 +37,7 @@
 29. [Momentum Guard v3 — nie zamykaj w popłochu, trzymaj na odbicie](#momentum-guard-v3--nie-zamykaj-w-poplochu-trzymaj-na-odbicie)
 30. [Prediction Bias — bot zaczyna przewidywać przyszłość](#prediction-bias--bot-zaczyna-przewidywac-przyszlosc)
 31. [XGBoost Backfiller — 180 dni historii w 5 minut](#xgboost-backfiller--180-dni-historii-w-5-minut)
+32. [DRY_RUN Safety — instanceof guard pattern](#dry_run-safety--instanceof-guard-pattern)
 
 ---
 
@@ -6434,3 +6435,254 @@ Przy okazji przejrzeliśmy logi z ostatnich 24h i znaleźliśmy kilka problemów
 | `src/mm_hl.ts` | 5 miejsc z `!IS_PURE_MM_BOT` guard na `shouldHoldForTp()` |
 | `src/config/short_only_config.ts` | `lowVolL1Bps` 28→14 |
 | `ecosystem.config.cjs` (serwer) | `DRY_RUN: "true"` dla mm-follower |
+
+---
+
+## DRY_RUN Safety — instanceof guard pattern
+
+> "TypeScript sprawdza typy w czasie kompilacji. JavaScript w runtime robi co chce. Twój cast `as LiveTrading` to obietnica złożona kompilatorowi — ale runtime jej nie słucha."
+
+### Problem: Jeden plik, dwa światy
+
+`mm_hl.ts` to potwór — ponad 10,000 linii kodu z **czterema klasami** w jednym pliku:
+
+```
+┌─────────────────────────────────────────────────┐
+│  mm_hl.ts                                       │
+│                                                 │
+│  ┌─────────────────────────────────────────────┐│
+│  │  StateManager       (linia ~100)            ││
+│  │  └─ zarządza stanem sesji                   ││
+│  ├─────────────────────────────────────────────┤│
+│  │  PaperTrading       (linia ~800)            ││
+│  │  └─ symulacja tradingu (DRY_RUN)            ││
+│  │  └─ NIE ma: l2BookCache, shadowTrading,     ││
+│  │     binanceAnchor, vpinAnalyzers, adverse,  ││
+│  │     closePositionForPair()                  ││
+│  ├─────────────────────────────────────────────┤│
+│  │  LiveTrading        (linia ~1479)           ││
+│  │  └─ prawdziwy trading z API                 ││
+│  │  └─ MA: l2BookCache, shadowTrading,         ││
+│  │     binanceAnchor, vpinAnalyzers, adverse,  ││
+│  │     closePositionForPair(), fetchOpenOrders  ││
+│  ├─────────────────────────────────────────────┤│
+│  │  HyperliquidMMBot   (linia ~3595)           ││
+│  │  └─ główna klasa bota                       ││
+│  │  └─ this.trading = LiveTrading | PaperTrad. ││
+│  │  └─ mainLoop(), executeMultiLayerMM()       ││
+│  └─────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────┘
+```
+
+Kluczowy detal: `HyperliquidMMBot` ma property `this.trading` które może być **albo** `LiveTrading` **albo** `PaperTrading`, zależnie od env var `DRY_RUN`:
+
+```typescript
+// W konstruktorze HyperliquidMMBot:
+if (process.env.DRY_RUN === 'true') {
+  this.trading = new PaperTrading(...)   // ← symulacja, brak wielu metod
+} else {
+  this.trading = new LiveTrading(...)    // ← prawdziwy trading, pełny zestaw
+}
+```
+
+### TypeScript kłamstwo: `as LiveTrading`
+
+W ~25 miejscach w kodzie było coś takiego:
+
+```typescript
+const lt = this.trading as LiveTrading
+const book = lt.l2BookCache.get(pair)  // 💥 CRASH w DRY_RUN!
+```
+
+Co robi `as LiveTrading`? **Nic.** To instrukcja dla kompilatora TypeScript: "zaufaj mi, to jest LiveTrading". Kompilator przestaje narzekać. Ale w JavaScript (które faktycznie się wykonuje), `this.trading` nadal jest `PaperTrading`. A `PaperTrading` nie ma `l2BookCache` → `undefined.get(pair)` → `TypeError: Cannot read properties of undefined`.
+
+To trochę jak gdybyś wziął dowód osobisty i napisał na nim flamastrem "Elon Musk". Urzędnik spojrzy i powie "OK, pan Musk" (TypeScript). Ale system bankowy sprawdzi PESEL i odmówi dostępu do konta (JavaScript runtime).
+
+### Anatomia crashu
+
+Kiedy mm-follower startował z `DRY_RUN=true`:
+
+```
+                mm-follower (DRY_RUN=true)
+                        │
+                        ▼
+              this.trading = PaperTrading
+                        │
+                        ▼
+        executeMultiLayerMM() starts...
+                        │
+         ┌──────────────┼──────────────┐
+         ▼              ▼              ▼
+   analyzeOrderBook  binanceAnchor  shadow contrarian
+   lt.l2BookCache    lt.binanceAn.  lt2.shadowTrading
+        │                │              │
+        ▼                ▼              ▼
+    undefined         undefined      undefined
+        │                │              │
+        ▼                ▼              ▼
+   💥 TypeError     💥 TypeError   💥 ReferenceError
+```
+
+Bot nie crashował kompletnie (PM2 restartował), ale te errory zapychały logi i blokowały normalne działanie.
+
+### 3 wzorce naprawy
+
+**Wzorzec 1: Early return z defaults (dla metod)**
+
+Gdy cała metoda potrzebuje LiveTrading:
+
+```typescript
+private analyzeOrderBook(pair: string) {
+  // Guard na początku — jeśli nie LiveTrading, zwróć neutralne wartości
+  if (!(this.trading instanceof LiveTrading)) {
+    return { imbalance: 0, wallDetected: false, wallSide: 'none' };
+  }
+  // Tu mamy pewność że this.trading jest LiveTrading
+  const book = this.trading.l2BookCache.get(pair);
+  // ... reszta metody bezpieczna
+}
+```
+
+**Wzorzec 2: Nullable z optional chaining (dla bloków)**
+
+Gdy fragment kodu opcjonalnie korzysta z LiveTrading:
+
+```typescript
+// Deklaracja na początku scope — dostępna w całej metodzie
+const liveTrading = this.trading instanceof LiveTrading
+  ? this.trading
+  : null;
+
+// Użycie z optional chaining — null-safe, zero crashy
+if (liveTrading?.binanceAnchor) {
+  const anchor = liveTrading.binanceAnchor.getPrice(pair);
+  // ...
+}
+
+// Dalej w tej samej metodzie — nadal bezpieczne
+const vpin = liveTrading?.vpinAnalyzers?.get(pair)?.getToxicityLevel();
+const adverse = liveTrading?.adverseTracker?.calculateScore(pair) ?? 1.0;
+```
+
+**Wzorzec 3: Guard w warunku (dla jednolinijkowych akcji)**
+
+```typescript
+// Zamknij pozycję tylko na LIVE tradingu
+if (nansenCloseSignal.close && position && this.trading instanceof LiveTrading) {
+  await this.trading.closePositionForPair(pair, 'nansen_alert_close');
+}
+```
+
+### 11 miejsc naprawionych
+
+| # | Co crashowało | Wzorzec | Kontekst |
+|---|---------------|---------|----------|
+| 1 | `lt.l2BookCache.get(pair)` | Early return | analyzeOrderBook — zwraca neutralne |
+| 2 | `liveTrading.binanceAnchor` | Nullable | Binance anchor price — opcjonalne |
+| 3 | `lt2.shadowTrading` | Guard w warunku | Shadow contrarian — `lt2` usunięte wcześniej! |
+| 4 | `this.trading.closePositionForPair` | Guard w warunku | Nansen close signal |
+| 5 | `this.trading.closePositionForPair` | Early return w try | Squeeze trigger |
+| 6 | `this.trading.closePositionForPair` | Early return w try | Stop loss |
+| 7 | `this.trading.closePositionForPair` | Early return w try | SM-aligned TP |
+| 8 | `this.trading.closePositionForPair` | Early return w try | Anaconda SL |
+| 9 | `lt.binanceAnchor`, `lt.vpinAnalyzers` | Guard blok | Status log ToxicFlow |
+| 10 | `liveTrading.vpinAnalyzers`, `.adverseTracker` | Optional chaining `?.` | VPIN/Adverse w kPEPE |
+| 11 | `this.fetchOpenOrdersRaw()` | Duplikat metody | Była TYLKO na LiveTrading! |
+
+### Fix #11 — metoda na złej klasie
+
+Ten bug zasługuje na osobny akapit, bo to **inny rodzaj problemu**:
+
+```typescript
+// HyperliquidMMBot class (linia ~4262):
+async cancelAllOnBlockedPairs() {
+  const orders = await this.fetchOpenOrdersRaw(this.walletAddress);
+  //                        ^^^^^^^^^^^^^^^^^^^^^^^^
+  //                        Ta metoda istniała TYLKO
+  //                        na LiveTrading (linia 2905)!
+  //                        HyperliquidMMBot to INNA klasa!
+}
+```
+
+`cancelAllOnBlockedPairs` jest metodą `HyperliquidMMBot`. Wołała `this.fetchOpenOrdersRaw()`. Ale `fetchOpenOrdersRaw` była zdefiniowana na `LiveTrading` — **to dwie różne klasy**. `this` w `HyperliquidMMBot` to `HyperliquidMMBot`, nie `LiveTrading`.
+
+Dlaczego działało na mm-pure? Prawdopodobnie mm-pure nie trafił na ścieżkę kodu `cancelAllOnBlockedPairs` (brak zablokowanych par) albo timing restartów sprawiał, że cache ESM loadera miał inną wersję.
+
+Fix: dodałem identyczną kopię `fetchOpenOrdersRaw` na `HyperliquidMMBot`:
+
+```typescript
+class HyperliquidMMBot {
+  // ... existing code ...
+
+  /** Raw openOrders fetch bypassing SDK schema validation */
+  private async fetchOpenOrdersRaw(user: string): Promise<any[]> {
+    try {
+      const res = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'openOrders', user }),
+      });
+      if (!res.ok) return [];
+      return await res.json() as any[];
+    } catch {
+      return [];
+    }
+  }
+
+  async cancelAllOnBlockedPairs() {
+    const orders = await this.fetchOpenOrdersRaw(this.walletAddress); // ✅ teraz istnieje
+    // ...
+  }
+}
+```
+
+### PM2 + ESM = Cache Gotcha
+
+Po wgraniu fixów na serwer, mm-pure działał (zero błędów), ale mm-follower nadal crashował z `fetchOpenOrdersRaw is not a function`. Grep na serwerze potwierdzał: metoda JEST w pliku. Ale runtime mówił: NIE ISTNIEJE.
+
+Problem: **ESM loader cache**. PM2 z `--experimental-loader ts-node/esm` cacheuje skompilowane moduły. Zwykły `pm2 restart` nie czyści tego cache. Trzeba:
+
+```bash
+# ❌ NIE DZIAŁA (stary cache):
+pm2 restart mm-follower
+
+# ✅ DZIAŁA (wymusza przeładowanie env + modułów):
+pm2 restart mm-follower --update-env
+```
+
+To jest PM2 gotcha #2 (pierwsza to env vars — patrz rozdział Nuclear Fix). Zapamiętaj:
+
+| Operacja | Komenda |
+|----------|---------|
+| Zmiana pliku źródłowego | `pm2 restart xxx --update-env` |
+| Zmiana env vars | `pm2 restart xxx --update-env` |
+| Normalny restart (brak zmian) | `pm2 restart xxx` |
+
+### Lekcje
+
+1. **`as` to nie cast, to obietnica** — TypeScript `as X` nie zmienia obiektu w runtime. To mówi kompilatorowi "zaufaj mi". Jeśli kłamiesz, runtime się zemści. Zawsze weryfikuj z `instanceof` gdy typ nie jest pewny.
+
+2. **Monolityczny plik = ukryte zależności** — 4 klasy w jednym pliku o 10K linii. Metoda zdefiniowana na jednej klasie wygląda jak dostępna wszędzie (bo scrollujesz w tym samym pliku), ale `this` w różnych klasach to różne obiekty. Gdyby każda klasa była w osobnym pliku, IDE by od razu krzyczało "method not found".
+
+3. **DRY_RUN musi być first-class citizen** — Nie wystarczy dodać `if (DRY_RUN)` w jednym miejscu. KAŻDA ścieżka kodu, która dotyka LiveTrading-specific properties, musi mieć guard. To jest jak testy: nie testujesz happy path, testujesz edge cases.
+
+4. **ESM cache jest niewidoczny** — Plik na dysku ma nowy kod, grep potwierdza, ale runtime widzi starą wersję. To jeden z najgorszych typów bugów — "ale przecież patrzę na kod i jest poprawny!". Zawsze `--update-env` po zmianie pliku.
+
+5. **Różnica między mm-pure a mm-follower to env vars** — Oba biegną z tego samego pliku `src/mm_hl.ts`. Ale `DRY_RUN=true` vs `DRY_RUN=false` tworzy kompletnie inne ścieżki kodu. Bug który nie istnieje na jednym bocie może crashować drugi. Testuj oba po każdej zmianie.
+
+6. **Optional chaining (`?.`) to twój przyjaciel** — Zamiast `liveTrading.vpinAnalyzers.get(pair)` (crash jeśli null), pisz `liveTrading?.vpinAnalyzers?.get(pair)` (zwraca `undefined` jeśli null). Jedna `?` ratuje od TypeError.
+
+### Wynik
+
+| Bot | Przed (11 bugów) | Po (11 fixów) |
+|-----|-------------------|----------------|
+| mm-pure | `fetchOpenOrdersRaw is not a function` | Zero błędów |
+| mm-follower | `TypeError` × 3, `ReferenceError` × 1, `liveTrading is not defined` | Zero błędów |
+| Logi | Zapchane error spam | Czyste, tylko business logic |
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | 11 instanceof guards + fetchOpenOrdersRaw na HyperliquidMMBot (+109/-68) |
+| `scripts/general_copytrade.ts` | Usunięto nieprawidłowe pole `c` z cloid (+3/-1) |
