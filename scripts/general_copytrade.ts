@@ -359,8 +359,7 @@ async function placeOrder(
         p: priceStr,
         s: quantizedSize.toFixed(szDec),
         r: reduceOnly,
-        t: { limit: { tif: 'Ioc' } },
-        c: `copy_${coin}_${Date.now().toString(16)}`
+        t: { limit: { tif: 'Ioc' } }
       }],
       grouping: 'na',
     })

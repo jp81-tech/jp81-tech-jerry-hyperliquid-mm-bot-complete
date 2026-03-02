@@ -2897,9 +2897,28 @@ class LiveTrading implements TradingInterface {
    *
    * @see https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#invalidate-pending-nonce-noop
    */
+
+  /**
+   * Raw openOrders fetch bypassing SDK schema validation.
+   * SDK throws SchemaError when API returns cloid: "" (xyz dex orders).
+   */
+  private async fetchOpenOrdersRaw(user: string): Promise<any[]> {
+    try {
+      const res = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'openOrders', user }),
+      })
+      if (!res.ok) return []
+      return await res.json() as any[]
+    } catch {
+      return []
+    }
+  }
+
   async cancelAllOrders(): Promise<void> {
     try {
-      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+      const orders = await this.fetchOpenOrdersRaw(this.walletAddress)
 
       if (!orders || orders.length === 0) {
         console.log('No open orders to cancel')
@@ -2985,7 +3004,7 @@ class LiveTrading implements TradingInterface {
    */
   async cancelPairOrders(pair: string): Promise<void> {
     try {
-      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+      const orders = await this.fetchOpenOrdersRaw(this.walletAddress)
 
       if (!orders || orders.length === 0) return
 
@@ -3018,7 +3037,7 @@ class LiveTrading implements TradingInterface {
    */
   async getOpenOrders(pair: string): Promise<any[]> {
     try {
-      const orders = await this.infoClient.openOrders({ user: this.walletAddress })
+      const orders = await this.fetchOpenOrdersRaw(this.walletAddress)
       if (!orders || orders.length === 0) return []
 
       // Filter orders for this specific pair
@@ -4225,17 +4244,27 @@ class HyperliquidMMBot {
   // Main Loop
   // ───────────────────────────────────────────────────────────────────────────
 
+  /** Raw openOrders fetch bypassing SDK schema validation (for HyperliquidMMBot context) */
+  private async fetchOpenOrdersRaw(user: string): Promise<any[]> {
+    try {
+      const res = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'openOrders', user }),
+      })
+      if (!res.ok) return []
+      return await res.json() as any[]
+    } catch {
+      return []
+    }
+  }
+
   async cancelAllOnBlockedPairs() {
     try {
       const liqFlags = loadLiquidityFlags();
       // 1. Fetch ALL open orders efficiently
       let allOrders: any[] = [];
-      try {
-        allOrders = await this.infoClient.openOrders({ user: this.walletAddress });
-      } catch (e) {
-        console.error('[LIQ_GUARD] Failed to fetch open orders:', e);
-        return;
-      }
+      allOrders = await this.fetchOpenOrdersRaw(this.walletAddress);
 
       if (!allOrders || allOrders.length === 0) return;
 
@@ -5073,7 +5102,6 @@ class HyperliquidMMBot {
       try {
         // Delegate to trading instance to get positions
         if (!(this.trading instanceof LiveTrading)) {
-          this.notifier.warn(`getAllPositionPairs requires LiveTrading instance`)
           return []
         }
 
@@ -6370,6 +6398,9 @@ class HyperliquidMMBot {
    * Scans top levels of L2 book to detect momentum and large liquidity walls.
    */
   private analyzeOrderBook(pair: string): { imbalance: number; wallDetected: boolean; wallSide: 'bid' | 'ask' | 'none' } {
+    if (!(this.trading instanceof LiveTrading)) {
+      return { imbalance: 0, wallDetected: false, wallSide: 'none' };
+    }
     const lt = this.trading as LiveTrading
     const book = lt.l2BookCache.get(pair);
     if (!book || !book.levels || book.levels[0].length === 0 || book.levels[1].length === 0) {
@@ -6489,8 +6520,8 @@ class HyperliquidMMBot {
 
     // 🛡️ TIER 0: EXTERNAL PRICE ANCHOR (Binance Protection)
     const symbol = pair.split(/[-_]/)[0]
-    const liveTrading = this.trading as LiveTrading;
-    if (liveTrading.binanceAnchor) {
+    const liveTrading = this.trading instanceof LiveTrading ? this.trading : null;
+    if (liveTrading?.binanceAnchor) {
       const discrepancy = liveTrading.binanceAnchor.getDiscrepancy(symbol, midPrice);
       if (discrepancy !== null && discrepancy > 0.01) { // 1% gap
         const binancePrice = liveTrading.binanceAnchor.getPrice(symbol);
@@ -6565,28 +6596,32 @@ class HyperliquidMMBot {
     const adaptive = computeAdaptiveMultipliers(symbol.toUpperCase(), currentDate, globalDowntrend)
 
     // 🛡️ TIER 1: WHALE SHADOWING & FUNDING ARBITRAGE (INTELLIGENCE)
-    const lt = this.trading as LiveTrading;
+    let whaleAlphaBps = 0;
+    let fundingBiasBps = 0;
+    if (this.trading instanceof LiveTrading) {
+      const lt = this.trading;
 
-    // 1. Whale Intelligence Alpha Shift
-    const whaleAlphaBps = lt.whaleIntel.getAlphaShiftBps(symbol.toUpperCase());
-    if (Math.abs(whaleAlphaBps) > 0) {
-      this.notifier.info(`🐋 [WHALE SHADOW] ${pair}: Alpha Shift ${whaleAlphaBps > 0 ? '+' : ''}${whaleAlphaBps.toFixed(1)}bps (following winners)`);
-    }
+      // 1. Whale Intelligence Alpha Shift
+      whaleAlphaBps = lt.whaleIntel?.getAlphaShiftBps(symbol.toUpperCase()) ?? 0;
+      if (Math.abs(whaleAlphaBps) > 0) {
+        this.notifier.info(`🐋 [WHALE SHADOW] ${pair}: Alpha Shift ${whaleAlphaBps > 0 ? '+' : ''}${whaleAlphaBps.toFixed(1)}bps (following winners)`);
+      }
 
-    // 2. Funding Arbitrage
-    const fundingBiasBps = lt.fundingArb.calculateFundingBias(funding) * 5; // Up to 5bps shift
-    const fundingSpreadMult = lt.fundingArb.getSpreadMultiplier(funding);
+      // 2. Funding Arbitrage
+      fundingBiasBps = (lt.fundingArb?.calculateFundingBias(funding) ?? 0) * 5; // Up to 5bps shift
+      const fundingSpreadMult = lt.fundingArb?.getSpreadMultiplier(funding) ?? 1.0;
 
-    if (Math.abs(fundingBiasBps) > 1 || fundingSpreadMult > 1.0) {
-      adaptive.spreadMult *= fundingSpreadMult;
-      this.notifier.info(`💰 [FUNDING ARB] ${pair}: Bias=${fundingBiasBps.toFixed(1)}bps Mult=x${fundingSpreadMult.toFixed(2)} (funding=${(funding * 100).toFixed(4)}%)`);
-    }
+      if (Math.abs(fundingBiasBps) > 1 || fundingSpreadMult > 1.0) {
+        adaptive.spreadMult *= fundingSpreadMult;
+        this.notifier.info(`💰 [FUNDING ARB] ${pair}: Bias=${fundingBiasBps.toFixed(1)}bps Mult=x${fundingSpreadMult.toFixed(2)} (funding=${(funding * 100).toFixed(4)}%)`);
+      }
 
-    // 3. Liquidation Shield
-    const liqMult = lt.liqShield.getLiquidationRiskMultiplier(symbol.toUpperCase(), midPrice, lt.l2BookCache.get(pair));
-    if (liqMult > 1.0) {
-      adaptive.spreadMult *= liqMult;
-      this.notifier.warn(`🛡️ [LIQUIDATION SHIELD] ${pair}: Large anomalous depth detected → spread x${liqMult}`);
+      // 3. Liquidation Shield
+      const liqMult = lt.liqShield?.getLiquidationRiskMultiplier(symbol.toUpperCase(), midPrice, lt.l2BookCache?.get(pair)) ?? 1.0;
+      if (liqMult > 1.0) {
+        adaptive.spreadMult *= liqMult;
+        this.notifier.warn(`🛡️ [LIQUIDATION SHIELD] ${pair}: Large anomalous depth detected → spread x${liqMult}`);
+      }
     }
 
     if (adaptive.mode !== 'none') {
@@ -6715,10 +6750,10 @@ class HyperliquidMMBot {
 
     // Check for position close signal
     const nansenCloseSignal = nansenIntegration.shouldClosePosition(symbol)
-    if (nansenCloseSignal.close && position && Math.abs(position.size) > 0) {
+    if (nansenCloseSignal.close && position && Math.abs(position.size) > 0 && this.trading instanceof LiveTrading) {
       console.log(`🔔 [NANSEN_ALERT] ${symbol}: CLOSE SIGNAL - ${nansenCloseSignal.reason}`)
       try {
-        await (this.trading as LiveTrading).closePositionForPair(pair, 'nansen_alert_close')
+        await this.trading.closePositionForPair(pair, 'nansen_alert_close')
         this.notifier.info(`✅ [NANSEN_CLOSE] ${pair} position closed - ${nansenCloseSignal.reason}`)
         return // Exit after closing
       } catch (err: any) {
@@ -6774,7 +6809,8 @@ class HyperliquidMMBot {
 
             try {
               // Market close the position
-              await (this.trading as LiveTrading).closePositionForPair(pair, 'squeeze_trigger')
+              if (!(this.trading instanceof LiveTrading)) return
+              await this.trading.closePositionForPair(pair, 'squeeze_trigger')
               this.notifier.info(`✅ [SQUEEZE CLOSED] ${pair} position closed at $${midPrice.toFixed(4)}`)
               return // Exit after closing
             } catch (err: any) {
@@ -6820,7 +6856,8 @@ class HyperliquidMMBot {
             )
 
             try {
-              await (this.trading as LiveTrading).closePositionForPair(pair, 'stop_loss')
+              if (!(this.trading instanceof LiveTrading)) return
+              await this.trading.closePositionForPair(pair, 'stop_loss')
               this.notifier.info(`✅ [STOP CLOSED] ${pair} position closed at $${midPrice.toFixed(4)}`)
               return // Exit after closing
             } catch (err: any) {
@@ -6854,7 +6891,8 @@ class HyperliquidMMBot {
             )
 
             try {
-              await (this.trading as LiveTrading).closePositionForPair(pair, 'sm_aligned_tp')
+              if (!(this.trading instanceof LiveTrading)) return
+              await this.trading.closePositionForPair(pair, 'sm_aligned_tp')
               this.notifier.info(`✅ [SM-ALIGNED TP] ${pair} SHORT closed at $${midPrice.toFixed(4)} - profit locked!`)
               return // Exit after closing
             } catch (err: any) {
@@ -6942,7 +6980,8 @@ class HyperliquidMMBot {
           )
 
           try {
-            await (this.trading as LiveTrading).closePositionForPair(pair, 'anaconda_sl')
+            if (!(this.trading instanceof LiveTrading)) return
+            await this.trading.closePositionForPair(pair, 'anaconda_sl')
             this.notifier.info(`✅ [ANACONDA] ${pair} closed at $${midPrice.toFixed(4)} (phase=${phase})`)
             return // Exit after closing
           } catch (err: any) {
@@ -6969,24 +7008,25 @@ class HyperliquidMMBot {
     capitalPerPair = Math.max(50, capitalPerPair)
 
     // 🔮 SHADOW TRADING: Get grid bias adjustment from elite SM traders
-    const lt2 = this.trading as LiveTrading
-    const shadowAdjustment = lt2.shadowTrading.getGridBiasAdjustment(symbol, targetInventoryBias)
-    if (shadowAdjustment) {
-      targetInventoryBias = shadowAdjustment.adjustedBias
-      this.notifier.info(
-        `🔮 [SHADOW] ${pair} bias adjusted: ${shadowAdjustment.originalBias.toFixed(3)} → ` +
-        `${shadowAdjustment.adjustedBias.toFixed(3)} | ${shadowAdjustment.reason}`
-      )
+    if (this.trading instanceof LiveTrading) {
+      const shadowAdjustment = this.trading.shadowTrading?.getGridBiasAdjustment(symbol, targetInventoryBias)
+      if (shadowAdjustment) {
+        targetInventoryBias = shadowAdjustment.adjustedBias
+        this.notifier.info(
+          `🔮 [SHADOW] ${pair} bias adjusted: ${shadowAdjustment.originalBias.toFixed(3)} → ` +
+          `${shadowAdjustment.adjustedBias.toFixed(3)} | ${shadowAdjustment.reason}`
+        )
+      }
     }
 
     // 🔮⚔️ SHADOW-CONTRARIAN CONFLICT DETECTION
     // If we have a contrarian position AND strong shadow signal in opposite direction
     // ☢️ Disabled for FOLLOW_SM tokens - SM has final say
-    if (position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isFollowSmToken(symbol)) {
+    if (this.trading instanceof LiveTrading && position && overridesConfig?.smConflictSeverity && overridesConfig.smConflictSeverity !== 'NONE' && !isFollowSmToken(symbol)) {
       const positionSideForConflict: 'long' | 'short' | 'none' =
         position.size > 0 ? 'long' : position.size < 0 ? 'short' : 'none'
 
-      const conflict = lt2.shadowTrading.detectShadowContrarianConflict(
+      const conflict = this.trading.shadowTrading?.detectShadowContrarianConflict(
         symbol,
         positionSideForConflict,
         true, // contrarian is active
@@ -6995,12 +7035,12 @@ class HyperliquidMMBot {
         }
       )
 
-      if (conflict.conflict && conflict.action === 'CLOSE_CONTRARIAN') {
+      if (conflict?.conflict && conflict.action === 'CLOSE_CONTRARIAN') {
         this.notifier.warn(
           `⚔️ [SHADOW-CONTRARIAN] ${pair}: ${conflict.reason} | AUTO-CLOSING POSITION`
         )
         try {
-          await (this.trading as LiveTrading).closePositionForPair(pair, 'shadow_contrarian_conflict')
+          await this.trading.closePositionForPair(pair, 'shadow_contrarian_conflict')
           this.notifier.info(`✅ [SHADOW OVERRIDE] ${pair} contrarian position closed due to strong SM signal`)
           return // Exit after closing
         } catch (err: any) {
@@ -7499,7 +7539,7 @@ class HyperliquidMMBot {
 
     // 🛡️ ADVANCED TOXIC FLOW PROTECTION
     // 1. VPIN Analysis
-    if (liveTrading.vpinAnalyzers) {
+    if (liveTrading?.vpinAnalyzers) {
       if (!liveTrading.vpinAnalyzers.has(pair)) {
         liveTrading.vpinAnalyzers.set(pair, new VPINAnalyzer());
       }
@@ -7511,7 +7551,7 @@ class HyperliquidMMBot {
     }
 
     // 2. Adverse Selection Analysis
-    if (liveTrading.adverseTracker) {
+    if (liveTrading?.adverseTracker) {
       const l2 = liveTrading.l2BookCache.get(pair)
       const bestAskPx = l2?.levels?.[0]?.[0]?.[0]
       const bestBidPx = l2?.levels?.[1]?.[0]?.[0]
@@ -8059,8 +8099,8 @@ class HyperliquidMMBot {
     let gridOrders: GridOrder[]
     if (pair === 'kPEPE') {
       // ── Gather signals for toxicity engine ──
-      const vpinInfo = liveTrading.vpinAnalyzers?.get(pair)?.getToxicityLevel()
-      const adverseMult = liveTrading.adverseTracker?.calculateAdverseSelectionScore(pair, midPrice) ?? 1.0
+      const vpinInfo = liveTrading?.vpinAnalyzers?.get(pair)?.getToxicityLevel()
+      const adverseMult = liveTrading?.adverseTracker?.calculateAdverseSelectionScore(pair, midPrice) ?? 1.0
       const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
       const fundingRate = snapshot?.fundingRate ?? 0
       const oiChange1h = snapshot?.oi?.change1h ?? 0
@@ -9544,20 +9584,22 @@ class HyperliquidMMBot {
     this.notifier.info(`   Health: ${supervisorResult.healthEval.severity} | ${visionStr}`)
 
     // Log Toxic Flow Protection status (properties are on LiveTrading, not HyperliquidMMBot)
-    const lt = this.trading as LiveTrading;
-    const binanceConnected = lt.binanceAnchor?.isConnected() || false;
-    const binancePrices = lt.binanceAnchor?.getPriceCount() || 0;
-    const binanceStatus = binanceConnected ? (binancePrices > 0 ? '✅' : '⏳') : '❌';
-    if (lt.vpinAnalyzers && lt.vpinAnalyzers.size > 0) {
-      const vpinStatus = Array.from(lt.vpinAnalyzers.entries())
-        .map(([pair, analyzer]) => {
-          const info = analyzer.getToxicityLevel();
-          return `${pair}:${(info.vpin * 100).toFixed(0)}%`;
-        })
-        .join(' ');
-      this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: ${vpinStatus}`);
-    } else {
-      this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: awaiting (${lt.vpinAnalyzers?.size || 0})`);
+    if (this.trading instanceof LiveTrading) {
+      const lt = this.trading;
+      const binanceConnected = lt.binanceAnchor?.isConnected() || false;
+      const binancePrices = lt.binanceAnchor?.getPriceCount() || 0;
+      const binanceStatus = binanceConnected ? (binancePrices > 0 ? '✅' : '⏳') : '❌';
+      if (lt.vpinAnalyzers && lt.vpinAnalyzers.size > 0) {
+        const vpinStatus = Array.from(lt.vpinAnalyzers.entries())
+          .map(([pair, analyzer]) => {
+            const info = analyzer.getToxicityLevel();
+            return `${pair}:${(info.vpin * 100).toFixed(0)}%`;
+          })
+          .join(' ');
+        this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: ${vpinStatus}`);
+      } else {
+        this.notifier.info(`   🛡️ ToxicFlow: Binance=${binanceStatus}(${binancePrices}) | VPIN: awaiting (${lt.vpinAnalyzers?.size || 0})`);
+      }
     }
 
     // Log positions
