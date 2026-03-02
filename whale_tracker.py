@@ -24,6 +24,7 @@ from pathlib import Path
 
 TELEGRAM_BOT_TOKEN = "8598008562:AAHqc4JCfo1LniklePaDr17Ws3tmjaZv108"
 TELEGRAM_CHAT_ID = "645284026"
+WHALE_ALERT_CHAT_ID = "-1003835151676"
 
 # Hyperliquid API (darmowe!)
 HL_API_URL = "https://api.hyperliquid.xyz/info"
@@ -1635,21 +1636,27 @@ def calculate_trend(coin: str, history: list) -> dict:
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message: str, parse_mode: str = "Markdown"):
-    """Wyślij wiadomość na Telegram"""
+def send_telegram(message: str, parse_mode: str = "Markdown", also_whale_channel: bool = True):
+    """Wyślij wiadomość na Telegram (osobisty + opcjonalnie whale alert channel)"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }
-    try:
-        response = requests.post(url, data=data, timeout=10)
-        return response.json().get('ok', False)
-    except Exception as e:
-        print(f"[ERROR] Telegram: {e}")
-        return False
+    targets = [TELEGRAM_CHAT_ID]
+    if also_whale_channel and WHALE_ALERT_CHAT_ID:
+        targets.append(WHALE_ALERT_CHAT_ID)
+    ok = False
+    for chat_id in targets:
+        data = {
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }
+        try:
+            response = requests.post(url, data=data, timeout=10)
+            if chat_id == TELEGRAM_CHAT_ID:
+                ok = response.json().get('ok', False)
+        except Exception as e:
+            print(f"[ERROR] Telegram (chat {chat_id}): {e}")
+    return ok
 
 # ============================================================
 # CHANGE DETECTION

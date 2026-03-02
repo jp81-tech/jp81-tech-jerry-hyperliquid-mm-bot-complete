@@ -33,6 +33,9 @@ import { ethers } from 'ethers'
 import * as fs from 'fs'
 import * as path from 'path'
 import axios from 'axios'
+import { config as dotenvConfig } from 'dotenv'
+
+dotenvConfig()  // Load .env file
 
 // ============================================================
 // TYPES
@@ -71,6 +74,7 @@ interface CopyConfig {
   minGeneralValueUsd: number
   scalingMode: 'fixed' | 'proportional'
   blockedCoins: string[]
+  allowedCoins: string[]  // If non-empty, ONLY these coins will be copied (whitelist)
   privateKey: string
   telegramToken: string
   telegramChatId: string
@@ -88,6 +92,10 @@ const HL_API_URL = 'https://api.hyperliquid.xyz/info'
 // Slippage for IOC orders (market-like)
 const IOC_SLIPPAGE_BPS = 30  // 0.30% slippage allowance
 
+// Failed order cooldown: don't retry for 30 minutes after failure
+const ORDER_FAIL_COOLDOWN_MS = 30 * 60 * 1000
+const orderFailCooldowns = new Map<string, number>()  // coin → expiry timestamp
+
 // ============================================================
 // CONFIG
 // ============================================================
@@ -98,6 +106,8 @@ function loadConfig(): CopyConfig {
 
   const blockedStr = process.env.COPY_BLOCKED_COINS || ''
   const blockedCoins = blockedStr ? blockedStr.split(',').map(s => s.trim()).filter(Boolean) : []
+  const allowedStr = process.env.COPY_ALLOWED_COINS || ''
+  const allowedCoins = allowedStr ? allowedStr.split(',').map(s => s.trim()).filter(Boolean) : []
 
   return {
     dryRun: !isLive,
@@ -108,6 +118,7 @@ function loadConfig(): CopyConfig {
     minGeneralValueUsd: parseFloat(process.env.COPY_MIN_VALUE_USD || '10000'),
     scalingMode: (process.env.COPY_SCALING_MODE || 'fixed') as 'fixed' | 'proportional',
     blockedCoins,
+    allowedCoins,
     privateKey: process.env.COPY_PRIVATE_KEY || '',
     telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
@@ -198,23 +209,27 @@ async function fetchXyzMidPrice(coin: string): Promise<number | null> {
 }
 
 async function fetchOurPositions(
-  infoClient: hl.InfoClient,
   walletAddress: string
 ): Promise<Record<string, { size: number; entryPx: number; value: number; pnl: number }>> {
   const positions: Record<string, { size: number; entryPx: number; value: number; pnl: number }> = {}
 
-  // Standard perps
+  // Standard perps (use axios with timeout instead of SDK which can hang)
   try {
-    const state = await infoClient.clearinghouseState({ user: walletAddress })
-    for (const p of state.assetPositions) {
-      const pos = p.position
-      const size = parseFloat(String(pos.szi))
-      if (Math.abs(size) > 0.0001) {
-        positions[pos.coin] = {
-          size,
-          entryPx: parseFloat(String(pos.entryPx)),
-          value: Math.abs(parseFloat(String(pos.positionValue))),
-          pnl: parseFloat(String(pos.unrealizedPnl)),
+    const resp = await axios.post(HL_API_URL, {
+      type: 'clearinghouseState', user: walletAddress
+    }, { timeout: 10000 })
+    const data = resp.data
+    if (data?.assetPositions) {
+      for (const p of data.assetPositions) {
+        const pos = p.position
+        const size = parseFloat(String(pos.szi))
+        if (Math.abs(size) > 0.0001) {
+          positions[pos.coin] = {
+            size,
+            entryPx: parseFloat(String(pos.entryPx)),
+            value: Math.abs(parseFloat(String(pos.positionValue))),
+            pnl: parseFloat(String(pos.unrealizedPnl)),
+          }
         }
       }
     }
@@ -387,7 +402,6 @@ async function processTick(
   config: CopyConfig,
   state: CopyState,
   exchClient: hl.ExchangeClient | null,
-  infoClient: hl.InfoClient,
   assetMap: Map<string, number>,
   szDecMap: Map<string, number>,
   walletAddress: string,
@@ -415,7 +429,7 @@ async function processTick(
   }
 
   // 3. Fetch our current positions
-  const ourPositions = await fetchOurPositions(infoClient, walletAddress)
+  const ourPositions = await fetchOurPositions(walletAddress)
 
   // 3b. Reconcile: if we have a position matching Generał but no activeCopy, register it
   for (const [coin, ourPos] of Object.entries(ourPositions)) {
@@ -436,6 +450,13 @@ async function processTick(
   // 4. Determine what Generał has vs what we have
   const prevGeneralCoins = new Set(Object.keys(state.generalPositions))
   const currentGeneralCoins = new Set(Object.keys(generalPos))
+
+  // 4b. GLITCH GUARD: if General's positions dropped by >50% in one tick, it's likely an API glitch
+  // Don't process closures — just skip this tick entirely
+  if (prevGeneralCoins.size >= 3 && currentGeneralCoins.size < prevGeneralCoins.size * 0.5) {
+    log(`⚠️ GLITCH GUARD: Generał positions dropped from ${prevGeneralCoins.size} to ${currentGeneralCoins.size} — likely API glitch, skipping tick`, 'SKIP')
+    return
+  }
 
   // 5. Detect CLOSED positions (Generał had it, now doesn't)
   for (const coin of prevGeneralCoins) {
@@ -514,6 +535,7 @@ async function processTick(
   // 7. Detect NEW positions (Generał opened, we don't have copy)
   for (const [coin, gPos] of Object.entries(generalPos)) {
     if (config.blockedCoins.includes(coin)) continue
+    if (config.allowedCoins.length > 0 && !config.allowedCoins.includes(coin)) continue  // Whitelist
     if (gPos.position_value < config.minGeneralValueUsd) continue
 
     const mid = mids[coin]
@@ -524,6 +546,12 @@ async function processTick(
     const hasCopy = state.activeCopies[coin]
 
     if (!hasCopy) {
+      // Check failed order cooldown — don't retry for 30 min after failure
+      const cooldownExpiry = orderFailCooldowns.get(coin)
+      if (cooldownExpiry && Date.now() < cooldownExpiry) {
+        continue  // Still in cooldown
+      }
+
       // New copy opportunity
       const ourValue = ourPos?.value || 0
       const copySize = calculateCopySize(config, gPos.position_value, mid, ourValue)
@@ -549,6 +577,7 @@ async function processTick(
           entryTime: Date.now(),
           generalEntry: gPos.entry_px,
         }
+        orderFailCooldowns.delete(coin)  // Clear cooldown on success
 
         await sendTelegram(config,
           `📋 *COPY OPEN*\n${coin} ${gPos.side}\n` +
@@ -557,6 +586,9 @@ async function processTick(
         )
       } else {
         state.stats.ordersFailed++
+        // Set cooldown — don't spam retries
+        orderFailCooldowns.set(coin, Date.now() + ORDER_FAIL_COOLDOWN_MS)
+        log(`⏳ ${coin}: order failed — cooldown 30 min before retry`, 'SKIP')
       }
     }
   }
@@ -616,6 +648,7 @@ async function main() {
   log(`Min Generał value: $${config.minGeneralValueUsd.toLocaleString()}`)
   log(`Scaling:       ${config.scalingMode}`)
   log(`Blocked coins: ${config.blockedCoins.length > 0 ? config.blockedCoins.join(', ') : '(none)'}`)
+  log(`Allowed coins: ${config.allowedCoins.length > 0 ? config.allowedCoins.join(', ') : '(all)' }`)
   log(`Telegram:      ${config.telegramToken ? 'ON' : 'OFF'}`)
   log(`Target:        Generał (${GENERAL_ADDRESS.slice(0, 10)}...)`)
   log('═'.repeat(60))
@@ -628,7 +661,6 @@ async function main() {
 
   // Initialize SDK
   let exchClient: hl.ExchangeClient | null = null
-  const infoClient = new hl.InfoClient({ transport: new hl.HttpTransport() })
   let walletAddress = ''
 
   if (!config.dryRun) {
@@ -742,7 +774,7 @@ async function main() {
   let tick = 0
   while (true) {
     try {
-      await processTick(config, state, exchClient, infoClient, assetMap, szDecMap, walletAddress)
+      await processTick(config, state, exchClient, assetMap, szDecMap, walletAddress)
 
       tick++
       // Status every 5 minutes

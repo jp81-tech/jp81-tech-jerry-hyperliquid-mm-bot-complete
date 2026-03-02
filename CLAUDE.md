@@ -5,7 +5,7 @@
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
-- PM2 zarządza botem: `pm2 restart mm-follower mm-pure copy-general`
+- PM2 zarządza botem: `pm2 restart mm-pure copy-general`
 - GitHub: `jp81-tech/jp81-tech-jerry-hyperliquid-mm-bot-complete`
 
 ## Nad czym pracujemy
@@ -230,6 +230,145 @@ activeCopies: 8 (baseline) → **9** (8 baseline + xyz:GOLD reconciled). Bot ter
 
 **Pliki:** `scripts/general_copytrade.ts` (+16)
 **Commit:** `99de1bf`
+
+### 85. mm-follower usunięty — uproszczenie PM2 (02.03)
+
+**Problem:** mm-follower (SM-following bot dla BTC, ETH, SOL, HYPE, FARTCOIN) nie był już potrzebny. User zamknął pozycje ręcznie, bot był w DRY_RUN, generował błędy TypeErrors w DRY_RUN mode.
+
+**Zmiany:**
+- `pm2 stop mm-follower && pm2 delete mm-follower && pm2 save` na serwerze
+- Usunięto sekcję mm-follower z `ecosystem.config.cjs` (lokal + serwer)
+- Dodano `COPY_BLOCKED_COINS: "PUMP"` permanentnie w ecosystem.config.cjs
+
+**Przed:** 3 boty (mm-follower, mm-pure, copy-general)
+**Po:** 2 boty (mm-pure kPEPE market making, copy-general kopiowanie Generała)
+
+**Pliki:** `ecosystem.config.cjs` (-28 linii mm-follower sekcji)
+
+### 86. copy-general COPY_ALLOWED_COINS whitelist + baseline state fix (02.03)
+
+**Problem:** copy-general miał 7 activeCopies (AVAX, FARTCOIN, RESOLV, ASTER, APEX + LIT, xyz:GOLD) zamiast oczekiwanych 2 (LIT, xyz:GOLD). User chciał kopiować TYLKO te dwa coiny.
+
+**Krytyczny błąd:** Usunięcie niechcianych wpisów z activeCopies (AVAX, FARTCOIN, RESOLV, ASTER, APEX) spowodowało katastrofę — bot zobaczył istniejące pozycje Generała w tych coinach jako "nowe" i natychmiast otworzył 5 nowych kopii po $500 ($2,500 total). User musiał zamknąć je ręcznie.
+
+**Root cause:** `activeCopies` służy jako "pamięć" bota — jeśli coin jest w activeCopies, bot go nie kopiuje ponownie. Usunięcie wpisu = bot "zapomina" że pozycja istnieje → traktuje jako nową.
+
+**Fix 1 — Baseline entries (state file na serwerze):**
+Re-dodano WSZYSTKIE pozycje Generała jako `baseline: true` w `/tmp/copy_general_state.json`. Flag `baseline` oznacza "znana pozycja, nie zarządzaj" — bot nie próbuje kopiować, zamykać ani redukować baseline entries.
+
+**Fix 2 — COPY_ALLOWED_COINS whitelist (general_copytrade.ts):**
+```typescript
+// Config interface
+allowedCoins: string[]  // If non-empty, ONLY these coins will be copied
+
+// Env var parsing
+const allowedStr = process.env.COPY_ALLOWED_COINS || ''
+const allowedCoins = allowedStr ? allowedStr.split(',').map(s => s.trim()).filter(Boolean) : []
+
+// Whitelist check (section 7 — detect NEW positions)
+if (config.allowedCoins.length > 0 && !config.allowedCoins.includes(coin)) continue
+```
+
+**Fix 3 — dotenv loading:**
+```typescript
+import { config as dotenvConfig } from 'dotenv'
+dotenvConfig()  // Potrzebne bo COPY_PRIVATE_KEY jest w .env, nie w ecosystem.config.cjs
+```
+
+**Fix 4 — PM2 env var propagation:**
+`pm2 restart --update-env` czyta z shell env, NIE z `ecosystem.config.cjs`. Żeby załadować env vars z pliku config: `pm2 delete` + `pm2 start ecosystem.config.cjs --only copy-general`.
+
+**ecosystem.config.cjs:**
+```javascript
+COPY_ALLOWED_COINS: "LIT,xyz:GOLD",
+COPY_BLOCKED_COINS: "PUMP",
+```
+Whitelist (ALLOWED) ma priorytet nad blocklist (BLOCKED). Nowe coiny Generała są automatycznie ignorowane.
+
+**Lekcja:**
+- **NIGDY nie usuwaj wpisów z activeCopies** — użyj `baseline: true` flag zamiast tego
+- **Whitelist > Blocklist** — COPY_ALLOWED_COINS (whitelist) jest bezpieczniejszy niż COPY_BLOCKED_COINS (blocklist) bo nowe coiny automatycznie ignorowane
+- **PM2 --update-env czyta z shell, nie z config file** — trzeba delete + start żeby załadować z ecosystem.config.cjs
+
+**Pliki:** `scripts/general_copytrade.ts` (+12), `ecosystem.config.cjs` (+1 linia COPY_ALLOWED_COINS)
+
+### 84. copy-general SDK timeout fix — infoClient hang replaced with axios (02.03)
+
+**Problem:** copy-general bot zawieszał się po "Monitoring started" — PM2 pokazywał "online" ale bot nie tickował. Cisza w logach przez 60+ minut.
+
+**Root cause:** `fetchOurPositions()` używał `infoClient.clearinghouseState()` z `@nktkas/hyperliquid` SDK. SDK NIE ma timeout — HTTP request wisał w nieskończoność gdy HL API connection hung, blokując Node.js event loop. Inne fetche (`fetchMidPrices`, xyz positions) już używały `axios.post()` z 10s timeout i działały.
+
+**Fix w `scripts/general_copytrade.ts`:**
+```typescript
+// PRZED (wisiał bez timeout):
+const state = await infoClient.clearinghouseState({ user: walletAddress })
+
+// PO (10s timeout):
+const resp = await axios.post(HL_API_URL, {
+  type: 'clearinghouseState', user: walletAddress
+}, { timeout: 10000 })
+const data = resp.data
+```
+
+**Dodatkowe zmiany:**
+- Usunięto parametr `infoClient` z `fetchOurPositions()` i `processTick()`
+- Usunięto deklarację `infoClient` z `main()` (nie jest już potrzebny)
+- Usunięto import `hl.InfoClient` usage (hl.ExchangeClient nadal potrzebny do orderów)
+
+**Lekcja:** `@nktkas/hyperliquid` SDK (InfoClient) NIE ma wbudowanego timeout. Zawsze używaj `axios.post()` z explicit `timeout: 10000` dla HL API calls w skryptach. SDK ExchangeClient (ordery) jest OK bo ma retry/timeout wbudowany.
+
+**Pliki:** `scripts/general_copytrade.ts` (+8/-12)
+
+### 83. copy-general API glitch guard + PUMP blocked + failed order cooldown (02.03)
+
+**Problem:** 3 niezależne problemy z copy-general:
+
+**A) API glitch spowodował otwarcie 6 fałszywych kopii ($3,000):**
+- **10:32:52 UTC**: `fetchMidPrices()` zwróciło empty (HL API glitch)
+- **10:33:23**: vip_spy miał partial data → copy-general zobaczył 8 standardowych pozycji jako "CLOSED"
+- Wszystkie 8 baseline entries usunięte → następny tick (10:34:25) potraktował je jako NEW
+- Bot otworzył 6 kopii po $500: AVAX, FARTCOIN, RESOLV, ASTER, APEX, LIT
+- To były STARE pozycje Generała, nie nowe — baseline protection zawiodła
+
+**B) PUMP error spam co 30 sekund:**
+- PUMP price ~$0.0019, `toPrecision(5)` nie produkuje valid tick
+- Bot próbował co 30s → "Order 0: Order has invalid price" w nieskończoność
+
+**C) Brak mechanizmu cooldown na failed orders**
+
+**Fix 1 — Glitch Guard (sekcja 4b w `processTick()`):**
+```typescript
+if (prevGeneralCoins.size >= 3 && currentGeneralCoins.size < prevGeneralCoins.size * 0.5) {
+  log(`⚠️ GLITCH GUARD: Generał positions dropped from ${prevGeneralCoins.size} to ${currentGeneralCoins.size} — likely API glitch, skipping tick`, 'SKIP')
+  return
+}
+```
+Logika: jeśli >50% pozycji Generała zniknęło w jednym ticku → prawdopodobnie API glitch, pomiń tick.
+
+**Fix 2 — Failed order cooldown (30 min):**
+```typescript
+const ORDER_FAIL_COOLDOWN_MS = 30 * 60 * 1000
+const orderFailCooldowns = new Map<string, number>()
+// Before order: check cooldown
+const cooldownExpiry = orderFailCooldowns.get(coin)
+if (cooldownExpiry && Date.now() < cooldownExpiry) continue
+// On failure: set cooldown
+orderFailCooldowns.set(coin, Date.now() + ORDER_FAIL_COOLDOWN_MS)
+```
+
+**Fix 3 — PUMP blocked via env var:**
+- `COPY_BLOCKED_COINS: "PUMP"` w `ecosystem.config.cjs` (permanentne)
+- Bot loguje "Blocked coins: PUMP" na starcie
+
+**Wynik po deploy:**
+```
+Blocked coins: PUMP
+Monitoring started. Waiting for changes...  ← zero PUMP error spam
+```
+
+**6 fałszywych pozycji:** FARTCOIN SHORT $503, LIT SHORT $502, APEX SHORT $501, ASTER SHORT $500, AVAX SHORT $500, RESOLV SHORT $499 — otwarte przez API glitch, nadal aktywne na koncie.
+
+**Pliki:** `scripts/general_copytrade.ts` (+25), `ecosystem.config.cjs` (COPY_BLOCKED_COINS: "PUMP")
 
 ---
 
@@ -2404,9 +2543,8 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | PM2 id | Nazwa | Skrypt | Status | Rola |
 |--------|-------|--------|--------|------|
 | 5 | `ai-executor` | `src/signals/ai-executor-v2.mjs` | online | Nansen alert relay |
-| 45 | `mm-follower` | `src/mm_hl.ts` | online | SM-following bot (BTC,ETH,SOL,HYPE,FARTCOIN) |
 | 48 | `mm-pure` | `src/mm_hl.ts` | online | PURE_MM bot (kPEPE) |
-| 49 | `copy-general` | `scripts/general_copytrade.ts` | online | Copy-trading Generała (dry-run, 27.02) |
+| 52 | `copy-general` | `scripts/general_copytrade.ts` | online | Copy-trading Generała (LIVE, whitelist: LIT+xyz:GOLD, 02.03) |
 | 4 | `nansen-bridge` | nansen data provider | online | Port 8080, Golden Duo API |
 | 25 | `vip-spy` | `scripts/vip_spy.py` | online | VIP SM monitoring (30s poll, ALL COINS dla Generała) |
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
@@ -3762,7 +3900,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Prediction Bias (26-27.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na bid/ask size. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. **Działa na WSZYSTKICH tokenach** (kPEPE w if-branch, reszta w else-branch `executeMultiLayerMM`). kPEPE: po Toxicity+TimeZone, PRZED Momentum Guard. Reszta: PRZED `generateGridOrders()`. Multiplicative z innymi modułami. Log: `📊 [PREDICTION_BIAS]` co 20 ticków (~20 min). **WAŻNE:** mm-follower biegnie z `src/` (ts-node), nie z `dist/` — zmiany muszą być SCP'd do `src/mm_hl.ts` na serwerze.
 - **Multipliers = ROZMIAR, nie cena**: `bid×0.81` znaczy bidy mają 81% normalnego rozmiaru ($81 zamiast $100/level). Ceny orderów (L1=18bps, L2=30bps od mid) się NIE zmieniają. Każdy moduł (Toxicity, TimeZone, Prediction, MG) mnoży `sizeMultipliers.bid`/`.ask` — wynik końcowy to iloczyn wszystkich. Gdy moduły się zgadzają (np. oba BEARISH) → silna redukcja/wzmocnienie. Gdy się nie zgadzają → wzajemna neutralizacja.
 - **kPEPE mixed case token**: Hyperliquid API wymaga dokładnie `kPEPE` (mała `k`). `toUpperCase()` zamienia na `KPEPE` → HTTP 500. Fix: `normalizeToken()` w dashboard-api.ts z `MIXED_CASE_TOKENS` mapą. Dotyczy WSZYSTKICH endpointów prediction-api: `/predict/`, `/verify/`, `/predict-xgb/`, `/xgb-features/`.
-- **Copy-trading bot (27.02)**: `scripts/general_copytrade.ts`, PM2 `copy-general` (id 49). Czyta `/tmp/vip_spy_state.json` co 30s, kopiuje NOWE pozycje Generała po $500 fixed (IOC 30bps slippage). Baseline seeding: na starcie zapisuje snapshot istniejących pozycji i nie kopiuje ich. State: `/tmp/copy_general_state.json`. Tryby: `--dry-run` (domyślny) / `--live`. Żeby włączyć live: ustawić `COPY_PRIVATE_KEY` + zmienić args na `--live` w `ecosystem.config.cjs`.
+- **Copy-trading bot (27.02, updated 02.03)**: `scripts/general_copytrade.ts`, PM2 `copy-general` (id 52). Czyta `/tmp/vip_spy_state.json` co 30s, kopiuje NOWE pozycje Generała po $500 fixed (IOC 30bps slippage). **Whitelist:** `COPY_ALLOWED_COINS=LIT,xyz:GOLD` — TYLKO te coiny kopiowane. Baseline seeding: na starcie zapisuje snapshot istniejących pozycji i nie kopiuje ich. State: `/tmp/copy_general_state.json`. Tryby: `--dry-run` / `--live` (aktywny od 02.03). Żeby włączyć live: ustawić `COPY_PRIVATE_KEY` w `.env` + `args: "--live"` w `ecosystem.config.cjs`.
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
@@ -3772,3 +3910,11 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **PM2 --update-env (02.03)**: Przy `pm2 restart` po zmianie pliku źródłowego, ZAWSZE dodawaj `--update-env`. Bez tego ESM loader (`--experimental-loader ts-node/esm`) może cacheować starą wersję modułu. Symptom: nowa metoda "is not a function" mimo że grep na serwerze potwierdza jej istnienie w pliku.
 - **copy-general reconciliation (02.03)**: Sekcja 3b w `processTick()` — auto-reconcile real positions vs activeCopies state. Naprawia desync gdy IOC partial fill succeeds on-chain ale `placeOrder()` returns false → activeCopy nie zapisane. Dotyczy szczególnie xyz: coins (IOC w illiquid markets). Log: `🔧 RECONCILE:`. Guard: opposite side = nie kopia.
 - **copy-general xyz:GOLD (02.03)**: Bot ma pozycję xyz:GOLD LONG $600 (6 fills 28.02). Generał ma GOLD LONG $1M (20x lev). Nasze kopia to ~$600 fixed. activeCopies teraz poprawnie śledzi — SIZE_REDUCED i CLOSED events dla GOLD będą obsługiwane.
+- **copy-general Glitch Guard (02.03)**: Sekcja 4b — jeśli >50% pozycji Generała zniknęło w jednym ticku → API glitch, pomiń tick. Zapobiega usunięciu baseline entries i otwarciu fałszywych kopii. Root cause: `fetchMidPrices()` failure → vip_spy partial state → baseline removed → old positions treated as new.
+- **copy-general Failed Order Cooldown (02.03)**: 30 min cooldown po failed order (np. PUMP "invalid price"). `orderFailCooldowns` Map<coin, expiry>. Cleared on success. Zapobiega error spamowi co 30s.
+- **copy-general PUMP blocked (02.03)**: `COPY_BLOCKED_COINS: "PUMP"` permanentnie w `ecosystem.config.cjs`. PUMP price ~$0.0019 powoduje "Order has invalid price" bo `toPrecision(5)` nie produkuje valid tick size.
+- **copy-general 6 fałszywych pozycji (02.03)**: API glitch 10:32 UTC otworzył 6 kopii starych pozycji Generała po $500 (FARTCOIN, LIT, APEX, ASTER, AVAX, RESOLV). Nadal aktywne. Kierunek zgodny z Generałem (SHORT/LONG matching).
+- **copy-general COPY_ALLOWED_COINS (02.03)**: Whitelist env var — TYLKO wymienione coiny będą kopiowane. `COPY_ALLOWED_COINS: "LIT,xyz:GOLD"` w ecosystem.config.cjs. Jeśli puste = kopiuj wszystko (blocklist still applies). Whitelist > blocklist (whitelist sprawdzany pierwszy). Log na starcie: `Allowed coins: LIT, xyz:GOLD`.
+- **copy-general baseline pitfall (02.03)**: NIGDY nie usuwaj wpisów z activeCopies state — bot potraktuje istniejące pozycje Generała jako "nowe" i otworzy kopie. Zamiast usuwać, ustaw `baseline: true` flag. Baseline entries = "znana pozycja, nie zarządzaj".
+- **PM2 ecosystem.config.cjs env loading (02.03)**: `pm2 restart --update-env` czyta env z SHELL, nie z ecosystem.config.cjs. Żeby załadować env z pliku: `pm2 delete <name> && pm2 start ecosystem.config.cjs --only <name>`. Bez tego nowe env vars (np. COPY_ALLOWED_COINS) nie zostaną załadowane.
+- **dotenv w scripts/ (02.03)**: Skrypty w `scripts/` nie ładują automatycznie `.env`. Trzeba explicit `import { config as dotenvConfig } from 'dotenv'; dotenvConfig()`. Bez tego env vars z `.env` (np. COPY_PRIVATE_KEY) są niewidoczne po PM2 recreate.

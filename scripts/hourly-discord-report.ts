@@ -28,11 +28,16 @@ async function main() {
   const oneHourAgo = now - 60 * 60 * 1000;
   const timeStr = new Date(now).toISOString().slice(11, 16) + ' UTC';
 
-  // Fetch all data in parallel
-  const [fills, orders, state] = await Promise.all([
+  // Fetch all data in parallel (standard perps + xyz dex)
+  const [fills, orders, state, xyzStateRaw] = await Promise.all([
     fetchAllFillsByTime(user, oneHourAgo, now),
     info.openOrders({ user }),
     info.clearinghouseState({ user }),
+    fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'clearinghouseState', user, dex: 'xyz' }),
+    }).then(r => r.json()).catch(() => null),
   ]);
 
   // Build position map: coin -> position data
@@ -41,6 +46,16 @@ async function main() {
     const p = ap.position;
     if (parseFloat(p.szi) !== 0) {
       posMap.set(p.coin, { szi: p.szi, entryPx: p.entryPx, unrealizedPnl: p.unrealizedPnl });
+    }
+  }
+
+  // Add xyz dex positions (e.g. xyz:GOLD)
+  if (xyzStateRaw?.assetPositions) {
+    for (const ap of xyzStateRaw.assetPositions) {
+      const p = ap.position;
+      if (parseFloat(p.szi) !== 0) {
+        posMap.set(p.coin, { szi: p.szi, entryPx: p.entryPx, unrealizedPnl: p.unrealizedPnl });
+      }
     }
   }
 
@@ -87,11 +102,32 @@ async function main() {
     lines.push('');
   }
 
+  // Other positions (xyz dex, copy-general, etc.) not in TOKENS
+  const otherPositions = Array.from(posMap.entries()).filter(([coin]) => !TOKENS.includes(coin));
+  if (otherPositions.length > 0) {
+    for (const [coin, pos] of otherPositions) {
+      const size = parseFloat(pos.szi);
+      const side = size > 0 ? 'LONG' : 'SHORT';
+      const entry = parseFloat(pos.entryPx);
+      const uPnl = parseFloat(pos.unrealizedPnl);
+      const value = Math.abs(size) * entry;
+      lines.push(`**${coin}**: (copy-general)`);
+      lines.push(`  Position: ${side} $${value.toFixed(0)} @ $${fmtPrice(entry)} | uPnl: ${fmtUsd(uPnl)}`);
+      lines.push('');
+    }
+  }
+
   // Account summary
   const equity = parseFloat(state.marginSummary.accountValue);
   let totalUPnl = 0;
   for (const ap of state.assetPositions) {
     totalUPnl += parseFloat(ap.position.unrealizedPnl);
+  }
+  // Include xyz dex uPnl in total
+  if (xyzStateRaw?.assetPositions) {
+    for (const ap of xyzStateRaw.assetPositions) {
+      totalUPnl += parseFloat(ap.position.unrealizedPnl);
+    }
   }
 
   const report = [

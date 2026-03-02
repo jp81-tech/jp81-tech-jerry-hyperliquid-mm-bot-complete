@@ -6827,3 +6827,146 @@ Co robisz? **Reconciliation** — porównujesz wyciąg bankowy z Excelem i popra
 | Plik | Zmiana |
 |------|--------|
 | `scripts/general_copytrade.ts` | Sekcja 3b: position reconciliation (+16 linii) |
+
+---
+
+## Rozdział 33: Nie Wymazuj Pamięci Bota — Whitelist, Baseline i Lekcja za $2,500
+
+*2 marca 2026, 12:00 UTC*
+
+### Problem
+
+copy-general miał 7 wpisów w `activeCopies` (stan wewnętrzny bota): AVAX, FARTCOIN, RESOLV, ASTER, APEX + LIT, xyz:GOLD. User chciał kopiować TYLKO LIT i xyz:GOLD. Reszta to stare pozycje Generała otwarte przez API glitch (patrz Rozdział 32).
+
+### Katastrofalny błąd — usunięcie pamięci
+
+Pierwsza próba naprawy: "usuń niechciane wpisy z activeCopies". Brzmi logicznie, prawda?
+
+**NIE.**
+
+`activeCopies` to **pamięć** bota. Każdy wpis mówi: "wiem o tej pozycji, nie kopiuj jej ponownie". Usunięcie wpisu = bot "zapomina" że pozycja istnieje.
+
+Co się stało:
+1. Usunięto AVAX, FARTCOIN, RESOLV, ASTER, APEX z activeCopies
+2. Na następnym ticku bot sprawdził pozycje Generała
+3. Generał ma AVAX, FARTCOIN, RESOLV, ASTER, APEX → bot nie zna ich → **traktuje jako NOWE**
+4. Bot natychmiast otworzył 5 kopii po $500 = **$2,500 nowych pozycji**
+5. User musiał zamknąć je ręcznie (drugi raz tego dnia!)
+
+### Analogia — Alzheimer bota tradingowego
+
+Wyobraź sobie bota jako wiernego asystenta z notatnikiem. W notatniku ma listę:
+- "Generał ma AVAX SHORT — już wiem, nie kopiuję"
+- "Generał ma LIT LONG — skopiowałem, śledzę"
+
+Wyrywasz mu 5 stron z notatnika. Asystent patrzy na Generała, widzi AVAX SHORT, sprawdza notatnik — **brak wpisu** → "O, nowa pozycja! Kopiuję!" I tak 5 razy.
+
+Nie wymazujesz pamięci bota, chyba że chcesz żeby popełnił te same błędy od nowa.
+
+### Rozwiązanie #1 — Baseline entries
+
+Zamiast **usuwać** wpisy, **oznacz** je jako `baseline: true`:
+
+```json
+{
+  "activeCopies": {
+    "AVAX": { "side": "sell", "baseline": true },
+    "FARTCOIN": { "side": "sell", "baseline": true },
+    "LIT": { "side": "buy", "entryTime": 1709312000000 },
+    "xyz:GOLD": { "side": "buy", "entryTime": 1709312000000 }
+  }
+}
+```
+
+`baseline: true` mówi: "wiem o tej pozycji, ale NIE zarządzaj nią — nie kopiuj, nie zamykaj, nie redukuj". Bot widzi AVAX w notatniku, sprawdza flag → "baseline, pomijam".
+
+### Rozwiązanie #2 — Whitelist (COPY_ALLOWED_COINS)
+
+Baseline chroni przed ponownym kopiowaniem, ale co jeśli Generał otworzy NOWĄ pozycję na DOGE? Bot ją skopiuje, bo DOGE nie jest w activeCopies ani w blocklist.
+
+**Whitelist** to silniejsza ochrona:
+
+```javascript
+// W ecosystem.config.cjs
+COPY_ALLOWED_COINS: "LIT,xyz:GOLD"
+
+// W kodzie (sekcja 7 — detect NEW positions)
+if (config.allowedCoins.length > 0 && !config.allowedCoins.includes(coin)) continue
+```
+
+Teraz bot kopiuje WYŁĄCZNIE LIT i xyz:GOLD. Jakikolwiek inny coin — AVAX, DOGE, TRUMP — jest automatycznie ignorowany. Nawet jeśli API glitch usunie baseline, nawet jeśli state file się zepsuje — whitelist jest twardym limitem.
+
+### Whitelist vs Blocklist
+
+| Podejście | Mechanizm | Bezpieczeństwo |
+|-----------|-----------|----------------|
+| **Blocklist** (`COPY_BLOCKED_COINS`) | Blokuj wymienione coiny, kopiuj resztę | Nowy coin = automatycznie skopiowany |
+| **Whitelist** (`COPY_ALLOWED_COINS`) | Kopiuj TYLKO wymienione, ignoruj resztę | Nowy coin = automatycznie ignorowany |
+
+**Whitelist jest ZAWSZE bezpieczniejszy** w copy-tradingu. Generał handluje ~10 coinami. Chcesz kopiować 2. Blocklist wymaga wymienienia 8 coinów + każdego nowego. Whitelist wymaga wymienienia 2. Prosta matematyka ryzyka.
+
+### Trzeci bug — PM2 env var propagation
+
+Po dodaniu `COPY_ALLOWED_COINS` do `ecosystem.config.cjs`, restartujemy:
+```bash
+pm2 restart copy-general --update-env
+```
+
+Bot loguje: `Allowed coins: (all)` — whitelist nie zadziałał!
+
+**Dlaczego?** `--update-env` czyta env vars z **shell environment** (export, .bashrc), NIE z `ecosystem.config.cjs`. To PM2-owa pułapka którą łatwo przeoczyć.
+
+**Fix:**
+```bash
+pm2 delete copy-general
+pm2 start ecosystem.config.cjs --only copy-general
+```
+
+`pm2 start` z plikiem config ZAWSZE czyta env z tego pliku.
+
+### Czwarty bug — brakujące dotenv
+
+Po `pm2 delete + pm2 start`, bot crashuje: "COPY_PRIVATE_KEY is required for --live mode!"
+
+Klucz prywatny jest w `.env` pliku. Ale skrypt w `scripts/` nie ładuje automatycznie `.env`! Stary PM2 proces miał klucz w swoim environment (z poprzedniego `pm2 start`), ale nowy proces zaczyna z czystym środowiskiem.
+
+**Fix:**
+```typescript
+import { config as dotenvConfig } from 'dotenv'
+dotenvConfig()  // Załaduj .env zanim sprawdzisz COPY_PRIVATE_KEY
+```
+
+### Chronologia jednego popołudnia (wersja skrócona)
+
+| Czas | Wydarzenie | Lekcja |
+|------|-----------|--------|
+| 12:00 | "Mają być tylko 2 kopie!" | User zauważa problem |
+| 12:05 | Usunięto 5 wpisów z activeCopies | **BŁĄD** — kasowanie pamięci |
+| 12:06 | Bot otworzył 5 nowych kopii ($2,500) | Katastrofa |
+| 12:07 | User zamyka ręcznie, wściekły | Lekcja o baseline |
+| 12:10 | Dodano baseline: true, stop bot | Prawidłowy fix #1 |
+| 12:15 | Dodano COPY_ALLOWED_COINS | Fix #2 |
+| 12:20 | `--update-env` nie ładuje z config | Pułapka PM2 |
+| 12:25 | `pm2 delete + start` → brak klucza | Pułapka dotenv |
+| 12:30 | Dodano dotenv import | Fix #4 |
+| 12:35 | Bot działa poprawnie | Sukces |
+| 18:00 | 6h uptime, zero błędów | Potwierdzone |
+
+### Lekcje
+
+1. **Stan bota = pamięć. Nie kasuj, oznaczaj.** `baseline: true` > usuwanie wpisu. Skasowana pamięć = powtórzone błędy.
+
+2. **Whitelist > Blocklist w copy-tradingu.** Mniej do pamiętania, automatyczna ochrona przed nowymi coinami. Jeśli znasz listę "co chcę", whitelist. Jeśli znasz "czego nie chcę" (a reszta OK), blocklist.
+
+3. **PM2 `--update-env` to pułapka.** Czyta z shell, nie z config. Jeśli dodałeś nowy env var do `ecosystem.config.cjs`, musisz `pm2 delete + pm2 start ecosystem.config.cjs`.
+
+4. **dotenv nie jest automatyczny.** Skrypty w `scripts/` (uruchamiane przez PM2 via `npx tsx`) nie mają dostępu do `.env` bez explicit `dotenvConfig()`. Główny bot (`src/mm_hl.ts`) ma to przez ts-node loader, ale standalone skrypty nie.
+
+5. **Testuj na suchym biegu (--dry-run) zanim zmienisz stan.** Gdybyśmy najpierw usunęli wpisy w dry-run mode, zobaczylibyśmy "5 NEW positions detected" w logach bez otwierania realnych pozycji.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/general_copytrade.ts` | `allowedCoins` whitelist, dotenv import (+12 linii) |
+| `ecosystem.config.cjs` | `COPY_ALLOWED_COINS: "LIT,xyz:GOLD"`, usunięto mm-follower (-28 linii) |

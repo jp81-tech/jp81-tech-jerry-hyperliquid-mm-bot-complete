@@ -1,34 +1,6 @@
 module.exports = {
   apps: [
     {
-      name: "mm-follower",
-      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
-      script: "src/mm_hl.ts",
-      interpreter: "node",
-      interpreter_args: "--experimental-loader ts-node/esm --max-old-space-size=512",
-      env: {
-        NODE_OPTIONS: "--max-old-space-size=512",
-        TS_NODE_TRANSPILE_ONLY: "1",
-        TS_NODE_IGNORE: "false",
-        BOT_MODE: "SM_FOLLOWER",
-        SM_ONLY_PAIRS: "BTC,ETH,SOL,HYPE,FARTCOIN",
-        DYNAMIC_CONFIG_TOKENS: "BTC,ETH,SOL,HYPE,FARTCOIN",
-        ROTATION_MODE: "manual",
-        MANUAL_ACTIVE_PAIRS: "BTC,ETH,SOL,HYPE,FARTCOIN",
-        MAX_ACTIVE_PAIRS: "5",
-        STICKY_PAIRS: "",
-        TELEMETRY_PORT: "8082",
-      },
-      max_memory_restart: "400M",
-      kill_timeout: 120000,
-      listen_timeout: 120000,
-      restart_delay: 3000,
-      exp_backoff_restart_delay: 3000,
-      max_restarts: 10,
-      min_uptime: 10000,
-      autorestart: true,
-    },
-    {
       name: "mm-pure",
       cwd: "/home/jerry/hyperliquid-mm-bot-complete",
       script: "src/mm_hl.ts",
@@ -63,7 +35,7 @@ module.exports = {
       script: "scripts/general_copytrade.ts",
       interpreter: "npx",
       interpreter_args: "tsx",
-      args: "--dry-run",  // START IN DRY-RUN! Change to "--live" when ready
+      args: "--live",
       env: {
         COPY_CAPITAL_USD: "2000",
         COPY_MAX_PER_PAIR: "500",
@@ -71,7 +43,8 @@ module.exports = {
         COPY_POLL_SEC: "30",
         COPY_MIN_VALUE_USD: "10000",
         COPY_SCALING_MODE: "fixed",
-        COPY_BLOCKED_COINS: "",
+        COPY_BLOCKED_COINS: "PUMP",
+        COPY_ALLOWED_COINS: "LIT,xyz:GOLD",
         // COPY_PRIVATE_KEY: "..."  // Set on server .env or PM2 env
       },
       max_memory_restart: "150M",

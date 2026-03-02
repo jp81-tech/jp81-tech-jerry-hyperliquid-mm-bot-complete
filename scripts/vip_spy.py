@@ -84,6 +84,7 @@ HL_API_URL = "https://api.hyperliquid.xyz/info"
 # Telegram
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8598008562:AAHqc4JCfo1LniklePaDr17Ws3tmjaZv108")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "645284026")
+WHALE_ALERT_CHAT_ID = os.environ.get("WHALE_ALERT_CHAT_ID", "-1003835151676")
 
 # Thresholds
 POSITION_CHANGE_THRESHOLD_USD = 10000  # Alert gdy zmiana > $10K
@@ -116,18 +117,22 @@ def log(msg: str, level: str = "INFO"):
     }.get(level, "•")
     print(f"[{ts}] {prefix} [{level}] {msg}", flush=True)
 
-def send_telegram(message: str):
-    """Wyślij alert na Telegram"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown"
-        }
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        log(f"Telegram error: {e}", "ERROR")
+def send_telegram(message: str, also_whale_channel: bool = True):
+    """Wyślij alert na Telegram (osobisty + opcjonalnie whale alert channel)"""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    targets = [TELEGRAM_CHAT_ID]
+    if also_whale_channel and WHALE_ALERT_CHAT_ID:
+        targets.append(WHALE_ALERT_CHAT_ID)
+    for chat_id in targets:
+        try:
+            payload = {
+                "chat_id": chat_id,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            requests.post(url, json=payload, timeout=10)
+        except Exception as e:
+            log(f"Telegram error (chat {chat_id}): {e}", "ERROR")
 
 def get_positions(address: str, watched_coins: list, vip_name: str = "", track_all: bool = False) -> dict:
     """Pobierz pozycje z Hyperliquid API z dust filter.
