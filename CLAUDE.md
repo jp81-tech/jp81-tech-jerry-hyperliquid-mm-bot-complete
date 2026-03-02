@@ -195,6 +195,42 @@ mm-follower: ZERO TypeError/ReferenceError ✅ (wcześniej 3+ różne crashe)
 **Pliki:** `src/mm_hl.ts` (+109/-68), `scripts/general_copytrade.ts` (+3/-1)
 **Commit:** `33204b6`
 
+### 82. copy-general position reconciliation — xyz:GOLD state desync fix (02.03)
+
+**Problem:** copy-general miał xyz:GOLD LONG $600 na koncie ale `activeCopies` state tego nie śledził. Bot nie mógł reagować na redukcje/zamknięcia GOLD przez Generała — pozycja była "niewidzialna" dla systemu śledzenia.
+
+**Root cause — 3-krokowy desync:**
+1. **28.02 15:37**: Bot wykrył xyz:GOLD jako nową pozycję, złożył 6 IOC orderów, otworzył LONG ~$600 (6×0.0186 oz @ ~$5367)
+2. `placeOrder()` zwróciło `false` (IOC partial fill → SDK error) → `if (ok)` nie weszło → `activeCopies['xyz:GOLD']` NIE zapisane
+3. Na kolejnych tickach: `calculateCopySize()` → `maxAlloc = $500 - $600 = -$100 → return 0` → `copySize < 20 → continue` (cicho skipowany)
+
+**Dodatkowy bug (01.03 07:08):** Bot próbował ponownie skopiować GOLD, ale stary kod miał `c: \`copy_${coin}_...\`` → `copy_xyz:GOLD_19ca83a7409` → HL API odrzuciło (dwukropek w cloid). Fix `c` field usunięcia (z poprzedniej sesji) naprawił to, ale pozycja była już powyżej limitu.
+
+**Fix — sekcja 3b: Position Reconciliation (`scripts/general_copytrade.ts`):**
+```typescript
+// 3b. Reconcile: if we have a position matching Generał but no activeCopy, register it
+for (const [coin, ourPos] of Object.entries(ourPositions)) {
+  if (state.activeCopies[coin]) continue  // already tracked
+  if (!generalPos[coin]) continue  // Generał doesn't have this coin
+  const gSide = generalPos[coin].side === 'LONG' ? 'buy' : 'sell'
+  const ourSide = ourPos.size > 0 ? 'buy' : 'sell'
+  if (gSide !== ourSide) continue  // opposite side — not a copy
+  state.activeCopies[coin] = { side: ourSide, entryTime: Date.now(), generalEntry: generalPos[coin].entry_px }
+  log(`🔧 RECONCILE: ${coin} ${ourSide} $${ourPos.value.toFixed(0)} — registered as active copy`)
+}
+```
+
+**Logika:** Na każdym ticku po `fetchOurPositions()`, porównaj realne pozycje z activeCopies. Jeśli trzymamy pozycję w tym samym kierunku co Generał ale brak wpisu w activeCopies → zarejestruj automatycznie. Guard: opposite side = nie kopia (np. nasza pozycja hedgeowa).
+
+**Wynik live:**
+```
+🔧 RECONCILE: xyz:GOLD buy $600 — registered as active copy (was missing from state)
+```
+activeCopies: 8 (baseline) → **9** (8 baseline + xyz:GOLD reconciled). Bot teraz będzie reagować na GOLD redukcje/zamknięcia przez Generała.
+
+**Pliki:** `scripts/general_copytrade.ts` (+16)
+**Commit:** `99de1bf`
+
 ---
 
 ## Zmiany 28 lutego 2026
@@ -3734,3 +3770,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.
 - **DRY_RUN instanceof guard pattern (02.03)**: W mm_hl.ts, KAŻDE użycie `this.trading as LiveTrading` lub dostęp do LiveTrading-only properties (l2BookCache, shadowTrading, binanceAnchor, vpinAnalyzers, adverseTracker, closePositionForPair) MUSI być chronione `if (this.trading instanceof LiveTrading)` lub nullable pattern: `const lt = this.trading instanceof LiveTrading ? this.trading : null; if (lt?.property)`. PaperTrading NIE ma tych properties → TypeError w DRY_RUN. Dwie różne klasy w pliku: `LiveTrading` (linia ~1479) i `HyperliquidMMBot` (linia ~3595) — metody na jednej NIE są dostępne na drugiej via `this`.
 - **PM2 --update-env (02.03)**: Przy `pm2 restart` po zmianie pliku źródłowego, ZAWSZE dodawaj `--update-env`. Bez tego ESM loader (`--experimental-loader ts-node/esm`) może cacheować starą wersję modułu. Symptom: nowa metoda "is not a function" mimo że grep na serwerze potwierdza jej istnienie w pliku.
+- **copy-general reconciliation (02.03)**: Sekcja 3b w `processTick()` — auto-reconcile real positions vs activeCopies state. Naprawia desync gdy IOC partial fill succeeds on-chain ale `placeOrder()` returns false → activeCopy nie zapisane. Dotyczy szczególnie xyz: coins (IOC w illiquid markets). Log: `🔧 RECONCILE:`. Guard: opposite side = nie kopia.
+- **copy-general xyz:GOLD (02.03)**: Bot ma pozycję xyz:GOLD LONG $600 (6 fills 28.02). Generał ma GOLD LONG $1M (20x lev). Nasze kopia to ~$600 fixed. activeCopies teraz poprawnie śledzi — SIZE_REDUCED i CLOSED events dla GOLD będą obsługiwane.

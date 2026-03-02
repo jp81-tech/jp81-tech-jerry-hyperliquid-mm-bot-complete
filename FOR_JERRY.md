@@ -6686,3 +6686,144 @@ To jest PM2 gotcha #2 (pierwsza to env vars — patrz rozdział Nuclear Fix). Za
 |------|--------|
 | `src/mm_hl.ts` | 11 instanceof guards + fetchOpenOrdersRaw na HyperliquidMMBot (+109/-68) |
 | `scripts/general_copytrade.ts` | Usunięto nieprawidłowe pole `c` z cloid (+3/-1) |
+
+---
+
+## Rozdział: Ghost Position — Jak IOC Partial Fill Oszukał State Tracker
+
+*2 marca 2026*
+
+### Problem
+
+Copy-general bot trzymał pozycję xyz:GOLD LONG za $600 na koncie Hyperliquid, ale w swoim stanie wewnętrznym (`activeCopies`) nie miał o niej pojęcia. Bot widział pozycję Generała (xyz:GOLD LONG $1M), widział ją w `generalPositions`, ale nigdy nie próbował jej skopiować — bo nie wiedział, że już to zrobił.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Stan giełdy (prawda):     xyz:GOLD LONG $600  ✅           │
+│  Stan bota (activeCopies): (nic)               ❌           │
+│  Efekt: "ghost position" — istnieje, ale niewidzialna       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+To jest klasyczny **state desync** — rzeczywistość i model rzeczywistości się rozjechały.
+
+### Śledztwo
+
+Rozpoczęliśmy od hipotezy, że `fetchXyzMidPrice()` nie działa (xyz: coiny nie pojawiają się w standardowym `allMids` API). Test na serwerze:
+
+```bash
+curl -s -X POST https://api.hyperliquid.xyz/info \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"l2Book","coin":"xyz:GOLD"}' | jq '.levels'
+# → bid: $5378.0, ask: $5379.5, mid: $5378.75 ✅
+```
+
+Mid price działa. Dodaliśmy debug logi — okazało się, że bot faktycznie WIDZI xyz:GOLD, MA mid price, ale nigdy nie wchodzi w blok kopiowania. Dlaczego?
+
+Sprawdziliśmy pozycje na koncie:
+
+```bash
+curl -s -X POST https://api.hyperliquid.xyz/info \
+  -d '{"type":"clearinghouseState","user":"0x...","dex":"xyz"}' | jq '.assetPositions'
+# → xyz:GOLD: szi=0.1116, positionValue=$599.84, entryPx=$5373.66
+```
+
+Mamy pozycję! 6 fill'ów z 28 lutego — bot UDAŁ się skopiować GOLD, ale o tym zapomniał.
+
+### Root Cause — 3-krokowy desync
+
+```
+28.02, 15:37 UTC:
+  ┌─ Bot wykrywa: Generał ma xyz:GOLD LONG
+  ├─ calculateCopySize() → $500
+  ├─ placeOrder() wysyła 6 IOC orderów
+  ├─ Giełda: 6 fill'ów, łącznie 0.1116 oz GOLD ($600)  ✅
+  ├─ placeOrder() zwraca: false (IOC partial → SDK error)  ❌
+  └─ if (ok) { activeCopies['xyz:GOLD'] = ... }  // NIE WCHODZI
+      ↓
+  activeCopies['xyz:GOLD'] = undefined  // GHOST POSITION
+```
+
+Na kolejnych tickach:
+```
+  calculateCopySize():
+    maxAlloc = $500 (limit) - $600 (nasza pozycja) = -$100
+    → return 0
+    → copySize < 20 → continue (cicho skip)
+```
+
+Trzy niezależne mechanizmy zablokowały naprawę:
+
+| # | Mechanizm | Co robił | Dlaczego nie zadziałał |
+|---|-----------|----------|----------------------|
+| 1 | `placeOrder()` return | Miał zapisać activeCopy | IOC partial fill → `false` → skip |
+| 2 | `calculateCopySize()` | Miał ponownie otworzyć | Pozycja > limit → return 0 |
+| 3 | Baseline seeding | Miał wykryć na starcie | Uruchamia się TYLKO na pierwszym starcie z pustym stanem |
+
+To jest piękny przykład **Swiss Cheese Model** z inżynierii bezpieczeństwa — każda warstwa ma dziurę, i akurat wszystkie dziury się pokryły.
+
+### Fix — Position Reconciliation
+
+Dodaliśmy nową sekcję 3b w `processTick()`, zaraz po `fetchOurPositions()`:
+
+```typescript
+// 3b. Reconcile: jeśli trzymamy pozycję w kierunku Generała
+//     ale nie mamy wpisu w activeCopies — zarejestruj ją
+for (const [coin, ourPos] of Object.entries(ourPositions)) {
+  if (state.activeCopies[coin]) continue    // już śledzona
+  if (!generalPos[coin]) continue            // Generał nie ma
+  const gSide = generalPos[coin].side === 'LONG' ? 'buy' : 'sell'
+  const ourSide = ourPos.size > 0 ? 'buy' : 'sell'
+  if (gSide !== ourSide) continue            // opposite side = nie kopia
+
+  // Ghost position znaleziona — zarejestruj
+  state.activeCopies[coin] = {
+    side: ourSide,
+    entryTime: Date.now(),
+    generalEntry: generalPos[coin].entry_px,
+  }
+  log(`🔧 RECONCILE: ${coin} ${ourSide} $${ourPos.value.toFixed(0)}`)
+}
+```
+
+Wynik na żywo:
+```
+🔧 RECONCILE: xyz:GOLD buy $600 — registered as active copy (was missing from state)
+```
+
+activeCopies: 8 (baseline) → 9 (+ xyz:GOLD reconciled).
+
+### Dodatkowy bug — cloid z dwukropkiem
+
+1 marca o 07:08 bot próbował ponownie skopiować GOLD, ale stary kod miał:
+```typescript
+c: `copy_${coin}_${Date.now().toString(16)}`
+// → "copy_xyz:GOLD_19ca83a7409"
+//         ^^ DWUKROPEK w cloid!
+```
+
+Hyperliquid API odrzuciło — dwukropek nie jest dozwolony w custom order ID. Ten bug został naprawiony wcześniej (usunięcie pola `c`), ale zanim fix dotarł na serwer, bot już miał ghost position.
+
+### Analogia
+
+Wyobraź sobie, że wysłałeś przelew bankowy. Bank przetransferował pieniądze, ale potwierdzenie maila nie dotarło (spam filter zjadł). Twój budżet w Excelu mówi "pieniądze nadal na koncie", ale konto mówi "przelew wykonany".
+
+Co robisz? **Reconciliation** — porównujesz wyciąg bankowy z Excelem i poprawiasz rozbieżności. Dokładnie to robi sekcja 3b.
+
+### Lekcje
+
+1. **IOC fill ≠ SDK success** — Immediate-or-Cancel ordery na Hyperliquid mogą się częściowo wypełnić, ale SDK zwraca `false` (bo nie wypełniło się w 100%). Musisz OSOBNO sprawdzić czy pozycja faktycznie istnieje na koncie, nie ufaj tylko return value z `placeOrder()`.
+
+2. **State musi być reconciled, nie assumed** — Nigdy nie polegaj wyłącznie na "zapisałem to gdy się udało". Rzeczywistość (giełda) jest source of truth, nie twój state file. Periodyczny reconciliation to standard w finansach — banki robią to co noc.
+
+3. **Silent skip to cichobójca** — `if (copySize < 20) continue` nie logowało nic. Przez 3 dni bot cicho skipował GOLD na każdym ticku (co 30s = ~8,640 razy) bez śladu w logach. Gdyby było choćby jedno `log('SKIP: xyz:GOLD, size too small')`, znaleźlibyśmy problem w 5 minut zamiast 3 dni.
+
+4. **xyz dex to inna bestia** — `allMids` nie zawiera xyz: coinów (trzeba `l2Book`). xyz ordery używają izolowanego marginu. Asset indices zaczynają się od 110000. Każda "specjalność" to potencjalna dziura w logice.
+
+5. **Swiss Cheese Model** — Gdy 3 niezależne mechanizmy "powinny to złapać" i żaden nie złapał, potrzebujesz 4. mechanizmu: **reconciliation** — periodyczne porównanie reality vs model. To jest ostatnia linia obrony, i często jedyna która działa niezawodnie.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `scripts/general_copytrade.ts` | Sekcja 3b: position reconciliation (+16 linii) |
