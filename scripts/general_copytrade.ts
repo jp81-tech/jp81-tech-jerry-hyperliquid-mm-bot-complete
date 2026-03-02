@@ -417,6 +417,22 @@ async function processTick(
   // 3. Fetch our current positions
   const ourPositions = await fetchOurPositions(infoClient, walletAddress)
 
+  // 3b. Reconcile: if we have a position matching Generał but no activeCopy, register it
+  for (const [coin, ourPos] of Object.entries(ourPositions)) {
+    if (state.activeCopies[coin]) continue  // already tracked
+    if (!generalPos[coin]) continue  // Generał doesn't have this coin
+    const gSide = generalPos[coin].side === 'LONG' ? 'buy' : 'sell'
+    const ourSide = ourPos.size > 0 ? 'buy' : 'sell'
+    if (gSide !== ourSide) continue  // opposite side — not a copy
+    // We have a position aligned with Generał but no copy record — register it
+    state.activeCopies[coin] = {
+      side: ourSide,
+      entryTime: Date.now(),
+      generalEntry: generalPos[coin].entry_px,
+    }
+    log(`🔧 RECONCILE: ${coin} ${ourSide} $${ourPos.value.toFixed(0)} — registered as active copy (was missing from state)`, 'INFO')
+  }
+
   // 4. Determine what Generał has vs what we have
   const prevGeneralCoins = new Set(Object.keys(state.generalPositions))
   const currentGeneralCoins = new Set(Object.keys(generalPos))
