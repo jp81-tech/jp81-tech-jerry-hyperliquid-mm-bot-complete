@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-01
+- Data: 2026-03-02
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -160,6 +160,40 @@ PO:    kPEPE bids=8 asks=8, bidMult=1.21 askMult=1.04 — pełny market making
 **PM2 save:** Stan zapisany po zmianach.
 
 **Pliki:** `ecosystem.config.cjs` na serwerze (+1 linia: `DRY_RUN: "true"`)
+
+### 81. DRY_RUN safety — guard all LiveTrading casts (02.03)
+
+**Problem:** mm-follower (DRY_RUN=true) crashował z `TypeError` i `ReferenceError` na wielu code paths. W DRY_RUN mode `this.trading` jest `PaperTrading` (nie `LiveTrading`), ale ~25 miejsc w mm_hl.ts robiło `this.trading as LiveTrading` i odwoływało się do properties które nie istnieją na PaperTrading: `l2BookCache`, `shadowTrading`, `binanceAnchor`, `vpinAnalyzers`, `adverseTracker`, `closePositionForPair()`.
+
+**Root cause:** Niezabezpieczone type assertions. TypeScript `as LiveTrading` nie zmienia runtime behavior — casting PaperTrading na LiveTrading kompiluje się ale crashuje przy dostępie do brakujących properties.
+
+**11 fixów w `mm_hl.ts`:**
+
+| # | Lokalizacja | Fix | Co crashowało |
+|---|-------------|-----|---------------|
+| 1 | `analyzeOrderBook()` | `instanceof` guard, return neutrals | `lt.l2BookCache.get(pair)` |
+| 2 | Binance anchor block | nullable liveTrading + optional chaining | `liveTrading.binanceAnchor` |
+| 3 | Shadow contrarian | replaced removed `lt2` var, `instanceof` guard | `lt2.shadowTrading` (undefined) |
+| 4 | Nansen close signal | `instanceof` guard w condition | `this.trading.closePositionForPair()` |
+| 5-8 | closePositionForPair calls | `instanceof` guard wewnątrz try | squeeze, stop_loss, sm_tp, anaconda_sl |
+| 9 | Status log block | `instanceof` guard na cały ToxicFlow log | `lt.binanceAnchor`, `lt.vpinAnalyzers` |
+| 10 | VPIN/Adverse | optional chaining `?.` | `liveTrading.vpinAnalyzers`, `.adverseTracker` |
+| 11 | `fetchOpenOrdersRaw` | duplikat metody na `HyperliquidMMBot` | metoda była tylko na `LiveTrading` class |
+
+**Fix #11 detail:** `cancelAllOnBlockedPairs()` jest na `HyperliquidMMBot` class (linia 4262) i woła `this.fetchOpenOrdersRaw()`. Ale `fetchOpenOrdersRaw` był zdefiniowany TYLKO na `LiveTrading` class (linia 2905) — inny class! Dodano identyczną kopię metody na `HyperliquidMMBot` (linia 4248).
+
+**Dodatkowy fix:** `scripts/general_copytrade.ts` — usunięto nieprawidłowe pole `c` z cloid (Hyperliquid API odrzucał format `c-0xABC-123`, prawidłowy: `0xABC-123`).
+
+**Wynik po deploy:**
+```
+mm-pure:     ZERO TypeError/ReferenceError ✅
+mm-follower: ZERO TypeError/ReferenceError ✅ (wcześniej 3+ różne crashe)
+```
+
+**Lekcja:** `--update-env` wymagane przy `pm2 restart` gdy plik źródłowy zmienił się — bez tego ESM loader może cacheować starą wersję.
+
+**Pliki:** `src/mm_hl.ts` (+109/-68), `scripts/general_copytrade.ts` (+3/-1)
+**Commit:** `33204b6`
 
 ---
 
@@ -3698,3 +3732,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
 - **kPEPE risk pipeline (27.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.
+- **DRY_RUN instanceof guard pattern (02.03)**: W mm_hl.ts, KAŻDE użycie `this.trading as LiveTrading` lub dostęp do LiveTrading-only properties (l2BookCache, shadowTrading, binanceAnchor, vpinAnalyzers, adverseTracker, closePositionForPair) MUSI być chronione `if (this.trading instanceof LiveTrading)` lub nullable pattern: `const lt = this.trading instanceof LiveTrading ? this.trading : null; if (lt?.property)`. PaperTrading NIE ma tych properties → TypeError w DRY_RUN. Dwie różne klasy w pliku: `LiveTrading` (linia ~1479) i `HyperliquidMMBot` (linia ~3595) — metody na jednej NIE są dostępne na drugiej via `this`.
+- **PM2 --update-env (02.03)**: Przy `pm2 restart` po zmianie pliku źródłowego, ZAWSZE dodawaj `--update-env`. Bez tego ESM loader (`--experimental-loader ts-node/esm`) może cacheować starą wersję modułu. Symptom: nowa metoda "is not a function" mimo że grep na serwerze potwierdza jej istnienie w pliku.
