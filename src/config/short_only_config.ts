@@ -311,7 +311,12 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
-  'kPEPE': { pumpThresholdPct: 3.0, atrThresholdMult: 2.0 },  // Memecoin: wider ATR mult (higher normal vol)
+  'kPEPE': {
+    pumpThresholdPct: 3.0,       // Memecoin: wider pump threshold (higher normal vol)
+    atrThresholdMult: 2.0,       // 2× ATR for pump/dump detection
+    autoSkewShiftBps: 1.5,       // Gentle skew — hold positions, don't rush to close (30% skew = 4.5bps shift)
+    autoSkewMaxShiftBps: 10.0,   // Conservative cap — even at 80% skew, max 10bps shift
+  },
 }
 
 export function getMomentumGuardConfig(token: string): MomentumGuardConfig {
@@ -360,10 +365,10 @@ export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
 
   atrScalingEnabled: true,
   baseL1Bps: 18,
-  lowVolAtrPctThreshold: 0.30,   // ATR% < 0.30% = low vol (kPEPE normally 0.3-0.8%)
-  highVolAtrPctThreshold: 0.80,  // ATR% > 0.80% = high vol
-  lowVolL1Bps: 14,               // Widen L1 to 28bps in choppy market
-  highVolL1Bps: 14,              // Tighten L1 to 14bps in trending market
+  lowVolAtrPctThreshold: 0.30,   // ATR% < 0.30% = low vol (choppy)
+  highVolAtrPctThreshold: 0.80,  // ATR% > 0.80% = high vol (big swings)
+  lowVolL1Bps: 20,               // Low vol: moderate spread (fee protection)
+  highVolL1Bps: 18,              // High vol: base spread (was 14 = too tight for memecoins)
   l2Ratio: 1.67,                 // 30/18
   l3Ratio: 2.50,                 // 45/18
   l4Ratio: 3.61,                 // 65/18
@@ -376,7 +381,11 @@ export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
 
 export const DYNAMIC_SPREAD_OVERRIDES: Record<string, Partial<DynamicSpreadConfig>> = {
   'kPEPE': {
-    // kPEPE defaults are already tuned — no overrides needed yet
+    // Memecoin with 5-10% hourly swings needs WIDER spread in high vol
+    // to avoid adverse selection (filling on every micro-move)
+    lowVolL1Bps: 22,              // kPEPE even in low vol = wider than majors
+    highVolL1Bps: 32,             // In high vol WIDEN (not tighten!) for memecoins
+    highVolAtrPctThreshold: 1.20, // kPEPE "high vol" threshold is higher (normally more volatile)
   },
 }
 

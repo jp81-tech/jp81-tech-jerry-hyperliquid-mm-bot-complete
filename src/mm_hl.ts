@@ -344,10 +344,10 @@ function getKpepeGridLayers(atrPct: number): GridLayer[] {
   // Interpolate L1 offset based on ATR%
   let l1Bps: number
   if (atrPct <= cfg.lowVolAtrPctThreshold) {
-    // Low vol: widen to maximum
+    // Low vol regime
     l1Bps = cfg.lowVolL1Bps
   } else if (atrPct >= cfg.highVolAtrPctThreshold) {
-    // High vol: tighten to minimum
+    // High vol regime (for kPEPE: WIDENS; for majors: tightens)
     l1Bps = cfg.highVolL1Bps
   } else {
     // Linear interpolation between low and high vol
@@ -355,8 +355,10 @@ function getKpepeGridLayers(atrPct: number): GridLayer[] {
     l1Bps = cfg.lowVolL1Bps + t * (cfg.highVolL1Bps - cfg.lowVolL1Bps)
   }
 
-  // Floor: never below highVolL1Bps (14), never above lowVolL1Bps (28)
-  l1Bps = Math.max(cfg.highVolL1Bps, Math.min(cfg.lowVolL1Bps, Math.round(l1Bps)))
+  // Clamp between the two configured values (works regardless of which is larger)
+  const minL1 = Math.min(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+  const maxL1 = Math.max(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+  l1Bps = Math.max(minL1, Math.min(maxL1, Math.round(l1Bps)))
 
   return [
     { level: 1, offsetBps: l1Bps, capitalPct: 12, ordersPerSide: 2, isActive: true },
@@ -8215,7 +8217,9 @@ class HyperliquidMMBot {
             mgProxSignal = -0.4
           }
 
-          const momentumScore = momentumNorm * 0.50 + mgRsiSignal * 0.30 + mgProxSignal * 0.20
+          // Weights: proximity (S/R) is most important for ranging memecoins
+          // Momentum lags in choppy markets → reduced weight
+          const momentumScore = momentumNorm * 0.35 + mgRsiSignal * 0.30 + mgProxSignal * 0.35
 
           // Position-aware guard: don't block position-CLOSING orders
           // SHORT position (actualSkew < -0.10) + pump (score > 0) → bids CLOSE the short → don't reduce bids
@@ -8378,8 +8382,8 @@ class HyperliquidMMBot {
 
         if (dynSpreadCfg.enabled && dynSpreadCfg.atrScalingEnabled && atrPct > 0 && this.tickCount % 20 === 0) {
           const l1 = dynamicLayers[0].offsetBps
-          const regime = atrPct < dynSpreadCfg.lowVolAtrPctThreshold ? 'LOW_VOL(widen)'
-            : atrPct > dynSpreadCfg.highVolAtrPctThreshold ? 'HIGH_VOL(tight)' : 'NORMAL'
+          const regime = atrPct < dynSpreadCfg.lowVolAtrPctThreshold ? 'LOW_VOL'
+            : atrPct > dynSpreadCfg.highVolAtrPctThreshold ? 'HIGH_VOL' : 'NORMAL'
           console.log(
             `📐 [DYNAMIC_SPREAD] ${pair}: ATR=${atrPct.toFixed(3)}% → L1=${l1}bps L2=${dynamicLayers[1].offsetBps}bps ` +
             `L3=${dynamicLayers[2].offsetBps}bps L4=${dynamicLayers[3].offsetBps}bps | ${regime}`

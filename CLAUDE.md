@@ -292,6 +292,74 @@ Whitelist (ALLOWED) ma priorytet nad blocklist (BLOCKED). Nowe coiny Generała s
 
 **Pliki:** `scripts/general_copytrade.ts` (+12), `ecosystem.config.cjs` (+1 linia COPY_ALLOWED_COINS)
 
+### 87. kPEPE timing fix — Dynamic Spread widen + MG proximity boost + Auto-Skew speed (02.03)
+
+**Problem:** kPEPE bot łapał shorty za wcześnie — cena miała duże swingi 5-10% w obie strony na 1h, a bot z L1=14bps (round-trip 28bps) łapał adverse selection na każdym micro-ruchu. Trzy niezależne problemy:
+
+1. **Dynamic Spread disabled**: `lowVolL1Bps=14` i `highVolL1Bps=14` (sekcja 79 zmieniła lowVol 28→14) → L1 zawsze 14bps niezależnie od ATR. Memecoin z ATR 1.8% miał spread jak BTC.
+2. **Momentum Guard wagi**: momentum (1h change) miał 50% wagi, ale laguje w choppy markets. Proximity S/R miał tylko 20% — bot nie reagował na bliskość resistance/support.
+3. **Auto-Skew za wolny**: 2.0 bps per 10% skew, max 15bps — przy skew -43% bot ledwo przesuwał grid.
+
+**Fix 1 — Dynamic Spread widen dla kPEPE (`short_only_config.ts`):**
+```typescript
+// Defaults changed:
+lowVolL1Bps: 20,   // was 14
+highVolL1Bps: 18,  // was 14
+
+// kPEPE-specific override:
+'kPEPE': {
+  lowVolL1Bps: 22,              // kPEPE even in low vol = wider than majors
+  highVolL1Bps: 32,             // In high vol WIDEN for memecoins (not tighten!)
+  highVolAtrPctThreshold: 1.20, // kPEPE "high vol" threshold is higher
+},
+```
+kPEPE L1 range: 22-32bps (was flat 14bps). Round-trip 44-64bps (was 28bps).
+
+**Fix 2 — Momentum Guard signal weights (`mm_hl.ts` line 8218):**
+```typescript
+// PRZED: momentum 50% + RSI 30% + proximity 20%
+// PO:    momentum 35% + RSI 30% + proximity 35%
+const momentumScore = momentumNorm * 0.35 + mgRsiSignal * 0.30 + mgProxSignal * 0.35
+```
+Proximity S/R teraz ma równą wagę z momentum — bot widzi resistance/support tak samo jak kierunek ruchu.
+
+**Fix 3 — Auto-Skew GENTLER dla kPEPE (`short_only_config.ts`):**
+```typescript
+'kPEPE': {
+  autoSkewShiftBps: 1.5,       // was 2.0 — GENTLER, hold positions, don't rush to close
+  autoSkewMaxShiftBps: 10.0,   // was 15.0 — conservative cap, even at 80% skew max 10bps
+},
+```
+User feedback: "nie od razu zamykał pozycje" — bot ma trzymać shorta, nie agresywnie kupować do zamknięcia.
+
+**Fix 4 — Clamp logic (`mm_hl.ts` line ~358-361):**
+```typescript
+// PRZED: Math.max(cfg.highVolL1Bps, Math.min(cfg.lowVolL1Bps, l1Bps))
+// Zakładało highVol < lowVol — dla kPEPE (highVol=32 > lowVol=22) clamp był odwrócony
+// PO:
+const minL1 = Math.min(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+const maxL1 = Math.max(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+l1Bps = Math.max(minL1, Math.min(maxL1, Math.round(l1Bps)))
+```
+
+**Wynik live po deploy:**
+```
+📐 [DYNAMIC_SPREAD] kPEPE: ATR=1.816% → L1=32bps L2=53bps L3=80bps L4=116bps | HIGH_VOL
+📈 [MOMENTUM_GUARD] kPEPE: score=0.28 (mom=0.00 rsi=0.00 prox=0.80) → bid×1.09 ask×0.35 | S/R(1h): R=$0.003640 S=$0.003382
+⚖️ [AUTO_SKEW] kPEPE: skew=-43.1% → mid shift +15.08bps UP | real=0.003593 skewed=0.003598
+```
+
+| Metryka | Przed | Po |
+|---------|-------|----|
+| L1 spread | 14bps (flat) | **22-32bps** (ATR-based) |
+| Round-trip | 28bps | **44-64bps** |
+| Proximity weight | 20% | **35%** |
+| Momentum weight | 50% | **35%** |
+| Auto-Skew speed | 2.0 bps/10% | **1.5 bps/10%** (gentler) |
+| Auto-Skew max | 15.0 bps | **10.0 bps** (conservative) |
+
+**Pliki:** `src/config/short_only_config.ts` (+14/-2), `src/mm_hl.ts` (+6/-4)
+
 ### 84. copy-general SDK timeout fix — infoClient hang replaced with axios (02.03)
 
 **Problem:** copy-general bot zawieszał się po "Monitoring started" — PM2 pokazywał "online" ale bot nie tickował. Cisza w logach przez 60+ minut.
@@ -3895,7 +3963,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **XGBoost label key bug (26.02)**: Collector pisze `label_1h`, trainer szukał `label_h1` → "0 labeled" mimo 371 istniejących labels. Fix: `LABEL_KEY_MAP` w `xgboost_train.py` mapuje oba formaty. MIN_SAMPLES obniżone: h1-h12=50, w1=30, m1=20. scikit-learn wymagany przez XGBoost 3.2.0. 24 modeli wytrenowanych, overfitting (train 98% vs test 24%) mitigated przez 10% effective blend weight.
 - **XGBoost data collection**: Co 15 min (cron), **65 features** per sample (11 tech + 11 nansen + 8 extra + 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta_ctx + 3 derived + 3 btc_pred, od 28.02). Dataset: `/tmp/xgboost_dataset_{TOKEN}.jsonl`. Training: niedziele 04:00 UTC. Labels: h1 po 1h, h4 po 4h, h12 po 12h (w1/m1 usunięte 28.02 — temporal shift). `LABEL_BACKFILL_ROWS=500`. Tokeny: BTC, ETH, SOL, HYPE, ZEC, XRP, LIT, FARTCOIN, **kPEPE** (dodany 26.02). Backward compat: trainer i predictor akceptują 30, 45, 49, 53, 62, lub 65 features (padują zerami). BTC prediction proxy [62-64]: btc_pred_direction (-1/0/+1), btc_pred_change (tanh), btc_pred_confidence (0-1) — z prediction-api localhost:8090 (+1 HTTP call/run, <50ms). Dla BTC = [0,0,0]. ~31 API calls per collect run.
 - **kPEPE risk pipeline (26.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → **Prediction Bias (h4, ±15%)** → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Auto-Skew (mid-price shift)** → generateGridOrdersCustom → Layer removal → Skew-based removal → Hedge trigger.
-- **Auto-Skew (26.02)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±15bps. Config: `autoSkewEnabled=true`, `autoSkewShiftBps=2.0` (2bps per 10% skew), `autoSkewMaxShiftBps=15.0`. Przykład: skew=-30% → +6bps UP. Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
+- **Auto-Skew (26.02, updated 02.03)**: Przesunięcie midPrice na podstawie inventory skew. SHORT heavy → mid UP (bidy bliżej rynku, zamykanie szybsze), LONG heavy → mid DOWN. Formuła: `shiftBps = -(actualSkew × 10 × autoSkewShiftBps)`, capped ±maxShiftBps. Config defaults: `autoSkewShiftBps=2.0`, `autoSkewMaxShiftBps=15.0`. **kPEPE override: `1.5 bps/10%`, max `10bps`** — user prefers holding positions, not aggressive closing. Przykład: kPEPE skew=-43% → +6.45bps (was +15bps with old 3.5/22 settings). Komplementarne z `getInventoryAdjustment()` (offset-based) i Enhanced Skew (size-based). Placement: po Inventory SL, przed `generateGridOrdersCustom`. Modyfikuje `midPrice` → cała siatka (L1-L4) przesuwa się jednocześnie. Log: `⚖️ [AUTO_SKEW]` co 20 ticków.
 - **frankfrankbank.eth (25.02)**: `0x6f7d75c18e8ca7f486eb4d2690abf7b329087062`, CONVICTION 0.80, MANUAL trader. ETH SHORT $9.3M (entry $3,429, +$3.78M, 25x lev), BTC SHORT $102K (40x lev). ENS: frankfrankbank.eth. Discovered from Nansen SM inflow audit. Nansen label "Smart HL Perps Trader".
 - **Prediction Bias (26-27.02)**: h4 predykcja z prediction-api (port 8090) jako soft ±15% bias na bid/ask size. `fetchPrediction()` co 5 min, `getPredictionBias()` zwraca bidMult/askMult. Confidence >= 50%, |change| >= 0.3%, staleFactor 0.5 po 15min. **Działa na WSZYSTKICH tokenach** (kPEPE w if-branch, reszta w else-branch `executeMultiLayerMM`). kPEPE: po Toxicity+TimeZone, PRZED Momentum Guard. Reszta: PRZED `generateGridOrders()`. Multiplicative z innymi modułami. Log: `📊 [PREDICTION_BIAS]` co 20 ticków (~20 min). **WAŻNE:** mm-follower biegnie z `src/` (ts-node), nie z `dist/` — zmiany muszą być SCP'd do `src/mm_hl.ts` na serwerze.
 - **Multipliers = ROZMIAR, nie cena**: `bid×0.81` znaczy bidy mają 81% normalnego rozmiaru ($81 zamiast $100/level). Ceny orderów (L1=18bps, L2=30bps od mid) się NIE zmieniają. Każdy moduł (Toxicity, TimeZone, Prediction, MG) mnoży `sizeMultipliers.bid`/`.ask` — wynik końcowy to iloczyn wszystkich. Gdy moduły się zgadzają (np. oba BEARISH) → silna redukcja/wzmocnienie. Gdy się nie zgadzają → wzajemna neutralizacja.

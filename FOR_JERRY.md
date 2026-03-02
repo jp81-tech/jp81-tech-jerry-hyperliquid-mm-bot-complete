@@ -6970,3 +6970,97 @@ dotenvConfig()  // Załaduj .env zanim sprawdzisz COPY_PRIVATE_KEY
 |------|--------|
 | `scripts/general_copytrade.ts` | `allowedCoins` whitelist, dotenv import (+12 linii) |
 | `ecosystem.config.cjs` | `COPY_ALLOWED_COINS: "LIT,xyz:GOLD"`, usunięto mm-follower (-28 linii) |
+
+---
+
+## Rozdział 34: Nie Shortuj Na Oślep — Jak Spread i Timing Decydują o Zysku (02.03.2026)
+
+### Problem
+
+kPEPE (memecoin, 5x leverage, ATR ~1.8%) miał potężne swingi 5-10% w obie strony na godzinnych świecach. Bot łapał shorty za wcześnie — zamiast czekać na opór, wchodził na każdym micro-ruchu.
+
+Efekt? Adverse selection. Cena ruszała się 20-30bps w ciągu minuty, a bot miał spread 14bps (round-trip 28bps). Każdy ruch cenowy > 28bps oznaczał gwarantowaną stratę na round-tripie.
+
+### Analogia: Rybak z za krótką siecią
+
+Wyobraź sobie rybaka który łowi na rzece z rwącym prądem. Sieć (spread) musi być szersza niż prąd (volatility) — inaczej ryby (profitable trades) przepływają przez nią, a rybak łapie tylko śmieci (toxic flow).
+
+Nasz bot miał siatkę 14bps szeroką na rzece z prądem 180bps (ATR 1.8%). Czyli **siatka 13x za wąska**. Każda "ryba" (ruch cenowy) przepływała przez nią i zostawiała nam stratę.
+
+### Trzy niezależne fixy
+
+#### 1. Dynamic Spread — szersza siatka dla memecoina
+
+```
+PRZED: lowVolL1Bps=14, highVolL1Bps=14 → L1 ZAWSZE 14bps (flat!)
+PO:    kPEPE lowVol=22bps, highVol=32bps → L1 skaluje się z ATR
+
+Round-trip PRZED: 28bps (za ciasno dla 180bps ATR)
+Round-trip PO:    44-64bps (wystarczająco szerokie)
+```
+
+**Bug odkryty:** Sekcja 79 (01.03) zmieniła `lowVolL1Bps` z 28 na 14, ale `highVolL1Bps` też było 14. Oba identyczne = Dynamic Spread **wyłączony** — ATR nie miał żadnego wpływu na szerokość grida.
+
+**Dodatkowy bug:** Clamp logic zakładał `highVol < lowVol` (ścieśniaj w high vol). Dla kPEPE jest odwrotnie — w high vol chcesz POSZERZYĆ (32bps > 22bps). Stary `Math.max(high, Math.min(low, x))` clampował w złą stronę.
+
+#### 2. Momentum Guard — słuchaj resistance, nie momentum
+
+Momentum Guard ma trzy sygnały, każdy z wagą:
+
+| Sygnał | Stara waga | Nowa waga | Dlaczego zmiana |
+|--------|-----------|-----------|-----------------|
+| Momentum (1h change) | **50%** | **35%** | Laguje w choppy markets — cena już odbiła a 1h change nadal mówi "dump" |
+| RSI | 30% | 30% | OK |
+| Proximity S/R | **20%** | **35%** | Najbardziej wartościowy! Mówi "cena jest 0.3% od resistance — nie shortuj tu" |
+
+Momentum laguje bo patrzy na **przeszłość** (zmiana za ostatnią godzinę). Proximity patrzy na **kontekst** (gdzie jesteś względem kluczowych poziomów). Dla memecoina w ranging market, proximity jest ważniejszy.
+
+#### 3. Auto-Skew — GENTLER, nie agresywniej
+
+Pierwsza wersja fixu zwiększyła Auto-Skew z 2.0 do 3.5 bps/10% skew. Przy -43% skew dawało +15bps shift — agresywne kupowanie do zamknięcia shorta.
+
+User feedback: *"nie od razu zamykał pozycje"*. Bot ma TRZYMAĆ shorta, nie próbować go zamknąć. Zmieniono na jeszcze bardziej konserwatywne niż oryginał:
+
+```
+ORYGINAŁ:    2.0 bps/10%, max 15bps → przy -43% = +8.6bps shift
+AGRESYWNY:   3.5 bps/10%, max 22bps → przy -43% = +15.1bps shift  ← ZA DUŻO
+FINALNY:     1.5 bps/10%, max 10bps → przy -43% = +6.5bps shift   ← GENTLE
+```
+
+### Lekcja: Trzy warstwy ochrony timingu
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. DYNAMIC SPREAD — "Jak daleko od ceny składać ordery?"   │
+│     L1=32bps w high vol (nie 14bps!)                        │
+│     → Mniej fills, ale każdy fill ma więcej buforu           │
+├─────────────────────────────────────────────────────────────┤
+│  2. MOMENTUM GUARD — "Czy to dobry moment?"                 │
+│     Proximity 35% → blisko resistance? Redukuj asks         │
+│     Momentum 35% → cena spada? Redukuj bidy                 │
+├─────────────────────────────────────────────────────────────┤
+│  3. AUTO-SKEW — "Mam pozycję, co teraz?"                    │
+│     Gentle shift 1.5bps/10% → trzymaj, nie panikuj          │
+│     Max 10bps → nawet przy -80% skew, delikatnie             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Klucz: Clamp direction matters
+
+Standardowe instrumenty (BTC, ETH): w high vol → ŚCIEŚNIJ spread (łap więcej micro-moves).
+Memecoiny (kPEPE): w high vol → POSZERZ spread (chroń się przed adverse selection).
+
+To wymaga odwróconej logiki clampa:
+```typescript
+// Działa niezależnie od kierunku (high > low LUB low > high)
+const minL1 = Math.min(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+const maxL1 = Math.max(cfg.lowVolL1Bps, cfg.highVolL1Bps)
+l1Bps = Math.max(minL1, Math.min(maxL1, Math.round(l1Bps)))
+```
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | kPEPE DynamicSpread override (22/32bps), Auto-Skew gentler (1.5/10bps) |
+| `src/mm_hl.ts` | Clamp fix (direction-agnostic), MG weights (35/30/35) |
