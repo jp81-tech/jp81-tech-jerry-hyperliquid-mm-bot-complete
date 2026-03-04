@@ -29,8 +29,6 @@ import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bi
 import {
   alphaEngineIntegration,
   getAlphaEngineBiasCache,
-  getAlphaSizeMultipliers,
-  shouldBypassDelay,
   type TradingPermissions,
   type TradingCommand,
 } from './core/AlphaEngineIntegration.js'
@@ -7238,30 +7236,18 @@ class HyperliquidMMBot {
 
     const actualSkew = inventorySkew; // Capture real inventory skew BEFORE vision injection
 
-    // 🔧 FIX 2026-01-23: HOLD_FOR_TP - Override inventorySkew to force grid to place ASKs
     // 💎 HOLD_FOR_TP: Override skew to allocate capital to SM-aligned side
-    if (!IS_PURE_MM_BOT && shouldHoldForTp(pair, 'short') && actualSkew < -0.1) {
+    if (shouldHoldForTp(pair, 'short') && actualSkew < -0.1) {
       inventorySkew = 0.3  // Pretend long → grid places more ASKs (add to short)
       console.log(`💎 [HOLD_FOR_TP SKEW] ${pair}: Override inventorySkew from ${(actualSkew*100).toFixed(0)}% to +30% for ASK allocation`)
-    } else if (!IS_PURE_MM_BOT && shouldHoldForTp(pair, 'long') && actualSkew > 0.1) {
+    } else if (shouldHoldForTp(pair, 'long') && actualSkew > 0.1) {
       inventorySkew = -0.3  // Pretend short → grid places more BIDs (add to long)
       console.log(`💎 [HOLD_FOR_TP SKEW] ${pair}: Override inventorySkew from ${(actualSkew*100).toFixed(0)}% to -30% for BID allocation`)
     }
 
-    // 🧠 SignalEngine PURE_MM check for inventory deviation bypass
+    // 🧠 SignalEngine PURE_MM check (used by Vision Skew, MIN_PROFIT, risk checks)
     const signalEngineResultInv = getSignalEngineForPair(pair);
     const isSignalEnginePureMmInv = signalEngineResultInv?.signalEngineOverride && signalEngineResultInv?.mode === MmMode.PURE_MM;
-
-    const inventoryDeviation = actualSkew - targetInventoryBias
-    if (!isSignalEnginePureMmInv && inventoryDeviation > 0.05) {
-      sizeMultipliers.bid *= 0.7
-      sizeMultipliers.ask *= 1.2
-    } else if (!isSignalEnginePureMmInv && inventoryDeviation < -0.05) {
-      sizeMultipliers.bid *= 1.2
-      sizeMultipliers.ask *= 0.7
-    } else if (isSignalEnginePureMmInv) {
-      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → inventory deviation adjustment bypassed`)
-    }
 
     // 🐸 kPEPE ENHANCED INVENTORY SKEW — aggressive rebalancing via size multipliers
     // Scales 0→max over 10-40% inventory imbalance (much stronger than generic ±10bps)
@@ -7292,31 +7278,6 @@ class HyperliquidMMBot {
     const askWasZero = sizeMultipliers.ask === 0
     sizeMultipliers.bid = bidWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.bid))
     sizeMultipliers.ask = askWasZero ? 0 : Math.min(2.5, Math.max(0.25, sizeMultipliers.ask))
-
-    // 🚀 AlphaEngine Size Multipliers - Apply real-time Smart Money signals
-    // Only apply if AlphaEngine is running and has fresh data
-    // 🧠 Skip for SignalEngine PURE_MM mode - keep multipliers at 1.0
-    if (alphaEngineIntegration.getIsRunning() && !alphaEngineIntegration.isDataStale() && !isSignalEnginePureMmInv) {
-      const alphaMultipliers = getAlphaSizeMultipliers(symbol)
-      // AlphaEngine provides 0-1 multipliers, combine with existing multipliers
-      const prevBid = sizeMultipliers.bid
-      const prevAsk = sizeMultipliers.ask
-      sizeMultipliers.bid *= alphaMultipliers.bid
-      sizeMultipliers.ask *= alphaMultipliers.ask
-
-      // Check for bypassDelay flag (whale sequence detected)
-      const bypass = shouldBypassDelay(symbol)
-      if (bypass) {
-        console.log(`🔔 [ALPHA] ${pair} bypassDelay active - fast execution mode`)
-      }
-
-      // Log significant changes
-      if (Math.abs(prevBid - sizeMultipliers.bid) > 0.1 || Math.abs(prevAsk - sizeMultipliers.ask) > 0.1) {
-        console.log(`🚀 [ALPHA] ${pair} size: bid×${prevBid.toFixed(2)}→${sizeMultipliers.bid.toFixed(2)} ask×${prevAsk.toFixed(2)}→${sizeMultipliers.ask.toFixed(2)}`)
-      }
-    } else if (isSignalEnginePureMmInv && alphaEngineIntegration.getIsRunning()) {
-      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → AlphaEngine multipliers bypassed (kept at bid×1.00 ask×1.00)`)
-    }
 
     // 👁️ MarketVision Skew Injection
     const visionSkew = this.marketVision.getSizeSkew(pair);
@@ -7794,52 +7755,8 @@ class HyperliquidMMBot {
       }
     }
 
-    // 🛑 FOLLOW SM DIRECTION: Block counter-SM side, hold aligned position for TP
-    // Bot autonomously decides SHORT or LONG based on SM data
-    const signalEngineResultFso = getSignalEngineForPair(pair);
-    const isSignalEnginePureMmFso = signalEngineResultFso?.signalEngineOverride && signalEngineResultFso?.mode === MmMode.PURE_MM;
+    // SM direction (used by Pump Shield and other downstream blocks)
     const smDir = getSmDirection(pair);
-
-    if (smDir && !isSignalEnginePureMmFso) {
-      const hasAlignedPosition = smDir === 'SHORT' ? actualSkew < -0.05 : actualSkew > 0.05;
-      console.log(`[DEBUG SM] ${pair}: smDir=${smDir} actualSkew=${(actualSkew*100).toFixed(1)}% aligned=${hasAlignedPosition} pureMm=${isSignalEnginePureMmFso}`);
-
-      if (smDir === 'SHORT') {
-        if (hasAlignedPosition) {
-          // 💎 HOLD SHORT for TP - block longs
-          permissions.allowLongs = false;
-          permissions.allowShorts = true;
-          if (permissions.reason) permissions.reason += ' | ';
-          permissions.reason += `${pair}_HOLD_SHORT_FOR_TP`;
-          this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding SHORT ${(actualSkew * 100).toFixed(0)}% for TP. BIDs BLOCKED.`);
-        } else {
-          // Force SHORT only - no position yet
-          permissions.allowLongs = false;
-          permissions.allowShorts = true;
-          if (permissions.reason) permissions.reason += ' | ';
-          permissions.reason += `${pair}_FOLLOW_SM_SHORT`;
-          this.notifier.info(`[FOLLOW_SM_SHORT] ${pair}: ASK-only grid, BIDs blocked.`);
-        }
-      } else { // LONG
-        if (hasAlignedPosition) {
-          // 💎 HOLD LONG for TP - block shorts
-          permissions.allowLongs = true;
-          permissions.allowShorts = false;
-          if (permissions.reason) permissions.reason += ' | ';
-          permissions.reason += `${pair}_HOLD_LONG_FOR_TP`;
-          this.notifier.info(`💎 [HOLD_FOR_TP] ${pair}: Holding LONG ${(actualSkew * 100).toFixed(0)}% for TP. ASKs BLOCKED.`);
-        } else {
-          // Force LONG only - no position yet
-          permissions.allowLongs = true;
-          permissions.allowShorts = false;
-          if (permissions.reason) permissions.reason += ' | ';
-          permissions.reason += `${pair}_FOLLOW_SM_LONG`;
-          this.notifier.info(`[FOLLOW_SM_LONG] ${pair}: BID-only grid, ASKs blocked.`);
-        }
-      }
-    } else if (smDir && isSignalEnginePureMmFso) {
-      console.log(`🧠 [SIGNAL_ENGINE] ${pair}: PURE_MM mode → SM direction bypassed, both sides enabled`);
-    }
 
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
     // This is EMERGENCY priority and should bypass all other regime restrictions
@@ -7962,7 +7879,7 @@ class HyperliquidMMBot {
       const cooldownLeft = this.pumpShieldCooldowns.get(pair) || 0
 
       // SM check: only activate when SM direction is SHORT with sufficient confidence
-      const smConf = (signalEngineResultFso?.convictionScore ?? 0) * 100
+      const smConf = (signalEngineResultInv?.convictionScore ?? 0) * 100
       const smIsBearish = smDir === 'SHORT' && smConf >= pumpShieldConfig.smMinConfidence
 
       // Also activate for any pair with SHORT position (protect existing shorts)
@@ -8122,8 +8039,8 @@ class HyperliquidMMBot {
           let guardScore = fibProximity * 0.50 + rsiScore * 0.25 + drawdownScore * 0.25
 
           // --- SM Override ---
-          const smConf = (signalEngineResultFso?.convictionScore ?? 0) * 100
-          const smIsShort = signalEngineResultFso?.mode === MmMode.FOLLOW_SM_SHORT
+          const smConf = (signalEngineResultInv?.convictionScore ?? 0) * 100
+          const smIsShort = signalEngineResultInv?.mode === MmMode.FOLLOW_SM_SHORT
 
           if (smIsShort && smConf >= fibConfig.smOverrideConfidence) {
             if (guardScore >= 0.3) {
