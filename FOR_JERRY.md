@@ -39,6 +39,7 @@
 31. [XGBoost Backfiller — 180 dni historii w 5 minut](#xgboost-backfiller--180-dni-historii-w-5-minut)
 32. [DRY_RUN Safety — instanceof guard pattern](#dry_run-safety--instanceof-guard-pattern)
 33. [S/R Mean-Reversion Cycle — pelny cykl kupuj dol, sprzedaj gore](#sr-mean-reversion-cycle--pelny-cykl-kupuj-dol-sprzedaj-gore)
+34. [Inventory-Aware MG Override — gdy bot utknal i nie moze sie ruszyc](#inventory-aware-mg-override--gdy-bot-utknal-i-nie-moze-sie-ruszyc)
 
 ---
 
@@ -7332,3 +7333,149 @@ Breakout TP tez jest complementary z MG — oba chca tego samego (close profitab
 |------|--------|
 | `src/config/short_only_config.ts` | 7 nowych pol: srAccumulationEnabled, srAccumBounceBoost, srAccumCounterReduce, srAccumSpreadWiden, srBreakoutTpEnabled, srBreakoutTpScoreThreshold, srBreakoutTpClosingBoost |
 | `src/mm_hl.ts` | ~62 linii: S/R Accumulation + Breakout TP bloki po S/R Reduction, przed Dynamic TP |
+
+---
+
+## Inventory-Aware MG Override — gdy bot utknal i nie moze sie ruszyc
+
+### Problem: 8 godzin ciszy
+
+Wyobraz sobie taka sytuacje: bot ma SHORT na kPEPE (skew -38%), cena zaczyna rosnac. Momentum Guard widzi "pump" i mysli: "zmniejsz bidy, nie kupuj na szczytach!". Logiczne, prawda?
+
+Ale jest haczyk. **Bot potrzebuje bidow zeby ZAMKNAC shorta.** MG nie wie o pozycji bota — widzi tylko kierunek rynku. Efekt:
+
+```
+MG: "Pump! Zmniejsz bidy!" → bid×0.78
+Bot: "Ale ja mam SHORT -38% i potrzebuje bidow zeby sie zamknac..."
+MG: "Nie moj problem. Pump = nie kupuj."
+
+Wynik: ZERO fills przez 8+ godzin. Bot zamrozony.
+```
+
+To jak powiedziec strazakowi "nie lej wody bo deszcz pada" — deszcz to nie pozar, a bidy to nie spekulacja.
+
+### Analogia: Helikopter ratunkowy
+
+Wyobraz sobie helikopter ratunkowy na morzu:
+- **Normalnie** helikopter lata z predkoscia ekonomiczna (oszczedza paliwo)
+- **Sztorm nadchodzi** → kontrola lotow mowi "zwolnij, nie ryzykuj"
+- **Ale na morzu jest tonacy czlowiek** → helikopter MUSI leciec szybciej, mimo sztormu
+
+Inventory-Aware MG Override to ta decyzja: "tak, jest sztorm (pump), ale mamy tonacego (SHORT -38%) i MUSI byc ratowany".
+
+### Rozwiazanie: urgency-based floor
+
+Kluczowy pomysl: **im glebiej utknal, tym wiecej pomocy dostaje**.
+
+```
+urgency = min(1.0, |skew| / 0.50)
+
+|skew| = 15% → urgency = 30%  (lekko utknal → lekka pomoc)
+|skew| = 30% → urgency = 60%  (mocno utknal → mocna pomoc)
+|skew| = 38% → urgency = 76%  (bardzo utknal → duza pomoc)
+|skew| = 50% → urgency = 100% (max → pelna moc)
+
+minClosing = 1.0 + urgency × (closingBoost - 1.0)
+```
+
+Przy kPEPE (closingBoost = 1.5):
+- skew -15% → minClosing = 1.15 (lekki boost)
+- skew -38% → minClosing = 1.38 (solidny boost)
+- skew -50% → minClosing = 1.50 (max boost)
+
+### Co sie dzieje w praktyce
+
+**Scenariusz z dzisiejszego dnia:**
+```
+kPEPE: skew=-38%, pump, score=+0.43
+
+MG mowi: bid×0.78 ask×0.25  (redukuj bidy, wiecej askow)
+
+Override sprawdza:
+  |skew| = 38% > 15% (threshold) ✓
+  pumpAgainstShort = true ✓
+  urgency = 0.38/0.50 = 76%
+  minClosing = 1.0 + 0.76 × 0.5 = 1.38
+  bid(0.78) < minClosing(1.38) → OVERRIDE!
+
+Po override: bid×1.38 ask×0.25
+→ Bot sklada sensowne bidy → dostaje fills → zamyka shorta
+```
+
+### Self-correcting: sam sie wylacza
+
+To jest piekne w tym rozwiazaniu — nie trzeba go recznie wylaczac:
+
+```
+Faza 1: skew=-38% + pump
+  → Override aktywny, bid×1.38
+  → Bot zamyka shorta, fills ida
+
+Faza 2: skew spada do -20%
+  → Override nadal aktywny ale slabszy (urgency=40%, minClosing=1.20)
+
+Faza 3: skew spada do -14%
+  → |skew| < threshold(15%) → Override WYLACZA SIE
+  → Normalny MG przejmuje: pump → bid×0.10 ask×1.30
+  → S/R Accumulation moze budowac nowa pozycje
+
+Faza 4: skew ~0%
+  → Pelny normalny market making
+  → Aski dominuja (pump → ask×1.30)
+```
+
+System jak termostat — wlacza grzanie gdy za zimno, wylacza gdy temperatura OK.
+
+### Gdzie to siedzi w pipeline
+
+```
+MG Score → Multipliers (bid/ask wg momentum)
+  ↓
+⚡ INVENTORY-AWARE MG OVERRIDE (NOWE)
+  ↓
+MG Log (teraz pokazuje skorygowane wartosci)
+  ↓
+S/R Progressive Reduction → S/R Accumulation → Breakout TP → ...
+```
+
+Override jest po MG ale PRZED wszystkimi innymi systemami. Dlaczego? Bo ustawia FLOOR (minimum) dla closing side. Dalsze systemy (S/R Reduction, Breakout TP) moga TYLKO zwiekszyc — nigdy nie zmniejsza pod floor. Multiplicative = kazdy nastepny mnozy na wierzch.
+
+### Lekcja inzynierska: Floor vs Override
+
+Poprzedni Position-Aware Guard (v2) NADPISYWAL multiplier (`ask×1.0` zamiast `ask×0.10`). To byl override — brute force.
+
+Inventory-Aware MG ustawia **floor** (minimum). Jesli MG juz daje dość (np. bid×1.50 bo dump), override nic nie zmienia (`bid > minClosing → skip`). Zmienia TYLKO gdy MG daje za malo.
+
+```
+Override:  "Zrob X"                    → ignoruje kontekst
+Floor:     "Zrob MINIMUM X, reszta OK" → szanuje kontekst
+```
+
+Floor jest bezpieczniejszy bo:
+- Nie walczy z innymi systemami
+- Nie tworzy edge cases
+- Dziala TYLKO gdy potrzebny
+- Jest transparentny (log: "CLOSING OVERRIDE" vs cisza)
+
+### Lekcja biznesowa: Deadlock detection
+
+Ten bug (8h ciszy) byl klasycznym **deadlockiem** — dwa systemy (MG + Auto-Skew) dzialaly poprawnie INDYWIDUALNIE, ale RAZEM tworzily patowa sytuacje:
+
+| System | Co robil | Sam OK? | W kombinacji? |
+|--------|----------|---------|---------------|
+| MG | bid×0.78 (nie kupuj na pumpie) | ✓ | ✗ (bot potrzebuje bidow!) |
+| Auto-Skew | +4.5bps shift (lekko przesuwa grid) | ✓ | ✗ (za malo na -38% skew) |
+
+Kazdy system jest poprawny w izolacji. Problem pojawia sie dopiero przy ekstremalnym skew + momentum w zla strone. To dlatego testing individual components is not enough — musisz testowac **interakcje miedzy systemami**.
+
+Jak wykryc deadlocki:
+1. **Watchdog** — "No fills detected for 7.0h" → cos jest nie tak
+2. **Log analysis** — jesli bid×0.78 a skew=-38%, powinien ktos krzyknac
+3. **Invariant checking** — "jesli |skew| > 30% i closing-side multiplier < 1.0, to jest bug"
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | 3 nowe pola: inventoryAwareMgEnabled, inventoryAwareMgThreshold, inventoryAwareMgClosingBoost + kPEPE override (1.5) |
+| `src/mm_hl.ts` | ~30 linii po MG multiplierach: urgency calc, minClosing floor, override logic, updated MG log z ⚡INV_AWARE flag |

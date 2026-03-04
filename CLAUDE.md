@@ -47,6 +47,79 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 4 marca 2026
 
+### 92. Inventory-Aware MG Override — fix stuck positions against momentum (04.03)
+
+**Problem:** MG (Momentum Guard) traktuje bid/ask jako sygnały kierunkowe rynku, NIE jako zarządzanie pozycją. Podczas pumpa MG redukuje bidy — ale gdy bot ma SHORT, potrzebuje bidów żeby ZAMKNĄĆ pozycję. kPEPE: skew=-38%, cena rośnie, MG daje bid×0.78 ask×0.25 → bot utknął na 0 fills przez 8+ godzin.
+
+**Root cause:** MG nie wie o pozycji bota. Auto-Skew daje +4.5bps (za mało przy -38% skew). Signal Engine bypassuje Vision skew i inventory deviation. Efekt: zero closing-side orderów.
+
+**Rozwiązanie:** Inventory-Aware MG Override — po MG multiplierach, PRZED logiem MG. Gdy pozycja jest PRZECIW momentum, gwarantuj minimalny closing-side multiplier skalowany urgency.
+
+**A) Config — 3 nowe pola w `MomentumGuardConfig` (`short_only_config.ts`):**
+```typescript
+inventoryAwareMgEnabled: boolean       // default true
+inventoryAwareMgThreshold: number      // default 0.15 (15% |skew|)
+inventoryAwareMgClosingBoost: number   // default 1.3 (kPEPE: 1.5)
+```
+
+**B) Logika (`mm_hl.ts`, ~30 linii po MG multiplierach, przed MG log):**
+```
+absSkewInv = |actualSkew|
+if absSkewInv > threshold (15%):
+  urgency = min(1.0, absSkewInv / 0.50)     // 15%→0.30, 30%→0.60, 50%→1.00
+  minClosing = 1.0 + urgency × (closingBoost - 1.0)
+
+  SHORT + PUMP → if bid < minClosing: bid=minClosing, ask=min(ask, 1/minClosing)
+  LONG + DUMP  → if ask < minClosing: ask=minClosing, bid=min(bid, 1/minClosing)
+```
+
+**C) Pipeline position:**
+```
+MG Score → Multipliers (bid/ask based on momentum)
+  ↓
+>>> INVENTORY-AWARE MG OVERRIDE (NEW — fix closing-side when against momentum) <<<
+  ↓
+MG Log (now shows corrected multipliers + ⚡INV_AWARE flag)
+  ↓
+S/R Progressive Reduction → S/R Accumulation → Breakout TP → Dynamic TP → ...
+```
+
+**D) Interakcje:**
+- Override TYLKO gdy closing-side < minClosing (nie zmienia nic gdy MG już daje dość)
+- `pumpAgainstShort` / `dumpAgainstLong` flagi już istniały (dotąd logging only) — teraz mają realną logikę
+- Counter-side capped `1/minClosing` (konserwatywnie)
+- S/R systems (po override) mogą TYLKO zwiększyć closing-side (multiplicative)
+- Auto-Skew (po override) nadal działa — teraz closing side ma sensowne ordery do wypełnienia
+
+**E) Scenariusz z dzisiejszego problemu:**
+```
+kPEPE: skew=-38%, pump, momentumScore=+0.43
+Przed override: bid×0.78 ask×0.25
+
+threshold=0.15 → |-0.38| > 0.15 ✓
+urgency = min(1.0, 0.38/0.50) = 0.76
+minClosing = 1.0 + 0.76 × (1.5 - 1.0) = 1.38
+pumpAgainstShort=true → bid(0.78) < 1.38 ✓
+
+Po override: bid×1.38 ask×0.25
+→ Bot ma sensowne bidy żeby zamknąć shorta
+```
+
+**F) Self-correcting behavior:**
+1. skew=-38% + pump → INV_AWARE → bid×1.38 (zamykaj shorta)
+2. Bot dostaje fills, skew maleje
+3. skew < 15% → override wyłącza się
+4. skew ~0% → S/R Accumulation buduje nową pozycję w kierunku bounce
+5. Normalny MG przejmuje (aski dominują przy pumpie)
+
+**Logi:**
+- `⚡ [INV_AWARE_MG] kPEPE: SHORT+PUMP — skew=-38% score=0.43 urgency=77% minClosing=1.38 → bid×1.38 ask×0.25 (CLOSING OVERRIDE)`
+- `📈 [MOMENTUM_GUARD] kPEPE: score=0.43 ... ⚡INV_AWARE→closing_boosted`
+
+**Verified live:** Pierwszy tick po deploy — override aktywny, bid×1.38 zamiast bid×0.78.
+
+**Pliki:** `src/config/short_only_config.ts` (+7), `src/mm_hl.ts` (+38)
+
 ### 90. S/R Accumulation + Breakout TP — full mean-reversion cycle (04.03)
 
 **Problem:** S/R Reduction (#89) zamykał pozycje schodząc do S/R, ale brakowało dwóch komplementarnych mechanizmów:
@@ -4171,7 +4244,8 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
-- **kPEPE risk pipeline (04.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (04.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **Inventory-Aware MG Override (04.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>15%, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15`, `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. Logi: `⚡ [INV_AWARE_MG]`.
 - **S/R Accumulation (04.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3). Logi: `🔄 [SR_ACCUM]`. Complementary z S/R Reduction — never both active (different skew conditions).
 - **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
 - **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
