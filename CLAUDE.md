@@ -229,6 +229,19 @@ L1-L4 BUY orders: $0.003674-$0.003703 × 27K-27K kPEPE ($100 each)
 
 **Pliki:** `src/mm_hl.ts` (+4 linie)
 
+### 91. vip_spy channel rename + ecosystem memory bump (04.03)
+
+**A) vip_spy.py — Telegram channel rename:**
+- `WHALE_ALERT_CHAT_ID` → `VIP_ALERT_CHAT_ID` (zmienna + referencje)
+- Nowy chat ID: `-1003773745774` (był `-1003835151676`)
+- Funkcja `send_telegram()`: param `also_whale_channel` → `also_vip_channel`
+
+**B) ecosystem.config.cjs — memory bump:**
+- `max_memory_restart`: `300M` → `350M` dla mm-pure
+- Powód: mm_hl.ts rośnie (nowe bloki S/R Accumulation, Breakout TP) — bot był restartowany przez PM2 przy ~300M
+
+**Pliki:** `scripts/vip_spy.py` (+4/-4), `ecosystem.config.cjs` (+1/-1)
+
 ---
 
 ## Zmiany 1 marca 2026
