@@ -8387,8 +8387,46 @@ class HyperliquidMMBot {
             if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.lightBidMult
           }
 
+          // === ⚡ INVENTORY-AWARE MG OVERRIDE ===
+          // When position is AGAINST momentum direction, ensure closing-side multiplier
+          // stays above minimum. MG reduces bids during pump, but SHORT needs bids to close.
+          let invOverrideApplied = false
+          if (momGuardConfig.inventoryAwareMgEnabled) {
+            const absSkewInv = Math.abs(actualSkew)
+            if (absSkewInv > momGuardConfig.inventoryAwareMgThreshold) {
+              const urgency = Math.min(1.0, absSkewInv / 0.50) // 15%→0.30, 30%→0.60, 50%→1.00
+              const minClosing = 1.0 + urgency * (momGuardConfig.inventoryAwareMgClosingBoost - 1.0)
+
+              if (pumpAgainstShort) {
+                // SHORT + PUMP → need bids to close, MG is reducing them
+                if (sizeMultipliers.bid < minClosing) {
+                  sizeMultipliers.bid = minClosing
+                  sizeMultipliers.ask = Math.min(sizeMultipliers.ask, 1.0 / minClosing)
+                  invOverrideApplied = true
+                }
+              } else if (dumpAgainstLong) {
+                // LONG + DUMP → need asks to close, MG is reducing them
+                if (sizeMultipliers.ask < minClosing) {
+                  sizeMultipliers.ask = minClosing
+                  sizeMultipliers.bid = Math.min(sizeMultipliers.bid, 1.0 / minClosing)
+                  invOverrideApplied = true
+                }
+              }
+
+              if (invOverrideApplied) {
+                console.log(
+                  `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% score=${momentumScore.toFixed(2)} ` +
+                  `urgency=${(urgency*100).toFixed(0)}% minClosing=${minClosing.toFixed(2)} → ` +
+                  `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING OVERRIDE)`
+                )
+              }
+            }
+          }
+
           if (this.tickCount % 20 === 0 || Math.abs(momentumScore) >= momGuardConfig.moderateThreshold) {
-            const posFlag = pumpAgainstShort ? ' 💎SHORT+PUMP→holding(bids×reduced,asks×up)'
+            const posFlag = invOverrideApplied ? ` ⚡INV_AWARE→closing_boosted`
+              : pumpAgainstShort ? ' 💎SHORT+PUMP→holding(bids×reduced,asks×up)'
               : dumpAgainstLong ? ' 💎LONG+DUMP→holding(asks×reduced,bids×up)'
               : microReversal ? ' 🔄MICRO_REVERSAL→closing_allowed'
               : ''

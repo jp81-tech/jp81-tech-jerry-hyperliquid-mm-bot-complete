@@ -294,6 +294,10 @@ export interface MomentumGuardConfig {
   srBreakoutTpEnabled: boolean         // Enable breakout TP (default true)
   srBreakoutTpScoreThreshold: number   // Min |momentumScore| to trigger (default 0.50)
   srBreakoutTpClosingBoost: number     // Closing-side multiplier boost (default 1.5)
+  // Inventory-Aware MG: override MG when position is against momentum
+  inventoryAwareMgEnabled: boolean       // Enable inventory-aware override (default true)
+  inventoryAwareMgThreshold: number      // Min |skew| to trigger (default 0.15 = 15%)
+  inventoryAwareMgClosingBoost: number   // Max closing-side multiplier (default 1.3)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -333,6 +337,9 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   srBreakoutTpEnabled: true,
   srBreakoutTpScoreThreshold: 0.50,  // Min |score| to trigger breakout TP
   srBreakoutTpClosingBoost: 1.5,     // 1.5× closing-side boost on breakout
+  inventoryAwareMgEnabled: true,
+  inventoryAwareMgThreshold: 0.15,     // 15% |skew| minimum to trigger
+  inventoryAwareMgClosingBoost: 1.3,   // Max closing-side multiplier
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
@@ -348,6 +355,7 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     srMaxRetainPct: 0.20,        // 20% max at S/R
     srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
     srBreakoutTpScoreThreshold: 0.40, // kPEPE: trigger earlier (volatile, momentum is real sooner)
+    inventoryAwareMgClosingBoost: 1.5,  // kPEPE: more aggressive closing when stuck against momentum
   },
 }
 
