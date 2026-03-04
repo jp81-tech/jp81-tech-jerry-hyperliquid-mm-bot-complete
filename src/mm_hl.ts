@@ -7060,7 +7060,7 @@ class HyperliquidMMBot {
           ? (midPrice - entryPx) / entryPx
           : (entryPx - midPrice) / entryPx
 
-        // 🛡️ Structure data: 4h support/resistance (preferred) with 24h high/low fallback
+        // 🛡️ Structure data: 1h×72 support/resistance (preferred) with 24h high/low fallback
         const mktSnapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
         const structureAnalysis = this.marketVision?.getPairAnalysis(pair)
         const recentHigh = structureAnalysis?.resistance4h || mktSnapshot?.momentum?.high24h
@@ -8218,13 +8218,13 @@ class HyperliquidMMBot {
               ? (mgRsi - momGuardConfig.rsiOversoldThreshold) / momGuardConfig.rsiOversoldThreshold
               : 0
 
-          // 3. Proximity to resistance/support (20% weight)
-          // Use SHORT-TERM body-based S/R from 1h candles (24h lookback)
-          // 4h S/R (30 candles = 5 days) is too wide for volatile memecoins — price never enters zone
-          // 1h S/R (24 candles = 24h) gives tighter, actionable proximity signals
+          // 3. Proximity to resistance/support (35% weight)
+          // Use SHORT-TERM body-based S/R from 15m candles (96 candles = 24h lookback)
+          // 15m gives 4× finer granularity than old 1h×24 — tighter intraday levels
+          // Fallback to HTF 1h×72 S/R if 15m not available
           const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
           const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
-          // Fallback to 4h S/R if 1h not available
+          // Fallback to HTF S/R (1h×72 = 3 days) if STF not available
           const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
           const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
           // Dynamic thresholds: ATR-based (adapts to volatility regime)
@@ -8306,7 +8306,7 @@ class HyperliquidMMBot {
                     { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
                     { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
                   ],
-                  footer: { text: `S/R from 1h candles (24h lookback) | Cooldown 30min` },
+                  footer: { text: `S/R from 15m candles (24h lookback) | HTF from 1h (3d) | Cooldown 30min` },
                   timestamp: new Date().toISOString(),
                 }).catch(() => {})  // fire-and-forget
               }
@@ -8417,7 +8417,7 @@ class HyperliquidMMBot {
               `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
               `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
               `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}` +
-              ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
+              ` | S/R(15m): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
             )
           }
 
@@ -8676,7 +8676,9 @@ class HyperliquidMMBot {
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
         // BYPASS when INVENTORY_SL PANIC is active — stop loss must override profit filter.
-        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic) {
+        // BYPASS when |skew| > 25% — closing stuck position is more important than 10bps fee optimization.
+        const highSkewBypassMinProfit = Math.abs(actualSkew) > 0.25
+        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic && !highSkewBypassMinProfit) {
           const entryPx = position.entryPrice || 0
           if (entryPx > 0) {
             const minProfitFraction = dynSpreadCfg.minProfitBps / 10000  // 10bps = 0.001
@@ -8708,6 +8710,15 @@ class HyperliquidMMBot {
               )
             }
           }
+        }
+
+        // Log when high skew bypassed MIN_PROFIT
+        if (highSkewBypassMinProfit && position && midPrice > 0 && this.tickCount % 20 === 0) {
+          const entryPx = position.entryPrice || 0
+          console.log(
+            `📐 [MIN_PROFIT_BYPASS] ${pair}: |skew|=${(Math.abs(actualSkew)*100).toFixed(0)}% > 25% → MIN_PROFIT bypassed ` +
+            `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} — closing position takes priority over fee optimization`
+          )
         }
 
         // ── Toxicity-driven layer removal (overrides skew-based removal) ──

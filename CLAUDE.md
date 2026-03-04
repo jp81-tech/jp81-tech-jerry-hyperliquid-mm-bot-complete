@@ -48,6 +48,37 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 4 marca 2026
 
+### 95. MIN_PROFIT high-skew bypass — fix 0 bids when underwater SHORT (04.03)
+
+**Problem:** kPEPE (PURE_MM) z SHORT pozycją underwater (entry=$0.003527, mid=$0.003710) miał **0 buy orderów** przez 8+ godzin. MG dawał bid×1.38 (INV_AWARE), Auto-Skew przesuwał grid UP, ale MIN_PROFIT BUFFER filtrował WSZYSTKIE bidy.
+
+**Root cause — deadlock MIN_PROFIT + skew gap:**
+- MIN_PROFIT: `maxBidPrice = entry × (1 - 0.001) = $0.003524`. Wszystkie grid bidy (~$0.003690+) >> $0.003524 → ALL filtered
+- INVENTORY_SL bypass: `inventorySlPanic` only fires at |skew|>40% AND drawdown>2.5×ATR. At |skew|=38% → NOT triggered
+- **Gap 25-40%**: Pozycja za duża na normalne MM, za mała na panic mode → deadlock
+
+**Fix w `src/mm_hl.ts` (+8 linii):**
+```typescript
+const highSkewBypassMinProfit = Math.abs(actualSkew) > 0.25
+if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic && !highSkewBypassMinProfit) {
+```
+Gdy |skew| > 25%, MIN_PROFIT jest bypassowany — zamknięcie stuck pozycji ważniejsze niż 10bps fee optimization.
+
+**Log:** `📐 [MIN_PROFIT_BYPASS] kPEPE: |skew|=38% > 25% → MIN_PROFIT bypassed | entry=0.0035270 mid=0.0037139 — closing position takes priority over fee optimization`
+
+**Wynik po deploy:**
+```
+Przed: buyLevels=0 sellLevels=8 (0 fills przez 8h, Daily PnL: -$96.57)
+Po:    buyLevels=8 sellLevels=8 (8 buy orders natychmiast, zamykanie SHORT)
+```
+
+**Interaction z innymi mechanizmami:**
+- |skew| < 25% → MIN_PROFIT aktywny (normalne filtrowanie, chroni przed fee-eating)
+- |skew| 25-40% → **highSkewBypassMinProfit** (NEW — zamykanie pozycji priorytetem)
+- |skew| > 40% + drawdown → `inventorySlPanic` (panic mode, asks=0 + bids×2)
+
+**Pliki:** `src/mm_hl.ts` (+8)
+
 ### 94. Remove Inventory Deviation, AlphaEngine, SM Direction — fix 8h stuck skew (04.03)
 
 **Problem:** Bot kPEPE (PURE_MM) utknął na -38% skew przez 8+ godzin z ZERO fills. Auto-Skew dawał tylko +4.5bps (za mało), a 3 mechanizmy były bypassowane dla PURE_MM lub wprowadzały szum taktyczny:

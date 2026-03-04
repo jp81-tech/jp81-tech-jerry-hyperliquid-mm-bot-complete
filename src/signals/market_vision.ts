@@ -287,12 +287,12 @@ export type PairAnalysis = {
   rsi: number;
   atr: number;
   ema200_4h: number; // Value of 200 EMA on 4h
-  support4h: number; // HTF Support Price (Low of last 30 4h candles)
-  resistance4h: number; // HTF Resistance Price (High of last 30 4h candles)
-  supportBody4h: number; // HTF Support from candle bodies (min of O/C) — wick-filtered
-  resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — wick-filtered
-  supportBody12h: number; // Short-term support (last 12 1h candles) for MG proximity
-  resistanceBody12h: number; // Short-term resistance (last 12 1h candles) for MG proximity
+  support4h: number; // HTF Support Price — 1h candles, last 72 (3 days)
+  resistance4h: number; // HTF Resistance Price — 1h candles, last 72 (3 days)
+  supportBody4h: number; // HTF Support from candle bodies (min of O/C) — 1h×72, wick-filtered
+  resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — 1h×72, wick-filtered
+  supportBody12h: number; // Short-term support from 15m candle bodies (last 96 = 24h) for MG proximity
+  resistanceBody12h: number; // Short-term resistance from 15m candle bodies (last 96 = 24h) for MG proximity
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -423,30 +423,31 @@ export class MarketVisionService {
             trend4h = currentPrice > ema200_4h ? 'bull' : 'bear';
           }
 
-          // HTF Support/Resistance (Last 30 candles = 5 days)
-          const last30_4h = candles4h.slice(-30);
-          support4h = Math.min(...last30_4h.map(c => c.l));
-          resistance4h = Math.max(...last30_4h.map(c => c.h));
-          // Body-based S/R — filters out wick noise (flash crash spikes)
-          supportBody4h = Math.min(...last30_4h.map(c => Math.min(c.o, c.c)));
-          resistanceBody4h = Math.max(...last30_4h.map(c => Math.max(c.o, c.c)));
+          // HTF S/R still from 4h candles for EMA200 trend only (above)
         }
 
-        // B. MTF Context: 1h Candles for volatility and tactical bias
+        // B. MTF Context: 1h Candles for volatility, tactical bias, AND HTF S/R
         const candles = await this.api.getCandles(pair, '1h', now - 7 * 24 * 60 * 60 * 1000, now);
         if (!candles || candles.length < 50) continue;
 
-        // Short-term S/R from 1h candles (last 24h) — for Momentum Guard proximity
-        // 4h S/R (30 candles = 5 days) too wide for volatile memecoins — price never enters ATR zone
-        // 1h S/R (24 candles = 24h) gives tighter, actionable proximity signals
+        // HTF Support/Resistance from 1h candles (last 72 = 3 days)
+        // Previously 4h×30 (5 days) — too wide for volatile memecoins, price never entered ATR zone
+        // 1h×72 (3 days) gives tighter HTF levels while still capturing multi-day structure
+        const htfLookback = Math.min(72, candles.length);
+        if (htfLookback >= 24) {
+          const htf1h = candles.slice(-htfLookback);
+          support4h = Math.min(...htf1h.map(c => c.l));
+          resistance4h = Math.max(...htf1h.map(c => c.h));
+          // Body-based S/R — filters out wick noise (flash crash spikes)
+          supportBody4h = Math.min(...htf1h.map(c => Math.min(c.o, c.c)));
+          resistanceBody4h = Math.max(...htf1h.map(c => Math.max(c.o, c.c)));
+        }
+
+        // STF S/R from 15m candles (last 96 = 24h) — for Momentum Guard proximity
+        // Previously 1h×24 (24h) — now 15m×96 (24h) for 4× finer granularity
+        // Body-based filtering keeps it clean despite higher resolution
         let supportBody12h = 0;
         let resistanceBody12h = 0;
-        const srLookback = Math.min(24, candles.length);
-        if (srLookback >= 12) {
-          const recent1h = candles.slice(-srLookback);
-          supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
-          resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
-        }
 
         // C. STF Context: 15m Candles for "Golden Ticket" Entry
         // We fetch last 2 days (48h) of 15m candles
@@ -461,6 +462,14 @@ export class MarketVisionService {
 
           if (ema9_15m > 0 && ema21_15m > 0) {
             trend15m = ema9_15m > ema21_15m ? 'bull' : 'bear';
+          }
+
+          // STF S/R from 15m candle bodies (last 96 = 24h) — 4× finer than old 1h×24
+          const stfLookback = Math.min(96, candles15m.length);
+          if (stfLookback >= 24) {
+            const recent15m = candles15m.slice(-stfLookback);
+            supportBody12h = Math.min(...recent15m.map(c => Math.min(c.o, c.c)));
+            resistanceBody12h = Math.max(...recent15m.map(c => Math.max(c.o, c.c)));
           }
         }
 
@@ -1023,8 +1032,8 @@ export class MarketVisionService {
       }
     }
 
-    // 6. WALL PROTECTION (HTF Support/Resistance)
-    // If we are extremely close (< 1.5%) to a major 4h wall, we pause entries into the wall
+    // 6. WALL PROTECTION (HTF Support/Resistance from 1h×72 = 3 days)
+    // If we are extremely close (< 1.5%) to a major HTF wall, we pause entries into the wall
     // unless we have a specific Price Action pattern that suggests a breakout.
     if (analysis.resistanceDist < 0.015) {
       if (analysis.activeCandlePattern !== 'bullish_engulfing') {
