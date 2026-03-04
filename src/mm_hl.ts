@@ -108,6 +108,7 @@ import {
 } from './utils/quant.js'
 import { RateLimitReserver } from './utils/rate_limit_reserve.js'
 import { sendRiskAlert, sendSystemAlert } from './utils/slack_router.js'
+import { sendDiscordEmbed } from './utils/discord_notifier.js'
 import { applySpecOverrides } from './utils/spec_overrides.js'
 import { VolatilityRotation } from './utils/volatility_rotation.js'
 import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
@@ -3686,6 +3687,10 @@ class HyperliquidMMBot {
   // 🛡️ PUMP SHIELD — price history & cooldown tracking
   private pumpShieldHistory: Map<string, { price: number; ts: number }[]> = new Map()
   private pumpShieldCooldowns: Map<string, number> = new Map()
+
+  // 📍 S/R DISCORD ALERTS — cooldown tracking (token:level_type → last alert timestamp)
+  private srAlertCooldowns: Map<string, number> = new Map()
+  private static readonly SR_ALERT_COOLDOWN_MS = 30 * 60 * 1000  // 30 min per token per level type
 
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
   private predictionCache: Map<string, { direction: string; change: number; confidence: number; fetchedAt: number }> = new Map()
@@ -8329,6 +8334,66 @@ class HyperliquidMMBot {
             mgProxSignal = -0.8
           } else if (mgSupportDist < mgModerateZone) {
             mgProxSignal = -0.4
+          }
+
+          // === 📍 S/R DISCORD ALERTS ===
+          // Alert when price enters strong zone (1×ATR) around support or resistance
+          if (mgProxSignal !== 0) {
+            const now = Date.now()
+            let srAlertType: string | null = null
+            let srLevel = 0
+            let srDist = 0
+
+            if (mgResistDist <= 0) {
+              srAlertType = 'ABOVE_RESISTANCE'
+              srLevel = mgResistBody
+              srDist = mgResistDist
+            } else if (mgResistDist < mgStrongZone) {
+              srAlertType = 'NEAR_RESISTANCE'
+              srLevel = mgResistBody
+              srDist = mgResistDist
+            } else if (mgSupportDist <= 0) {
+              srAlertType = 'BELOW_SUPPORT'
+              srLevel = mgSupportBody
+              srDist = mgSupportDist
+            } else if (mgSupportDist < mgStrongZone) {
+              srAlertType = 'NEAR_SUPPORT'
+              srLevel = mgSupportBody
+              srDist = mgSupportDist
+            }
+
+            if (srAlertType) {
+              const cooldownKey = `${pair}:${srAlertType}`
+              const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
+              if (now - lastAlert > HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) {
+                this.srAlertCooldowns.set(cooldownKey, now)
+
+                const isResistance = srAlertType.includes('RESISTANCE')
+                const emoji = isResistance ? '🔴' : '🟢'
+                const levelLabel = isResistance ? 'RESISTANCE' : 'SUPPORT'
+                const distPct = (srDist * 100).toFixed(2)
+                const zonePct = (mgStrongZone * 100).toFixed(2)
+
+                const logMsg = `📍 [SR_ALERT] ${pair}: ${srAlertType} — price=$${midPrice.toFixed(6)} ${levelLabel}=$${srLevel.toFixed(6)} dist=${distPct}% zone=${zonePct}%`
+                console.log(logMsg)
+
+                const color = isResistance ? 0xff4444 : 0x44ff44
+                sendDiscordEmbed({
+                  title: `${emoji} ${pair} — ${srAlertType.replace('_', ' ')}`,
+                  color,
+                  fields: [
+                    { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
+                    { name: levelLabel, value: `$${srLevel.toFixed(6)}`, inline: true },
+                    { name: 'Distance', value: `${distPct}%`, inline: true },
+                    { name: 'ATR Zone', value: `${zonePct}%`, inline: true },
+                    { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
+                    { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
+                  ],
+                  footer: { text: `S/R from 1h candles (24h lookback) | Cooldown 30min` },
+                  timestamp: new Date().toISOString(),
+                }).catch(() => {})  // fire-and-forget
+              }
+            }
           }
 
           // Weights: proximity (S/R) is most important for ranging memecoins
