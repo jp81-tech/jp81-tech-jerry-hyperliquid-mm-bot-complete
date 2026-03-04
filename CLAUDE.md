@@ -31,6 +31,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
+- `src/utils/discord_notifier.ts` - Discord webhook notifier (S/R alerts, embeds)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała"), ALL COINS dla Generała
 - `scripts/general_copytrade.ts` - copy-trading bot: kopiuje pozycje Generała (dry-run/live)
 
@@ -46,6 +47,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 ---
 
 ## Zmiany 4 marca 2026
+
+### 93. S/R Discord Alerts — powiadomienia gdy cena podchodzi do wsparcia/oporu (04.03)
+
+**Problem:** Bot obliczał proximity S/R (support/resistance) ale nie powiadamiał usera. Trzeba było ręcznie czytać logi PM2 żeby zobaczyć czy cena jest blisko kluczowych poziomów.
+
+**Rozwiązanie:** Discord embed alerty gdy cena wchodzi w strong zone (1×ATR) wokół S/R z 1h candle bodies.
+
+**A) Nowy plik `src/utils/discord_notifier.ts`:**
+- `sendDiscordMessage(content)` — prosty tekst
+- `sendDiscordEmbed(embed)` — rich embed z polami, kolorami, timestampem
+- Czyta `DISCORD_WEBHOOK_URL` z `.env` (już skonfigurowany)
+- Pattern reused z `slack_router.ts` (https.request POST)
+
+**B) 4 typy alertów (w `mm_hl.ts`, po obliczeniu `mgProxSignal`):**
+
+| Typ | Kiedy | Kolor | mgProxSignal |
+|-----|-------|-------|-------------|
+| `ABOVE_RESISTANCE` | Cena >= resistance | Czerwony | +1.0 |
+| `NEAR_RESISTANCE` | Cena w strong zone od resistance | Czerwony | +0.8 |
+| `BELOW_SUPPORT` | Cena <= support | Zielony | -1.0 |
+| `NEAR_SUPPORT` | Cena w strong zone od support | Zielony | -0.8 |
+
+**C) Discord embed zawiera 6 pól:**
+- Price, S/R Level (RESISTANCE/SUPPORT), Distance %, ATR Zone %, RSI, Skew
+- Footer: "S/R from 1h candles (24h lookback) | Cooldown 30min"
+
+**D) Cooldown:** 30 minut per token per alert type (`srAlertCooldowns` Map).
+- Klucz: `${pair}:${alertType}` (np. `kPEPE:NEAR_RESISTANCE`)
+- Zapobiega spamowi gdy cena oscyluje wokół poziomu
+
+**E) Pipeline position:** Po obliczeniu `mgProxSignal` (proximity), PRZED MG scoring. Fire-and-forget (`.catch(() => {})` — nie blokuje main loop).
+
+**Logi:** `📍 [SR_ALERT] kPEPE: NEAR_RESISTANCE — price=$0.003729 RESISTANCE=$0.003760 dist=0.83% zone=1.80%`
+
+**Verified live:** Pierwszy tick po deploy — alert NEAR_RESISTANCE wysłany na Discord, embed z 6 polami.
+
+**Pliki:** `src/utils/discord_notifier.ts` (NEW, 74 LOC), `src/mm_hl.ts` (+65)
 
 ### 92. Inventory-Aware MG Override — fix stuck positions against momentum (04.03)
 

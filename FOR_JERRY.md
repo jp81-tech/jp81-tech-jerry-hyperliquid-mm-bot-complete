@@ -7479,3 +7479,72 @@ Jak wykryc deadlocki:
 |------|--------|
 | `src/config/short_only_config.ts` | 3 nowe pola: inventoryAwareMgEnabled, inventoryAwareMgThreshold, inventoryAwareMgClosingBoost + kPEPE override (1.5) |
 | `src/mm_hl.ts` | ~30 linii po MG multiplierach: urgency calc, minClosing floor, override logic, updated MG log z ⚡INV_AWARE flag |
+
+---
+
+## Rozdzial 44: S/R Discord Alerts — "Hej, cena jest przy oporze!" (04.03.2026)
+
+### Problem: Bot widzi, ale nie mowi
+
+Wyobraz sobie, ze masz asystenta ktory siedzi przed monitorem 24/7 i patrzy na wykresy. Widzi kazdy ruch ceny. Wie dokladnie gdzie jest support i resistance. Ale... nie mowi ci o tym. Musisz sam wejsc na serwer, otworzyc logi, i szukac odpowiedniej linijki.
+
+Tak wlasnie wygladal nasz bot. Momentum Guard obliczal `mgProxSignal` — proximity do S/R — od tygodni. Uzywal go do asymetrycznego grida (redukuj bidy blisko resistance, redukuj aski blisko support). Ale user (Jerry) nie dostawal zadnego powiadomienia. Musial czytac logi PM2 z serwera zeby zobaczyc "ah, kPEPE jest 0.8% od resistance".
+
+### Rozwiazanie: Discord embeds
+
+Discord ma swietna feature — **embeds**. Zamiast zwyklego tekstu, mozesz wyslac kolorowa karteczke z polami, tytulami, kolorami i timestampami. Wyglada jak mini-dashboard w wiadomosci.
+
+Stworzylem `src/utils/discord_notifier.ts` — prosty modul wzorowany na `slack_router.ts` (ktory juz istnial). Wzorzec jest identyczny:
+1. Czytaj webhook URL z env var (`DISCORD_WEBHOOK_URL`)
+2. POST JSON na ten URL
+3. Jesli blad — loguj, nie crashuj
+
+Roznica: Discord uzywa `embeds` array zamiast `text` field jak Slack.
+
+### 4 typy alertow
+
+| Typ | Kolor | Kiedy |
+|-----|-------|-------|
+| ABOVE_RESISTANCE | Czerwony | Cena przelamala opor (bullish breakout) |
+| NEAR_RESISTANCE | Czerwony | Cena w strong zone (1×ATR) od oporu |
+| BELOW_SUPPORT | Zielony | Cena przelamala wsparcie (bearish breakdown) |
+| NEAR_SUPPORT | Zielony | Cena w strong zone (1×ATR) od wsparcia |
+
+Dlaczego strong zone a nie moderate? Bo moderate zone (2×ATR) to za duzo — cena moze byc 3.6% od S/R i nadal triggerowac alert. Strong zone (1×ATR, ~1.8% dla kPEPE) to range w ktorym cena naprawde "jest blisko" i moze sie odwrocic lub przelamac.
+
+### Cooldown — nie spamuj
+
+Najwieksze wyzwanie z alertami: **spam**. Main loop bota biegnie co 90 sekund. Jesli cena jest 0.5% od resistance, bot wyslalby alert co 90s = 40 alertow na godzine. Discord by cie znienawidzil.
+
+Rozwiazanie: `srAlertCooldowns` Map z 30-minutowym cooldownem per token per alert type. Klucz: `kPEPE:NEAR_RESISTANCE`. Po wyslaniu alertu, nastepny moze pojsc dopiero za 30 minut.
+
+Dlaczego 30 min a nie 60? Bo 60 min moze byc za dlugo — rynek moze odejsc od S/R i wrocic w ciagu godziny, i chcesz to wiedziec. 30 min to kompromis miedzy informacja a spamem.
+
+### Fire-and-forget pattern
+
+```typescript
+sendDiscordEmbed({ ... }).catch(() => {})
+```
+
+Ten `.catch(() => {})` jest kluczowy. Discord webhook moze byc down, rate-limited, albo URL moze byc zly. Nie chcemy zeby blad Discorda zatrzymal bota. Alert jest "nice to have" — trading jest "must have". Wiec wysylamy i zapominamy.
+
+To samo robimy z logowaniem — `console.log` idzie niezaleznie od Discorda. Nawet jesli Discord nie dziala, log jest w PM2.
+
+### Lekcja: Separation of Concerns
+
+Ten feature to doskonaly przyklad czystego separation of concerns:
+
+1. **MG (Momentum Guard)** oblicza `mgProxSignal` — to jego robota (analiza)
+2. **S/R Alert** czyta `mgProxSignal` i wysyla powiadomienie — to jego robota (notyfikacja)
+3. **Discord Notifier** wysyla HTTP POST — to jego robota (transport)
+
+Kazdy robi jedno i robi to dobrze. MG nie wie o Discordzie. Discord Notifier nie wie o S/R. S/R Alert laczy oba.
+
+Gdybysmy chcieli dodac alerty na Telegram, Slack, email — zmieniamy TYLKO transport layer (nowy plik jak `telegram_notifier.ts`). Logika S/R i MG zostaje bez zmian.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/utils/discord_notifier.ts` | NOWY — `sendDiscordMessage()` + `sendDiscordEmbed()`, czyta `DISCORD_WEBHOOK_URL` |
+| `src/mm_hl.ts` | +65 linii: import, `srAlertCooldowns` Map, alert logic po `mgProxSignal`, 30min cooldown |
