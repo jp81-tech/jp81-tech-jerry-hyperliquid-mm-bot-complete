@@ -7548,3 +7548,69 @@ Gdybysmy chcieli dodac alerty na Telegram, Slack, email — zmieniamy TYLKO tran
 |------|--------|
 | `src/utils/discord_notifier.ts` | NOWY — `sendDiscordMessage()` + `sendDiscordEmbed()`, czyta `DISCORD_WEBHOOK_URL` |
 | `src/mm_hl.ts` | +65 linii: import, `srAlertCooldowns` Map, alert logic po `mgProxSignal`, 30min cooldown |
+
+---
+
+## Rozdział 45: Wyrzucanie balastu — usunięcie 3 mechanizmów które paraliżowały bota
+
+### Problem: bot utknął na -38% skew przez 8 godzin
+
+Wyobraź sobie samochód z 6 systemami kontroli trakcji, z których 3 ciągną kierownicę w lewo, 2 w prawo, a 1 jest wyłączony. Samochód jedzie prosto — ale nie dlatego że wszystko działa, tylko dlatego że siły się znoszą. A gdy się nie znoszą? Samochód stoi w miejscu.
+
+Dokładnie to się stało z botem kPEPE. Miał -38% skew (ogromna pozycja SHORT) i powinien ją zamykać — kupować żeby wrócić do równowagi. Ale przez 8+ godzin miał **ZERO fills**. Watchdog krzyczał: "No fills detected for 8.0h".
+
+### Diagnoza: za dużo kucharzy
+
+Trzy mechanizmy wprowadzały chaos:
+
+**1. Inventory Deviation** — "zmień rozmiar orderów gdy skew > 5%"
+- Pomysł dobry, ale był BYPASSED dla PURE_MM (kPEPE). Kod: `if (!isSignalEnginePureMmInv && inventoryDeviation > 0.05)` — ten `!isSignalEnginePureMmInv` oznaczał "nie rób tego dla PURE_MM". Efekt: zero.
+
+**2. AlphaEngine multipliers** — "reaguj na real-time SM ruchy"
+- AlphaEngine śledziła 83 whale pozycji co minutę i modyfikowała bid/ask multipliery. Problem: to był "szum taktyczny" — 3 wieloryby redukują shorty, a 10 innych trzyma. AlphaEngine panikuje, bot zmienia multipliery, pozycja rośnie zamiast maleć.
+- Doktryna Wojenna mówi jasno: **Strategia (whale_tracker snapshot) wygrywa z Taktyką (AlphaEngine stream)**.
+
+**3. SM Direction permissions** — "blokuj counter-SM stronę"
+- Gdy SM shortują → `allowLongs = false` → bot nie może składać bidów → nie może ZAMKNĄĆ shorta!
+- To był najgorszy z trzech. Chciał chronić pozycję, a w praktyce paraliżował zamykanie.
+
+### Rozwiązanie: usunąć, nie naprawiać
+
+Zamiast dodawać kolejne `if` i `else if` do łatania bypasses — usunęliśmy mechanizmy kompletnie. -90 linii kodu.
+
+```
+PRZED (6 systemów rebalancing, 3 martwe/szkodliwe):
+  ✅ kPEPE Enhanced Inventory Skew (działa)
+  ✅ Momentum Guard (działa)
+  ✅ Auto-Skew (działa, ale za słaby sam)
+  ❌ Inventory Deviation (bypassed dla PURE_MM)
+  ❌ AlphaEngine (szum taktyczny)
+  ❌ SM Direction (blokuje closing-side)
+
+PO (3 systemy, wszystkie działają + 3 nowe z tej sesji):
+  ✅ kPEPE Enhanced Inventory Skew
+  ✅ Momentum Guard + Inventory-Aware MG Override (#92)
+  ✅ Auto-Skew
+  ✅ S/R Progressive Reduction (#89)
+  ✅ S/R Accumulation (#90)
+  ✅ Breakout TP (#90)
+```
+
+### Lekcja: mniej kodu = lepszy bot
+
+To jest klasyczny przykład **"less is more"** w software engineering. Bot miał 6 systemów rebalancing z których 3 nie działały albo szkodziły. Usunięcie ich nie tylko naprawiło problem (bot teraz quotuje i łapie fills) ale też uprościło codebase o 90 linii.
+
+> **Zasada:** Nie dodawaj nowego mechanizmu żeby naprawić bug w starym. Sprawdź czy stary jest potrzebny. Często odpowiedź brzmi "nie".
+
+### Technikalia: co zostało i dlaczego
+
+- `smDir` (SM direction) — zachowane, bo Pump Shield i FibGuard go potrzebują. Usunęliśmy tylko BLOKOWANIE permissions na tej podstawie.
+- `isSignalEnginePureMmInv` — zachowane, bo Vision Skew, MIN_PROFIT i risk checks nadal go używają.
+- Import `alphaEngineIntegration` — zachowany (`.getIsRunning()` sprawdzane w innych blokach). Usunięto tylko `getAlphaSizeMultipliers` i `shouldBypassDelay`.
+- `signalEngineResultFso` → zamienione na `signalEngineResultInv` (identyczna logika, eliminacja duplikatu).
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | -90/+7 linii: usunięto Inventory Deviation, AlphaEngine, SM Direction blocking, HOLD_FOR_TP guard |

@@ -48,6 +48,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 4 marca 2026
 
+### 94. Remove Inventory Deviation, AlphaEngine, SM Direction — fix 8h stuck skew (04.03)
+
+**Problem:** Bot kPEPE (PURE_MM) utknął na -38% skew przez 8+ godzin z ZERO fills. Auto-Skew dawał tylko +4.5bps (za mało), a 3 mechanizmy były bypassowane dla PURE_MM lub wprowadzały szum taktyczny:
+
+| Mechanizm | Co robił | Problem |
+|-----------|----------|---------|
+| **Inventory Deviation** | `bid×0.7/ask×1.2` przy skew>5% | Bypassed dla PURE_MM — zero efektu |
+| **AlphaEngine multipliers** | Real-time SM multipliers z NansenFeed | Szum taktyczny, konflikty ze Strategią |
+| **SM Direction permissions** | `allowLongs=false` / `allowShorts=false` | Blokował closing-side ordery |
+| **HOLD_FOR_TP guard** | `!IS_PURE_MM_BOT` blokował HOLD_FOR_TP | PURE_MM nie mógł korzystać z HOLD_FOR_TP |
+
+**Rozwiązanie:** Usunięcie kompletne 3 mechanizmów + usunięcie PURE_MM guard z HOLD_FOR_TP.
+
+**4 zmiany w `src/mm_hl.ts` (-90 linii):**
+
+| # | Zmiana | Linie usunięte |
+|---|--------|----------------|
+| 1 | **HOLD_FOR_TP**: usunięto `!IS_PURE_MM_BOT` guard | 2 linie |
+| 2 | **Inventory Deviation**: usunięto cały blok (if/else-if/else-if) | ~10 linii |
+| 3 | **AlphaEngine multipliers**: usunięto cały blok + importy `getAlphaSizeMultipliers`, `shouldBypassDelay` | ~26 linii |
+| 4 | **SM Direction permissions**: usunięto cały blok (FOLLOW_SM_SHORT/LONG permissions blocking) | ~44 linie |
+
+**Zachowane:**
+- `smDir` = `getSmDirection(pair)` — nadal potrzebne przez Pump Shield, FibGuard, inne downstream bloki
+- `isSignalEnginePureMmInv` — nadal potrzebne przez Vision Skew, MIN_PROFIT, risk checks
+- `signalEngineResultInv` reused zamiast `signalEngineResultFso` (identyczna logika)
+
+**Co teraz zarządza rebalancing:**
+- **kPEPE Enhanced Inventory Skew** (size multipliers skalowane 10-40% skew + time decay)
+- **Momentum Guard** (asymetryczny grid na podstawie momentum/RSI/proximity)
+- **Inventory-Aware MG Override** (#92, gwarantuje closing-side przy stuck positions)
+- **S/R Progressive Reduction** (#89, zamyka pozycje przy S/R)
+- **Auto-Skew** (mid-price shift proporcjonalny do skew)
+- **Inventory SL** (panic mode przy ekstremalnym skew + drawdown)
+
+**Pliki:** `src/mm_hl.ts` (-90/+7)
+
 ### 93. S/R Discord Alerts — powiadomienia gdy cena podchodzi do wsparcia/oporu (04.03)
 
 **Problem:** Bot obliczał proximity S/R (support/resistance) ale nie powiadamiał usera. Trzeba było ręcznie czytać logi PM2 żeby zobaczyć czy cena jest blisko kluczowych poziomów.
