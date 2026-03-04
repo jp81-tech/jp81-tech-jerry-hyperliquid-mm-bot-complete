@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-02
+- Data: 2026-03-04
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -42,6 +42,192 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 4 marca 2026
+
+### 90. S/R Accumulation + Breakout TP — full mean-reversion cycle (04.03)
+
+**Problem:** S/R Reduction (#89) zamykał pozycje schodząc do S/R, ale brakowało dwóch komplementarnych mechanizmów:
+1. Przy S/R z małą/zerową pozycją bot NIE budował pozycji w kierunku bounce
+2. Przy silnym momentum w kierunku pozycji bot NIE przyspieszał zamykania
+
+**Rozwiązanie:** Dwa nowe bloki w kPEPE pipeline — S/R Accumulation + Breakout TP. Razem z S/R Reduction tworzą pełny cykl mean-reversion.
+
+**Pełny cykl:**
+```
+[1] Przy SUPPORT, mały/brak pozycji → S/R Accumulation: buduj LONGI
+[2] Cena rośnie, normalny MM → MG + Auto-Skew zamyka część
+[3] Mocny pump → Breakout TP: agresywnie zamknij longi
+[4] Przy RESISTANCE → S/R Reduction zamyka resztkę + Accumulation buduje SHORTY
+[5-7] Mirror going down → cycle repeats
+```
+
+**A) Config — 7 nowych pól w `MomentumGuardConfig` (`short_only_config.ts`):**
+```typescript
+// S/R Accumulation
+srAccumulationEnabled: boolean       // default true
+srAccumBounceBoost: number           // default 1.5 (50% more on bounce side)
+srAccumCounterReduce: number         // default 0.50 (50% less on counter side)
+srAccumSpreadWiden: number           // default 1.3 (30% wider on bounce side)
+// Breakout TP
+srBreakoutTpEnabled: boolean         // default true
+srBreakoutTpScoreThreshold: number   // default 0.50 (min |score| to trigger)
+srBreakoutTpClosingBoost: number     // default 1.5 (closing-side boost)
+```
+
+kPEPE overrides: `srAccumBounceBoost: 1.8` (aggressive), `srBreakoutTpScoreThreshold: 0.40` (trigger earlier).
+
+**B) S/R Accumulation logika (`mm_hl.ts`, po S/R Reduction, przed Dynamic TP):**
+- Fires when `|skew| <= srMaxRetainPct` (small/no position) — complementary with S/R Reduction which fires when `|skew| > srMaxRetainPct`
+- Same zone as S/R Reduction (`accumZone = mgStrongZone × srReductionStartAtr`)
+- At SUPPORT (`!hasShortPos`): `bid × bounceBoost`, `ask × counterReduce`, `bidSpread × spreadWiden`
+- At RESISTANCE (`!hasLongPos`): mirror — `ask × bounceBoost`, `bid × counterReduce`, `askSpread × spreadWiden`
+- Progress 0→1 as price approaches S/R level
+
+**C) Breakout TP logika (`mm_hl.ts`, po S/R Accumulation, przed Dynamic TP):**
+- Fires when `|momentumScore| > threshold` AND position aligned with momentum
+- LONG + strong pump (score > threshold): `ask × closingBoost`, `bid × 1/closingBoost`
+- SHORT + strong dump (score < -threshold): `bid × closingBoost`, `ask × 1/closingBoost`
+- Multiplicative with MG — amplifies natural mean-reversion closing
+
+**D) Pipeline position:**
+```
+MG Score → Multipliers
+  ↓ MG Log
+  ↓ S/R PROGRESSIVE REDUCTION (close big pos at S/R)
+  ↓ >>> S/R ACCUMULATION (NEW — build pos at S/R when flat) <<<
+  ↓ >>> BREAKOUT TP (NEW — close pos on strong aligned momentum) <<<
+  ↓ Dynamic TP
+  ↓ Inventory SL
+  ↓ Auto-Skew
+  ↓ generateGridOrdersCustom
+```
+
+**E) Interakcje:**
+- **S/R Reduction + Accumulation**: Complementary — never both active for same S/R (different skew conditions). Together: full position lifecycle at S/R.
+- **MG + Accumulation**: MG at support with dump: bid×1.30 ask×0.10. Accumulation adds bid×1.5 → combined bid×1.95, ask×0.05. Ultra-aggressive buying.
+- **MG + Breakout TP**: MG strong pump: bid×0.10 ask×1.30. Breakout with LONG: ask×1.5 → combined bid×0.067, ask×1.95. Maximum selling pressure.
+
+**Logi:**
+- `🔄 [SR_ACCUM] kPEPE: SUPPORT → accumulate LONGS — progress=92% dist=0.35% zone=4.50% skew=10% → bid×1.74 ask×0.54 bidSpread×1.28`
+- `🔄 [SR_ACCUM] kPEPE: RESISTANCE → accumulate SHORTS — progress=96% ...`
+- `🚀 [BREAKOUT_TP] kPEPE: LONG+PUMP — score=0.72 > 0.40 → bid×0.067 ask×1.95 (CLOSING)`
+- `🚀 [BREAKOUT_TP] kPEPE: SHORT+DUMP — score=-0.65 > 0.40 → bid×1.95 ask×0.067 (CLOSING)`
+
+**Pliki:** `src/config/short_only_config.ts` (+14), `src/mm_hl.ts` (+62)
+
+### 89. S/R Progressive Position Reduction — take profit at support/resistance (04.03)
+
+**Problem:** kPEPE (PURE_MM) budował masywnego SHORT (-959K kPEPE, $3,583) schodząc do support. Momentum Guard redukował ask SIZE (ask×0.35), ale nawet $280/tick przez 100+ ticków = ogromna pozycja. Brak mechanizmu który AKTYWNIE redukuje pozycję gdy cena podchodzi do S/R w korzystnym kierunku. Przy support bot miał pełnego shorta zamiast max 20%.
+
+**Rozwiązanie:** S/R Progressive Reduction — gdy SHORT i cena spada ku support (profit) → progresywnie zamykaj. Przy support → max 20% pozycji. Potem normalny MM (MG proximity handles bounce/break).
+
+**A) Config — 4 nowe pola w `MomentumGuardConfig` (`short_only_config.ts`):**
+```typescript
+srReductionEnabled: boolean     // default true
+srReductionStartAtr: number     // Start zone at N×ATR from S/R (default 3.0)
+srMaxRetainPct: number          // Max position at S/R (default 0.20 = 20%)
+srClosingBoostMult: number      // Closing-side boost at S/R (default 2.0)
+```
+
+kPEPE override: `srReductionStartAtr: 2.5` (start earlier — volatile, moves fast).
+
+**B) Logika (`mm_hl.ts`, po MG multipliers, przed Dynamic TP):**
+```
+reductionZone = mgStrongZone × srReductionStartAtr  (e.g. 1.8% × 2.5 = 4.5%)
+progress = 1 - mgSupportDist / reductionZone         (0.0 at zone edge → 1.0 at S/R)
+
+SHORT near SUPPORT (profitable):
+  if |skew| > 20%:
+    ask × (1 - progress)              → stop building shorts
+    bid × (1 + progress × 1.0)        → boost closing (buy back)
+  else: DISENGAGED → normal MM
+
+LONG near RESISTANCE (profitable): mirror logic
+```
+
+**C) Pipeline position:**
+```
+MG Score → Multipliers
+  ↓ MG Log
+  ↓ >>> S/R PROGRESSIVE REDUCTION (NEW) <<<
+  ↓ Dynamic TP (spread widener)
+  ↓ Inventory SL (panic close)
+  ↓ Auto-Skew
+  ↓ generateGridOrdersCustom
+```
+
+**Interakcje:**
+- **MG multipliers (before):** MG redukuje asks podczas dump (ask×0.10). S/R Reduction mnoży na wierzch: ask×0.10 × 0.2 = ask×0.02. Oba systemy zgadzają się "stop shorting at support".
+- **Dynamic TP (after):** Rozszerza closing spread. Komplementarne — S/R boost SIZE, Dynamic TP widen SPREAD.
+- **Inventory SL (after):** Panic close underwater. S/R Reduction = profitable positions (TP at S/R). Brak konfliktu.
+- **MIN_PROFIT (after grid):** S/R operuje na profitable positions (cena away from entry toward S/R) → close orders far from entry → MIN_PROFIT nie filtruje.
+
+**Przykład kPEPE SHORT -43% skew, cena spada do support:**
+```
+S/R(1h): R=$0.003732 S=$0.003418, ATR=$0.000065 (1.8%)
+reductionZone = 0.018 × 2.5 = 4.5%
+price=$0.003500, mgSupportDist=2.34%
+progress = 1 - 2.34/4.5 = 0.48 (48%)
+
+|skew|=43% > 20% → ACTIVE:
+  ask × 0.52 (halve new shorts)
+  bid × 1.48 (boost closing)
+Combined with MG dump (bid×1.15, ask×0.40):
+  Final: bid×1.71, ask×0.21 → aggressive closing, minimal new shorts
+```
+
+**Logi:** `📉 [SR_REDUCTION] kPEPE: SHORT near SUPPORT — progress=48% dist=2.34% zone=4.50% skew=-43% → ask×0.21 bid×1.71 (REDUCING)` lub `DISENGAGED (skew 15% <= 20% → normal MM)`
+
+**Pliki:** `src/config/short_only_config.ts` (+8), `src/mm_hl.ts` (+55)
+
+### 88. INVENTORY_SL + MIN_PROFIT deadlock fix — 8h bot freeze resolved (04.03)
+
+**Problem:** Bot mm-pure (kPEPE) zamrożony na 8+ godzin — generował **0 orderów**. Pozycja SHORT -976,589 kPEPE ($3,583, entry $0.003450) underwater 6.1% przy cenie $0.003660. Watchdog: "No fills detected for 7.0h".
+
+**Root cause — deadlock między dwoma systemami:**
+
+| System | Co robi | Efekt |
+|--------|---------|-------|
+| **INVENTORY_SL (Panic)** | skew=45%, drawdown=6.1% > 4.8% (2.5×ATR) → `asks=0, bids×2` | Blokuje aski (nie dodawaj shortów), podwaja bidy (zamykaj SHORT!) |
+| **MIN_PROFIT** | Filtruje bidy gdzie `price > entry × (1 - 0.001)` | Entry=$0.003450, maxBidPrice=$0.003447. Cena $0.003660 → WSZYSTKIE bidy odfiltrowane |
+
+**Wynik:** asks=0 (INVENTORY_SL) + bids=0 (MIN_PROFIT) = **0 orderów przez 8 godzin**. Bot żywy ale kompletnie sparaliżowany.
+
+**Logi (pre-fix):**
+```
+🚨 [INVENTORY_SL] kPEPE: PANIC SHORT — skew=45% drawdown=6.1% > 4.8% (2.5×ATR) → asks=0 bids×2
+🛑 [BEAR_TRAP] kPEPE: Cancelled 0 ASK orders (sizeMultipliers.ask=0)
+📊 [ML-GRID] pair=kPEPE mid≈0.0036600 buyLevels=0 sellLevels=0
+kPEPE Multi-Layer: 0 orders
+🕒 [WATCHDOG] No fills detected for 7.0h
+```
+
+**Fix — `inventorySlPanic` flag (4 zmiany w `src/mm_hl.ts`):**
+
+| Linia | Zmiana |
+|-------|--------|
+| 8268 | `let inventorySlPanic = false` — deklaracja flagi |
+| 8443 | `inventorySlPanic = true` — w bloku PANIC SHORT |
+| 8453 | `inventorySlPanic = true` — w bloku PANIC LONG |
+| 8526 | `&& !inventorySlPanic` dodane do warunku MIN_PROFIT |
+
+**Logika:** Gdy INVENTORY_SL jest w trybie PANIC (ekstremalny skew + drawdown), MIN_PROFIT jest bypassowany. Stop-loss (zamknięcie pozycji) ma priorytet nad ochroną przed stratą na fees. Bot zamyka underwater pozycję nawet ze stratą, bo alternatywa (8h paraliżu) jest gorsza.
+
+**Timeline pozycji (z analizy fills):**
+- 03-03 17:00 → 03-04 08:46 UTC: Gradualny buildup SHORT (-976K kPEPE) przez ~100 sell fills po $100
+- 03-04 08:46 UTC: Ostatni fill. Cena rosła, INVENTORY_SL kicked in + MIN_PROFIT blocked = freeze
+- 03-04 17:02 UTC (po fix): Pierwsze BUY fills (Close Short @ $0.003701, closedPnl=-$6.78) — bot zamyka pozycję
+
+**Weryfikacja po deploy:**
+```
+📊 Status | Daily PnL: $1.37 | Total: $458.65
+L1-L4 BUY orders: $0.003674-$0.003703 × 27K-27K kPEPE ($100 each)
+```
+
+**Pliki:** `src/mm_hl.ts` (+4 linie)
 
 ---
 
@@ -3972,7 +4158,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
-- **kPEPE risk pipeline (27.02, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (04.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **S/R Accumulation (04.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3). Logi: `🔄 [SR_ACCUM]`. Complementary z S/R Reduction — never both active (different skew conditions).
+- **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
+- **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
 - **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.
 - **DRY_RUN instanceof guard pattern (02.03)**: W mm_hl.ts, KAŻDE użycie `this.trading as LiveTrading` lub dostęp do LiveTrading-only properties (l2BookCache, shadowTrading, binanceAnchor, vpinAnalyzers, adverseTracker, closePositionForPair) MUSI być chronione `if (this.trading instanceof LiveTrading)` lub nullable pattern: `const lt = this.trading instanceof LiveTrading ? this.trading : null; if (lt?.property)`. PaperTrading NIE ma tych properties → TypeError w DRY_RUN. Dwie różne klasy w pliku: `LiveTrading` (linia ~1479) i `HyperliquidMMBot` (linia ~3595) — metody na jednej NIE są dostępne na drugiej via `this`.
 - **PM2 --update-env (02.03)**: Przy `pm2 restart` po zmianie pliku źródłowego, ZAWSZE dodawaj `--update-env`. Bez tego ESM loader (`--experimental-loader ts-node/esm`) może cacheować starą wersję modułu. Symptom: nowa metoda "is not a function" mimo że grep na serwerze potwierdza jej istnienie w pliku.

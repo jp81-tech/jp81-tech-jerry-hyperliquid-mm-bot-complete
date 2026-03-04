@@ -3577,6 +3577,39 @@ class LiveTrading implements TradingInterface {
       return []
     }
   }
+
+  /**
+   * Clean up unbounded data structures to prevent memory leaks.
+   * Returns stats for logging.
+   */
+  cleanupStaleData(): { cloidMapCleared: number; quantTrimmed: number; solTrimmed: number } {
+    // 1. orderCloidMap — WRITE-ONLY leak (set at fill, never read via .get/.has/.delete)
+    const cloidSize = this.orderCloidMap.size
+    this.orderCloidMap.clear()
+
+    // 2. quantTelemetry — trim entries for pairs inactive >1h
+    let quantTrimmed = 0
+    const now = Date.now()
+    for (const [key, entry] of this.quantTelemetry.entries()) {
+      if (entry.recent_submits.length > 0) {
+        const newest = entry.recent_submits[entry.recent_submits.length - 1]?.timestamp ?? 0
+        if (now - newest > 3600_000) {
+          this.quantTelemetry.delete(key)
+          quantTrimmed++
+        }
+      }
+    }
+
+    // 3. solTickDiscrepancies — trim to last 60s if oversized
+    let solTrimmed = 0
+    if (this.solTickDiscrepancies.length > 100) {
+      const before = this.solTickDiscrepancies.length
+      this.solTickDiscrepancies = this.solTickDiscrepancies.filter(d => d.timestamp > now - 60_000)
+      solTrimmed = before - this.solTickDiscrepancies.length
+    }
+
+    return { cloidMapCleared: cloidSize, quantTrimmed, solTrimmed }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4288,13 +4321,75 @@ class HyperliquidMMBot {
     }
   }
 
+  /**
+   * Periodic memory cleanup — prevents unbounded growth of Maps/arrays.
+   * Called every 100 ticks (~100 min with 60s interval).
+   */
+  private cleanupMemory() {
+    const before = process.memoryUsage()
+    const now = Date.now()
+
+    // 1. LiveTrading stale data (orderCloidMap, quantTelemetry, solTickDiscrepancies)
+    let ltStats = { cloidMapCleared: 0, quantTrimmed: 0, solTrimmed: 0 }
+    if (this.trading instanceof LiveTrading) {
+      ltStats = this.trading.cleanupStaleData()
+    }
+
+    // 2. goldenDuoCache — remove expired entries (TTL 60s, clear after 2×TTL)
+    for (const [key, entry] of this.goldenDuoCache.entries()) {
+      if (now - entry.timestamp > this.goldenDuoCacheTTL * 2) {
+        this.goldenDuoCache.delete(key)
+      }
+    }
+
+    // 3. predictionCache — remove stale predictions (>30 min)
+    for (const [key, entry] of this.predictionCache.entries()) {
+      if (now - entry.fetchedAt > 30 * 60_000) {
+        this.predictionCache.delete(key)
+      }
+    }
+
+    // 4. bounceHighs — remove entries older than 1h
+    for (const [key, entry] of this.bounceHighs.entries()) {
+      if (now - entry.ts > 3600_000) {
+        this.bounceHighs.delete(key)
+      }
+    }
+
+    // 5. pumpShieldHistory — already capped at 10 per pair, but clean dead pairs
+    for (const [key, history] of this.pumpShieldHistory.entries()) {
+      if (history.length === 0) {
+        this.pumpShieldHistory.delete(key)
+      } else {
+        const newestTs = history[history.length - 1]?.ts ?? 0
+        if (now - newestTs > 3600_000) {
+          this.pumpShieldHistory.delete(key)
+          this.pumpShieldCooldowns.delete(key)
+        }
+      }
+    }
+
+    const after = process.memoryUsage()
+    const heapMB = (after.heapUsed / 1024 / 1024).toFixed(1)
+    const rssMB = (after.rss / 1024 / 1024).toFixed(1)
+    const freedKB = ((before.heapUsed - after.heapUsed) / 1024).toFixed(0)
+    console.log(`🧹 [MEMORY_CLEANUP] tick=${this.tickCount} heap=${heapMB}MB rss=${rssMB}MB freed≈${freedKB}KB | cloidMap=${ltStats.cloidMapCleared} quantTrimmed=${ltStats.quantTrimmed} goldenDuo=${this.goldenDuoCache.size} predictions=${this.predictionCache.size}`)
+  }
+
   async mainLoop() {
     while (true) {
       try {
+        this.tickCount++
+
         // Check kill switch
         if (await killSwitchActive()) {
           this.notifier.error('❌ Kill switch active - bot stopped')
           break
+        }
+
+        // 🧹 Periodic memory cleanup (every 100 ticks ~100 min)
+        if (this.tickCount % 100 === 0) {
+          this.cleanupMemory()
         }
 
         this.checkFillWatchdog()
@@ -5658,16 +5753,30 @@ class HyperliquidMMBot {
    * Get Nansen directional bias for a trading pair (for risk management)
    * Returns 'long' for strong bullish signals, 'short' for bearish, 'neutral' otherwise
    */
+  // Tokens that inherit BTC's Nansen bias when they have no own gdSignal (95% Pearson correlation)
+  private static readonly BTC_CROSS_BIAS_TOKENS = ['KPEPE']
+
   private getNansenBiasForPair(pair: string): NansenBias {
     try {
       const symbol = pair.split(/[-_]/)[0].toUpperCase()
 
       // Get fresh data from Golden Duo Cache (synced every 60s from Proxy)
-      const gdSignal = this.goldenDuoData[symbol] || this.goldenDuoData[symbol.toLowerCase()]
+      let gdSignal = this.goldenDuoData[symbol] || this.goldenDuoData[symbol.toLowerCase()]
+
+      // BTC cross-token bias: kPEPE has 95% Pearson correlation with BTC
+      // When kPEPE has no own signal, use BTC's directional bias as proxy
+      if (!gdSignal && HyperliquidMMBot.BTC_CROSS_BIAS_TOKENS.includes(symbol)) {
+        const btcSignal = this.goldenDuoData['BTC']
+        if (btcSignal) {
+          gdSignal = btcSignal
+          if (this.tickCount % 20 === 0) {
+            console.log(`🔗 [BTC_CROSS_BIAS] ${pair}: No own signal → using BTC bias (${btcSignal.bias?.toFixed(2)})`)
+          }
+        }
+      }
 
       if (!gdSignal) {
-        // DEBUG: Log when no signal found
-        if (pair === 'ZEC' || pair === 'kPEPE') {
+        if (pair === 'ZEC') {
           console.log(`[DEBUG BIAS] ${pair}: No gdSignal found (keys: ${Object.keys(this.goldenDuoData).slice(0, 5).join(',')})`)
         }
         return 'neutral'
@@ -6187,7 +6296,9 @@ class HyperliquidMMBot {
     // Early stop-loss threshold: dynamic based on bias strength
     // Strong bias: -$20, Soft bias: -$50 (to prevent disasters like ZEC -$490)
     const symbol = pair.split(/[-_]/)[0].toUpperCase()
+    // BTC cross-bias: kPEPE inherits BTC's bias entry when missing own data
     const biasEntry = this.nansenBiasCache.data[symbol]
+      || (HyperliquidMMBot.BTC_CROSS_BIAS_TOKENS.includes(symbol) ? this.nansenBiasCache.data['BTC'] : undefined)
     const biasStrength = biasEntry?.biasStrength || 'neutral'
     const config = BIAS_CONFIGS[biasStrength]
     const NANSEN_CONFLICT_SL_USD = config.contraPnlLimit
@@ -7259,7 +7370,9 @@ class HyperliquidMMBot {
 
     // 🔥 Get Nansen directional bias for risk management
     const nansenBias = this.getNansenBiasForPair(pair)
+    // BTC cross-bias: kPEPE inherits BTC's bias entry when missing own data
     const biasEntry = this.nansenBiasCache.data[symbol]
+      || (HyperliquidMMBot.BTC_CROSS_BIAS_TOKENS.includes(symbol) ? this.nansenBiasCache.data['BTC'] : undefined)
     const biasStrength = biasEntry?.biasStrength || 'neutral'
 
     // Get config for this bias strength
@@ -8152,6 +8265,7 @@ class HyperliquidMMBot {
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
         const momGuardConfig = getMomentumGuardConfig(pair)
+        let inventorySlPanic = false  // Set by INVENTORY_SL, bypasses MIN_PROFIT
         // ATR% computed outside MG scope — also used by Dynamic Spread below
         const mvAnalysisMg = this.marketVision?.getPairAnalysis(pair)
         const mgAtr = mvAnalysisMg?.atr ?? 0
@@ -8287,6 +8401,139 @@ class HyperliquidMMBot {
             )
           }
 
+          // === 📉 S/R PROGRESSIVE REDUCTION (Take Profit at S/R) ===
+          // When approaching S/R with a profitable position → progressively close
+          // SHORT approaching support (profitable) → reduce asks (stop building), boost bids (close shorts)
+          // LONG approaching resistance (profitable) → reduce bids (stop building), boost asks (close longs)
+          // At S/R with position <= maxRetainPct → disengage → normal MM (MG proximity handles bounce/break)
+          if (momGuardConfig.srReductionEnabled && position && mgAtr > 0) {
+            const absSkewSr = Math.abs(actualSkew)
+            const reductionZone = mgStrongZone * momGuardConfig.srReductionStartAtr
+
+            let srReductionApplied = false
+
+            // SHORT approaching SUPPORT (profitable move down)
+            if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone) {
+              const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / reductionZone))
+
+              if (absSkewSr > momGuardConfig.srMaxRetainPct) {
+                sizeMultipliers.ask *= (1.0 - progress)
+                sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
+                srReductionApplied = true
+              }
+
+              if (this.tickCount % 20 === 0 || srReductionApplied) {
+                console.log(
+                  `📉 [SR_REDUCTION] ${pair}: SHORT near SUPPORT — progress=${(progress*100).toFixed(0)}% ` +
+                  `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  (srReductionApplied
+                    ? `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} (REDUCING)`
+                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(momGuardConfig.srMaxRetainPct*100).toFixed(0)}% → normal MM)`)
+                )
+              }
+            }
+
+            // LONG approaching RESISTANCE (profitable move up)
+            if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone) {
+              const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / reductionZone))
+
+              if (absSkewSr > momGuardConfig.srMaxRetainPct) {
+                sizeMultipliers.bid *= (1.0 - progress)
+                sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
+                srReductionApplied = true
+              }
+
+              if (this.tickCount % 20 === 0 || srReductionApplied) {
+                console.log(
+                  `📈 [SR_REDUCTION] ${pair}: LONG near RESISTANCE — progress=${(progress*100).toFixed(0)}% ` +
+                  `dist=${(mgResistDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  (srReductionApplied
+                    ? `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (REDUCING)`
+                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(momGuardConfig.srMaxRetainPct*100).toFixed(0)}% → normal MM)`)
+                )
+              }
+            }
+          }
+
+          // === 🔄 S/R ACCUMULATION (Build Position at S/R) ===
+          // When at S/R with small/no position → actively build in bounce direction
+          // At support: boost bids (buy), reduce asks (don't sell), widen bid spread (buy below support)
+          // At resistance: boost asks (sell), reduce bids (don't buy), widen ask spread (sell above resistance)
+          // Complementary with S/R Reduction: Reduction handles |skew| > srMaxRetainPct, Accumulation handles |skew| <= srMaxRetainPct
+          if (momGuardConfig.srAccumulationEnabled && mgAtr > 0) {
+            const absSkewAccum = Math.abs(actualSkew)
+            const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr  // same zone as S/R Reduction
+
+            let srAccumApplied = false
+
+            // At SUPPORT with small/no position → accumulate LONGS (buy the bounce)
+            if (!hasShortPos && mgSupportBody > 0 && mgSupportDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
+              const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / accumZone))
+              sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
+              sizeMultipliers.ask *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              gridBidMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
+              srAccumApplied = true
+
+              if (this.tickCount % 20 === 0 || srAccumApplied) {
+                console.log(
+                  `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${(progress*100).toFixed(0)}% ` +
+                  `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} bidSpread×${gridBidMult.toFixed(2)}`
+                )
+              }
+            }
+
+            // At RESISTANCE with small/no position → accumulate SHORTS (sell the reversal)
+            else if (!hasLongPos && mgResistBody > 0 && mgResistDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
+              const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / accumZone))
+              sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
+              sizeMultipliers.bid *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              gridAskMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
+              srAccumApplied = true
+
+              if (this.tickCount % 20 === 0 || srAccumApplied) {
+                console.log(
+                  `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${(progress*100).toFixed(0)}% ` +
+                  `dist=${(mgResistDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`
+                )
+              }
+            }
+          }
+
+          // === 🚀 BREAKOUT TP (Close Position on Strong Momentum) ===
+          // When strong momentum aligned with profitable position → aggressively close
+          // LONG + strong pump → boost asks (sell to close), reduce bids (don't buy more)
+          // SHORT + strong dump → boost bids (buy to close), reduce asks (don't sell more)
+          // Multiplicative with MG — amplifies the natural mean-reversion closing effect
+          if (momGuardConfig.srBreakoutTpEnabled && Math.abs(momentumScore) > momGuardConfig.srBreakoutTpScoreThreshold) {
+            let breakoutApplied = false
+
+            if (hasLongPos && momentumScore > momGuardConfig.srBreakoutTpScoreThreshold) {
+              // Strong pump + LONG = profitable → aggressively close longs
+              sizeMultipliers.ask *= momGuardConfig.srBreakoutTpClosingBoost
+              sizeMultipliers.bid *= (1.0 / momGuardConfig.srBreakoutTpClosingBoost)
+              breakoutApplied = true
+            } else if (hasShortPos && momentumScore < -momGuardConfig.srBreakoutTpScoreThreshold) {
+              // Strong dump + SHORT = profitable → aggressively close shorts
+              sizeMultipliers.bid *= momGuardConfig.srBreakoutTpClosingBoost
+              sizeMultipliers.ask *= (1.0 / momGuardConfig.srBreakoutTpClosingBoost)
+              breakoutApplied = true
+            }
+
+            if (breakoutApplied && (this.tickCount % 20 === 0 || Math.abs(momentumScore) > 0.6)) {
+              console.log(
+                `🚀 [BREAKOUT_TP] ${pair}: ${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} — ` +
+                `score=${momentumScore.toFixed(2)} > ${momGuardConfig.srBreakoutTpScoreThreshold} ` +
+                `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING)`
+              )
+            }
+          }
+
           // === 🎯 DYNAMIC TP (Spread Widener) ===
           // When micro-reversal detected and price moving in position's favor → widen closing-side spread
           // "Let it run" — don't TP too early when reversal is confirmed
@@ -8326,6 +8573,7 @@ class HyperliquidMMBot {
                   // SHORT underwater → block asks (stop adding), aggressive bids (close)
                   sizeMultipliers.ask = 0
                   sizeMultipliers.bid *= momGuardConfig.panicClosingMult
+                  inventorySlPanic = true
                   console.log(
                     `🚨 [INVENTORY_SL] ${pair}: PANIC SHORT — skew=${(absSkew*100).toFixed(0)}% ` +
                     `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
@@ -8335,6 +8583,7 @@ class HyperliquidMMBot {
                   // LONG underwater → block bids (stop adding), aggressive asks (close)
                   sizeMultipliers.bid = 0
                   sizeMultipliers.ask *= momGuardConfig.panicClosingMult
+                  inventorySlPanic = true
                   console.log(
                     `🚨 [INVENTORY_SL] ${pair}: PANIC LONG — skew=${(absSkew*100).toFixed(0)}% ` +
                     `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
@@ -8406,8 +8655,8 @@ class HyperliquidMMBot {
         // === 📐 MIN PROFIT BUFFER: remove close orders that would lose money to fees ===
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
-        // NO BYPASS for underwater positions — PURE_MM should hold and mean-revert, not panic-close.
-        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0) {
+        // BYPASS when INVENTORY_SL PANIC is active — stop loss must override profit filter.
+        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic) {
           const entryPx = position.entryPrice || 0
           if (entryPx > 0) {
             const minProfitFraction = dynSpreadCfg.minProfitBps / 10000  // 10bps = 0.001

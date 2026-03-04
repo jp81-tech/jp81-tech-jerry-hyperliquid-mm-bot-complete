@@ -38,6 +38,7 @@
 30. [Prediction Bias — bot zaczyna przewidywać przyszłość](#prediction-bias--bot-zaczyna-przewidywac-przyszlosc)
 31. [XGBoost Backfiller — 180 dni historii w 5 minut](#xgboost-backfiller--180-dni-historii-w-5-minut)
 32. [DRY_RUN Safety — instanceof guard pattern](#dry_run-safety--instanceof-guard-pattern)
+33. [S/R Mean-Reversion Cycle — pelny cykl kupuj dol, sprzedaj gore](#sr-mean-reversion-cycle--pelny-cykl-kupuj-dol-sprzedaj-gore)
 
 ---
 
@@ -7064,3 +7065,270 @@ l1Bps = Math.max(minL1, Math.min(maxL1, Math.round(l1Bps)))
 |------|--------|
 | `src/config/short_only_config.ts` | kPEPE DynamicSpread override (22/32bps), Auto-Skew gentler (1.5/10bps) |
 | `src/mm_hl.ts` | Clamp fix (direction-agnostic), MG weights (35/30/35) |
+
+---
+
+## S/R Progressive Reduction — nie trzymaj pełnej pozycji przy wsparciu
+
+> "Generał nie wysyła całej armii pod mury twierdzy. Im bliżej murów, tym mniej żołnierzy na froncie — reszta zbiera łupy."
+
+### Problem: bot nie brał profitu
+
+Wyobraź sobie sytuację: kPEPE ma SHORT pozycję -43% skew ($3,583). Cena spada — świetnie, SHORT zarabia. Ale zamiast stopniowo zamykać shorta i brać profit, bot kontynuował budowanie pozycji aż do support level. Przy wsparciu miał PEŁNEGO shorta zamiast max 20%.
+
+To jak jechanie z górki na nartach i nie hamowanie — fajnie dopóki nie trafisz na płaski teren (support), a wtedy cena może się odbić i zabrać cały profit.
+
+**Momentum Guard** już redukował ask SIZE (ask×0.35 przy dump), ale to za mało. Nawet przy zredukowanych askach: $280/tick × 100 ticków = ogromna pozycja. Brakowało mechanizmu który **AKTYWNIE** zamyka pozycję w miarę zbliżania się do S/R.
+
+### Rozwiązanie: stopniowe zamykanie w "strefie redukcji"
+
+```
+                 STREFA REDUKCJI (2.5 × ATR = ~4.5%)
+     ┌────────────────────────────────────────────────┐
+     │                                                │
+  Początek strefy                              Support Level
+  (progress=0%)                                (progress=100%)
+     │                                                │
+     │  ask × 1.0     ask × 0.52     ask × 0.0       │
+     │  bid × 1.0     bid × 1.48     bid × 2.0       │
+     │                                                │
+     │  "Normalny MM"  "Zamykam"     "Tylko zamykam"  │
+     └────────────────────────────────────────────────┘
+                    ↑ cena tutaj (48% through)
+
+  Gdy |skew| <= 20% → DISENGAGED → normalny MM
+  (pozycja już wystarczająco mała, MG proximity obsłuży bounce/break)
+```
+
+### Matematyka (prosta!)
+
+```
+reductionZone = mgStrongZone × srReductionStartAtr
+                = 1.8% × 2.5 = 4.5% od support
+
+progress = 1 - (odległość od support / reductionZone)
+         = 1 - 2.34% / 4.5% = 0.48 (48%)
+
+Gdy |skew| > 20% (pozycja duża):
+  ask × (1 - progress)                    = ask × 0.52 (mniej nowych shortów)
+  bid × (1 + progress × (boost - 1))      = bid × 1.48 (więcej zamknięć)
+
+Połączenie z MG dump (bid×1.15, ask×0.40):
+  Finał: bid × 1.71, ask × 0.21
+  → Agresywne zamykanie, minimalne nowe shorty
+```
+
+### Dwa stany: REDUCING vs DISENGAGED
+
+| Stan | Warunek | Co robi |
+|------|---------|---------|
+| **REDUCING** | Cena w strefie + \|skew\| > 20% | Progresywnie zamyka pozycję |
+| **DISENGAGED** | Cena w strefie + \|skew\| <= 20% | Normalny MM — pozycja już mała |
+
+To jest kluczowe: gdy bot zredukuje pozycję do 20% (np. z -43% na -18%), **wyłącza się**. Potem MG proximity obsługuje bounce/break przy support normalnym gridem obu stron.
+
+### Dlaczego to działa z resztą pipeline
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ MOMENTUM GUARD: "Cena spada → ask×0.40, bid×1.15"           │
+│   ↓ (multiplicative)                                        │
+│ S/R REDUCTION: "Blisko support → ask×0.52, bid×1.48"        │
+│   ↓                                                         │
+│ FINAŁ: ask = 0.40 × 0.52 = 0.21 (prawie zero nowych)       │
+│        bid = 1.15 × 1.48 = 1.71 (agresywne zamykanie)      │
+│                                                              │
+│ Oba systemy zgadzają się: "stop shorting at support!"        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+S/R Reduction jest **multiplicative** — mnoży na wierzch MG multiplierów. Gdy MG mówi "dump → redukuj aski" a S/R mówi "near support → redukuj aski" — efekt się kumuluje. Zero konfliktu.
+
+### Analogia wojskowa
+
+Generał prowadzi natarcie (SHORT). Armia posuwa się naprzód (cena spada). Ale przed twierdzą wroga (support) Generał nie atakuje pełnymi siłami. Stopniowo wycofuje oddziały:
+
+- **Daleko od twierdzy**: Pełna ofensywa (normalny grid)
+- **4.5% od twierdzy**: Zaczyna wycofywać tylne oddziały (reduce asks 20%)
+- **2% od twierdzy**: Większość się wycofuje, zostaje straż tylna (reduce asks 50%)
+- **Przy murach**: Tylko zwiad i zbieranie łupów (bid boost, ask≈0, pozycja ≤20%)
+
+Gdy armia się skurczy do 20% → Generał ocenia sytuację: czy przebić mury (breakout) czy się wycofać (bounce)?
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | 4 nowe pola w `MomentumGuardConfig` + defaults + kPEPE override |
+| `src/mm_hl.ts` | ~55 linii po MG log, przed Dynamic TP |
+
+---
+
+## S/R Mean-Reversion Cycle — pelny cykl kupuj dol, sprzedaj gore
+
+> "Kupuj wsparcie, sprzedawaj opor" — najstarsza zasada tradingu. Problem w tym, ze latwiej to powiedziec niz zaprogramowac.
+
+### Problem: S/R Reduction to dopiero polowa
+
+Wyobraz sobie ze masz siatkówke. S/R Reduction (#89) to gracz ktory potrafi ODBIC pilke — gdy kPEPE SHORT schodzi do support, bot zaczyna zamykac pozycje (odbija pilke do gory). Swietnie.
+
+Ale po odbiciu piłka leci w gore... i bot stoi. Nie ustawia sie pod nastepne uderzenie. Nie przygotowuje sie na przyszly support. Nie zamyka pozycji agresywnie gdy piłka leci szybko.
+
+Brakowalo dwoch elementow:
+1. **S/R Accumulation** — "ustaw sie pod pilke" (buduj pozycje przy S/R gdy jestes maly/plaski)
+2. **Breakout TP** — "smecz!" (agresywnie zamknij gdy momentum jest silny)
+
+### Pelny cykl — jak to teraz dziala
+
+```
+         ┌─────────────────────────────────────────────┐
+    [7]  │                                             │  [4]
+   SUPPORT                                        RESISTANCE
+    ↓ S/R Reduction zamyka shorty                    ↓ S/R Reduction zamyka longi
+    ↓ S/R Accumulation buduje LONGI      ←───────── ↓ S/R Accumulation buduje SHORTY
+    │                                             │
+    │  [2] Normalny MM                            │  [5] Normalny MM
+    │  MG + Auto-Skew zamyka czesc longow         │  MG + Auto-Skew zamyka czesc shortow
+    │                                             │
+    │  [3] Mocny pump →                           │  [6] Mocny dump →
+    │  BREAKOUT TP: agresywnie zamknij longi! 🚀  │  BREAKOUT TP: agresywnie zamknij shorty! 🚀
+    │                                             │
+    └───────────────→ cena rosnie ───────────────→┘
+                                                  ↓
+                     cena spada ←─────────────────┘
+```
+
+To jest **pełny cykl mean-reversion** — bot ciągle oscyluje między wsparciem a oporem, budując pozycje na S/R i zamykając je w środku zakresu lub na breakout.
+
+### S/R Accumulation — "kupuj wsparcie, shortuj opor"
+
+**Kiedy sie uruchamia:** Cena blisko S/R + mala/zerowa pozycja (`|skew| <= 20%`).
+
+To jest lustrzany warunek S/R Reduction: Reduction handles duzych (`|skew| > 20%`), Accumulation handles malych (`|skew| <= 20%`). Nigdy oba naraz dla tego samego S/R.
+
+**Przy SUPPORT (buduj LONGI):**
+```
+bid size  × 1.5  (50% wiecej kupowania — "kupuj dip przy wsparciu")
+ask size  × 0.5  (50% mniej sprzedawania — "nie sprzedawaj tanio")
+bid spread × 1.3  (30% szerzej — "kupuj PONIZEJ wsparcia, zlap wick")
+```
+
+**Przy RESISTANCE (buduj SHORTY):**
+```
+ask size  × 1.5  (50% wiecej sprzedawania — "shortuj gore przy oporze")
+bid size  × 0.5  (50% mniej kupowania — "nie kupuj drogo")
+ask spread × 1.3  (30% szerzej — "sprzedawaj POWYZEJ oporu, zlap wick")
+```
+
+**Dlaczego widen spread?** Bo chcemy kupowac/sprzedawac NA lub ZA S/R, nie przed. Wick probe (szybkie przebiecie wsparcia) to idealna okazja — szersza siatka lapie te poziomy.
+
+**Progresywny efekt** — im blizej S/R, tym silniejszy:
+```
+5% od support → progress=0% → zadna zmiana
+3% od support → progress=33% → bid×1.17, ask×0.83
+1% od support → progress=78% → bid×1.39, ask×0.61
+NA support    → progress=100% → bid×1.50, ask×0.50, bidSpread×1.30
+```
+
+### Breakout TP — "smecz!"
+
+**Kiedy sie uruchamia:** Silny momentum (|score| > 0.50) + pozycja po wlasciwej stronie.
+
+To jest moment "zabieraj zyski i nie czekaj na odwrocenie". Gdy kPEPE ma LONG i cena robi pump +4% — nie czekaj na szczyt. Agresywnie sprzedawaj.
+
+**LONG + mocny pump (score > 0.50):**
+```
+ask size × 1.50  (50% wiecej sprzedawania — "zamykaj longi z zyskiem!")
+bid size × 0.67  (33% mniej kupowania — "nie dokupuj na gorce")
+```
+
+**SHORT + mocny dump (score < -0.50):**
+```
+bid size × 1.50  (50% wiecej kupowania — "zamykaj shorty z zyskiem!")
+ask size × 0.67  (33% mniej sprzedawania — "nie dodawaj shortow na dnie")
+```
+
+**Multiplicative z MG:** Momentum Guard juz robi cos podobnego (pump → bid×0.10, ask×1.30). Breakout TP mnozy na wierzch. Efekt:
+```
+MG strong pump:     bid×0.10, ask×1.30
+× Breakout TP LONG: bid÷1.50, ask×1.50
+= Combined:         bid×0.067, ask×1.95
+
+→ Prawie ZERO kupowania + prawie 2× normalnej sprzedazy
+→ Maximum selling pressure, maximum profit-taking
+```
+
+### kPEPE tuning — bardziej agresywny
+
+kPEPE jest volatilny memecoin — bounce od supportu i dump od resistance sa gwaltowne. Dlatego:
+- `srAccumBounceBoost: 1.8` (zamiast 1.5) — 80% wiecej na bounce side (silne odbicia)
+- `srBreakoutTpScoreThreshold: 0.40` (zamiast 0.50) — trigger wczesniej (momentum jest prawdziwy wczesniej)
+
+### Przyklad pelnego cyklu kPEPE
+
+**Faza 1 — Przy support, pozycja sprowadzona do 10% (po S/R Reduction):**
+```
+S/R(1h): R=$0.003732 S=$0.003418, ATR=1.8%
+price=$0.003430 (0.35% od support), zone=4.5%
+|skew|=10% <= 20% → S/R ACCUMULATION ACTIVE
+
+bid × 1.74   ← agresywne kupowanie przy support
+ask × 0.54   ← mniejsza sprzedaz
+bidSpread × 1.28 ← kupuj ponizej support (zlap wick)
+
+Combined z MG dump (bid×1.30, ask×0.10):
+→ Final: bid×2.26, ask×0.05 ← ULTRA-agresywne kupowanie!
+```
+
+**Faza 2 — Cena rosnie, srodek zakresu:**
+```
+price=$0.003580 (4.7% od support > zone 4.5%)
+→ S/R Accumulation wyłączone (za daleko)
+→ Normalny MM, Auto-Skew naturalnie zamyka longi
+```
+
+**Faza 3 — Silny pump, momentumScore=+0.72:**
+```
+Breakout TP: LONG + score 0.72 > 0.40 → ACTIVE!
+ask × 1.50, bid × 0.67
+
+Combined z MG (bid×0.10, ask×1.30):
+→ Final: bid×0.067, ask×1.95 ← maximum selling, close longs!
+```
+
+**Faza 4 — Przy resistance, pozycja prawie zamknieta:**
+```
+S/R Reduction → zamknij reszte longow
+S/R Accumulation → buduj SHORTY przy resistance
+```
+
+**Faza 5-7: Mirror w dol → cykl sie powtarza.**
+
+### Interakcje z innymi systemami
+
+| System | Co robi | Jak wspolgra |
+|--------|---------|-------------|
+| **MG multipliers** | Asymetryczny grid wg momentum | Multiplicative — oba wzmacniaja ten sam kierunek |
+| **S/R Reduction** | Zamyka duze pozycje przy S/R | Complementary — Reduction: |skew|>20%, Accumulation: |skew|<=20% |
+| **Dynamic TP** | Poszerza spread przy micro-reversal | Accumulation poszerza po drugiej stronie — brak konfliktu |
+| **Inventory SL** | Panic close underwater | Accumulation buduje NOWE pozycje (nie underwater) |
+| **Auto-Skew** | Przesuwa mid wg skew | Po accumulation skew rosnie → Auto-Skew lekko przesuwa — naturalne |
+
+### Lekcja inzynierska: Complementary vs Conflicting systems
+
+Dwa systemy moga byc:
+- **Conflicting** — walcza ze soba (np. stary Position-Aware Guard vs MG mean-reversion)
+- **Complementary** — pokrywaja rozne scenariusze (S/R Reduction + Accumulation)
+
+Klucz: warunki MUSZA byc rozlaczne. S/R Reduction fires when `|skew| > 20%`, Accumulation fires when `|skew| <= 20%`. Matematycznie niemozliwe zeby oba dzialaly jednoczesnie na tym samym S/R. Zero edge cases, zero konfliktow.
+
+Breakout TP tez jest complementary z MG — oba chca tego samego (close profitable position on strong momentum), ale TP dodaje extra boost. Multiplicative = oba wzmacniaja efekt, zamiast sie nadpisywac.
+
+**Anti-pattern (z naszej historii):** Position-Aware Guard (v2) NADPISYWAL MG multiplier (`skipAskReduce=true` → ask×1.0 zamiast ask×0.10). To byl conflicting system — musielismy go usunac w v3. Lekcja: **nigdy nie nadpisuj, zawsze mnoż**.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | 7 nowych pol: srAccumulationEnabled, srAccumBounceBoost, srAccumCounterReduce, srAccumSpreadWiden, srBreakoutTpEnabled, srBreakoutTpScoreThreshold, srBreakoutTpClosingBoost |
+| `src/mm_hl.ts` | ~62 linii: S/R Accumulation + Breakout TP bloki po S/R Reduction, przed Dynamic TP |

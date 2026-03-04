@@ -280,6 +280,20 @@ export interface MomentumGuardConfig {
   autoSkewEnabled: boolean        // default true
   autoSkewShiftBps: number        // bps shift per 10% skew (default 2.0 → 30% skew = 6bps shift)
   autoSkewMaxShiftBps: number     // max safe shift cap (default 15.0 bps = 0.15%)
+  // S/R Progressive Reduction: take profit by closing position approaching S/R
+  srReductionEnabled: boolean         // Enable S/R progressive reduction (default true)
+  srReductionStartAtr: number         // Start reduction zone at N × ATR from S/R (default 3.0)
+  srMaxRetainPct: number              // Max position to retain at S/R level (default 0.20 = 20%)
+  srClosingBoostMult: number          // Closing-side multiplier boost at S/R (default 2.0)
+  // S/R Accumulation: build position at S/R when flat/small
+  srAccumulationEnabled: boolean       // Enable S/R accumulation (default true)
+  srAccumBounceBoost: number           // Bounce-side size multiplier at S/R (default 1.5 = 50% more)
+  srAccumCounterReduce: number         // Counter-side size multiplier at S/R (default 0.50 = 50% less)
+  srAccumSpreadWiden: number           // Bounce-side spread widener at S/R (default 1.3 = 30% wider)
+  // Breakout TP: aggressively close on strong momentum aligned with position
+  srBreakoutTpEnabled: boolean         // Enable breakout TP (default true)
+  srBreakoutTpScoreThreshold: number   // Min |momentumScore| to trigger (default 0.50)
+  srBreakoutTpClosingBoost: number     // Closing-side multiplier boost (default 1.5)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -308,14 +322,32 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   autoSkewEnabled: true,
   autoSkewShiftBps: 2.0,         // Shift 2 bps per 10% skew (30% skew → 6bps shift)
   autoSkewMaxShiftBps: 15.0,     // Max shift 15 bps (0.15%) — safety cap
+  srReductionEnabled: true,
+  srReductionStartAtr: 3.0,      // Start zone at 3×ATR from S/R
+  srMaxRetainPct: 0.20,          // 20% max position at S/R level
+  srClosingBoostMult: 2.0,       // 2× closing-side boost at S/R
+  srAccumulationEnabled: true,
+  srAccumBounceBoost: 1.5,       // 50% more on bounce side at S/R
+  srAccumCounterReduce: 0.50,    // 50% less on counter side at S/R
+  srAccumSpreadWiden: 1.3,       // 30% wider spread on bounce side at S/R
+  srBreakoutTpEnabled: true,
+  srBreakoutTpScoreThreshold: 0.50,  // Min |score| to trigger breakout TP
+  srBreakoutTpClosingBoost: 1.5,     // 1.5× closing-side boost on breakout
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
   'kPEPE': {
     pumpThresholdPct: 3.0,       // Memecoin: wider pump threshold (higher normal vol)
     atrThresholdMult: 2.0,       // 2× ATR for pump/dump detection
+    moderateThreshold: 0.28,     // Lower than default 0.4 — proximity signal alone can trigger MODERATE
+                                 // At support (prox=-0.80): score=-0.29 → MODERATE → bid×1.15 ask×0.40
+                                 // Default 0.4 required momentum+RSI help → stuck in LIGHT at support
     autoSkewShiftBps: 1.5,       // Gentle skew — hold positions, don't rush to close (30% skew = 4.5bps shift)
     autoSkewMaxShiftBps: 10.0,   // Conservative cap — even at 80% skew, max 10bps shift
+    srReductionStartAtr: 2.5,    // kPEPE: start earlier (volatile, moves fast)
+    srMaxRetainPct: 0.20,        // 20% max at S/R
+    srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
+    srBreakoutTpScoreThreshold: 0.40, // kPEPE: trigger earlier (volatile, momentum is real sooner)
   },
 }
 

@@ -20,7 +20,7 @@ module.exports = {
         RISK_TOTAL_CAPITAL_USD: "9000",
         TELEMETRY_PORT: "8083",
       },
-      max_memory_restart: "300M",
+      max_memory_restart: "350M",
       kill_timeout: 120000,
       listen_timeout: 120000,
       restart_delay: 3000,
