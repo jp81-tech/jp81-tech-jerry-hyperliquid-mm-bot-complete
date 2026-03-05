@@ -2852,8 +2852,7 @@ class LiveTrading implements TradingInterface {
         cancels: [{ a: 0, o: parseInt(orderId) }] // Simplified
       })
       return result && result.status === 'ok'
-    } catch (error) {
-      console.error(`Error canceling order: ${error}`)
+    } catch {
       return false
     }
   }
@@ -8968,49 +8967,12 @@ class HyperliquidMMBot {
       }
     }
 
-    // 🛑 Cancel existing bid orders on exchange when bid×0 (SEPARATE from grid filtering)
-    // 💎 HOLD_FOR_TP: Always cancel counter-SM orders
-    if (sizeMultipliers.bid === 0 && this.trading instanceof LiveTrading && (isHoldForTpGrid || !hasShortPosition)) {
-      try {
-        const existingOrders = await this.trading.getOpenOrders(pair)
-        const existingBids = existingOrders.filter((o: any) => o.side === 'B' || o.side === 'buy')
-        for (const bid of existingBids) {
-          await this.trading.cancelOrder(bid.oid?.toString() || bid.orderId?.toString())
-          this.notifier.warn(`🛑 [BULL_TRAP] ${pair} cancelled existing BID order ${bid.oid || bid.orderId} @ $${bid.limitPx}`)
-        }
-      } catch (e: any) {
-        // Silently ignore - order may have already filled or been cancelled
-      }
-    }
-
-    // 🛑 EMERGENCY OVERRIDE: Remove ask orders when SM longs are winning
-    // ⚠️ BUT: If we have a LONG position (actualSkew > 0.1), we NEED asks to reduce/close it!
-    // NOTE: Use actualSkew (real position) not inventorySkew (modified by vision/signals)
+    // 🛑 EMERGENCY OVERRIDE: Remove ask orders from grid when ask×0
     const hasLongPosition = actualSkew > 0.1
     if (sizeMultipliers.ask === 0 && Array.isArray(gridOrders) && !hasLongPosition) {
       const originalAsks = gridOrders.filter((o: GridOrder) => o.side === 'ask').length
       if (originalAsks > 0) {
         gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask')
-        this.notifier.warn(
-          `🛑 [EMERGENCY] ${pair} removed ${originalAsks} ASKS - SM longs winning, bids only`
-        )
-      }
-    } else if (sizeMultipliers.ask === 0 && hasLongPosition) {
-      this.notifier.info(`✅ [POSITION_REDUCE] ${pair} keeping ASKs despite ask×0 - need to reduce LONG (actualSkew ${(actualSkew * 100).toFixed(0)}%)`)
-    }
-
-    // 🛑 Cancel existing ask orders on exchange when ask×0 (SEPARATE from grid filtering)
-    // ⚠️ BUT: If we have a LONG position, we NEED asks to reduce/close it!
-    if (sizeMultipliers.ask === 0 && this.trading instanceof LiveTrading && !hasLongPosition) {
-      try {
-        const existingOrders = await this.trading.getOpenOrders(pair)
-        const existingAsks = existingOrders.filter((o: any) => o.side === 'A' || o.side === 'sell')
-        for (const ask of existingAsks) {
-          await this.trading.cancelOrder(ask.oid?.toString() || ask.orderId?.toString())
-          this.notifier.warn(`🛑 [BEAR_TRAP] ${pair} cancelled existing ASK order ${ask.oid || ask.orderId} @ $${ask.limitPx}`)
-        }
-      } catch (e: any) {
-        // Silently ignore - order may have already filled or been cancelled
       }
     }
 
