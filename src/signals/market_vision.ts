@@ -293,6 +293,7 @@ export type PairAnalysis = {
   resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — 1h×72, wick-filtered
   supportBody12h: number; // Short-term support from 15m candle bodies (last 48 = 12h) for MG proximity
   resistanceBody12h: number; // Short-term resistance from 15m candle bodies (last 48 = 12h) for MG proximity
+  lastCandle15mClose: number; // Last CLOSED 15m candle close price (for confirmed S/R break detection)
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -469,6 +470,13 @@ export class MarketVisionService {
             supportBody12h = Math.min(...recent15m.map(c => Math.min(c.o, c.c)));
             resistanceBody12h = Math.max(...recent15m.map(c => Math.max(c.o, c.c)));
           }
+        }
+
+        // Last CLOSED 15m candle close — for confirmed S/R break detection
+        // candles15m[-1] = forming (current), candles15m[-2] = last closed
+        let lastCandle15mClose = 0;
+        if (candles15m && candles15m.length >= 2) {
+          lastCandle15mClose = candles15m[candles15m.length - 2].c;
         }
 
         // FLASH CRASH DETECTOR (High Volatility Anomaly)
@@ -716,6 +724,7 @@ export class MarketVisionService {
           resistanceBody4h,
           supportBody12h,
           resistanceBody12h,
+          lastCandle15mClose,
           supportDist: distSup,
           resistanceDist: distRes,
           activeCandlePattern,

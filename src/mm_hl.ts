@@ -3688,6 +3688,7 @@ class HyperliquidMMBot {
 
   // 📍 S/R DISCORD ALERTS — cooldown tracking (token:level_type → last alert timestamp)
   private srAlertCooldowns: Map<string, number> = new Map()
+  private srBreakGraceStart: Map<string, number> = new Map()  // S/R break grace period: pair → timestamp when break first detected
   private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
 
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
@@ -8183,18 +8184,28 @@ class HyperliquidMMBot {
           const mgResistDist = mgResistBody > 0 ? (mgResistBody - midPrice) / midPrice : 1
           const mgSupportDist = mgSupportBody > 0 ? (midPrice - mgSupportBody) / midPrice : 1
 
-          // Explicit breakout handling: price ABOVE resistance or BELOW support = max signal
+          // Proximity signal: -1.0 = AT support, -1.2 = BROKEN support (candle close below)
+          // Mirror: +1.0 = AT resistance, +1.2 = BROKEN resistance (candle close above)
+          const lastCandle15mClose = mvAnalysis?.lastCandle15mClose ?? 0
           let mgProxSignal = 0
-          if (mgResistDist <= 0) {
-            // Price at or above resistance body → max overbought signal
-            mgProxSignal = 1.0
+          if (mgResistBody > 0 && mgResistDist <= 0) {
+            // Price at or above resistance body
+            if (lastCandle15mClose > 0 && lastCandle15mClose > mgResistBody) {
+              mgProxSignal = 1.2  // BROKEN: 15m candle closed ABOVE resistance
+            } else {
+              mgProxSignal = 1.0  // AT resistance (touch, not confirmed break)
+            }
           } else if (mgResistDist < mgStrongZone) {
             mgProxSignal = 0.8
           } else if (mgResistDist < mgModerateZone) {
             mgProxSignal = 0.4
-          } else if (mgSupportDist <= 0) {
-            // Price at or below support body → max oversold signal
-            mgProxSignal = -1.0
+          } else if (mgSupportBody > 0 && mgSupportDist <= 0) {
+            // Price at or below support body
+            if (lastCandle15mClose > 0 && lastCandle15mClose < mgSupportBody) {
+              mgProxSignal = -1.2  // BROKEN: 15m candle closed BELOW support
+            } else {
+              mgProxSignal = -1.0  // AT support (touch, not confirmed break)
+            }
           } else if (mgSupportDist < mgStrongZone) {
             mgProxSignal = -0.8
           } else if (mgSupportDist < mgModerateZone) {
@@ -8202,23 +8213,31 @@ class HyperliquidMMBot {
           }
 
           // === 📍 S/R DISCORD ALERTS ===
-          // Alert when price enters strong zone (1×ATR) around support or resistance
+          // Alert when price enters strong zone (1×ATR) or breaks S/R level
           if (mgProxSignal !== 0) {
             const now = Date.now()
             let srAlertType: string | null = null
             let srLevel = 0
             let srDist = 0
 
-            if (mgResistDist <= 0) {
-              srAlertType = 'ABOVE_RESISTANCE'
+            if (mgProxSignal >= 1.2) {
+              srAlertType = 'BROKEN_RESISTANCE'  // 15m candle closed above resistance
+              srLevel = mgResistBody
+              srDist = mgResistDist
+            } else if (mgResistDist <= 0) {
+              srAlertType = 'AT_RESISTANCE'  // price touching resistance (not confirmed break)
               srLevel = mgResistBody
               srDist = mgResistDist
             } else if (mgResistDist < mgStrongZone) {
               srAlertType = 'NEAR_RESISTANCE'
               srLevel = mgResistBody
               srDist = mgResistDist
+            } else if (mgProxSignal <= -1.2) {
+              srAlertType = 'BROKEN_SUPPORT'  // 15m candle closed below support
+              srLevel = mgSupportBody
+              srDist = mgSupportDist
             } else if (mgSupportDist <= 0) {
-              srAlertType = 'BELOW_SUPPORT'
+              srAlertType = 'AT_SUPPORT'  // price touching support (not confirmed break)
               srLevel = mgSupportBody
               srDist = mgSupportDist
             } else if (mgSupportDist < mgStrongZone) {
@@ -8233,28 +8252,29 @@ class HyperliquidMMBot {
               if (now - lastAlert > HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) {
                 this.srAlertCooldowns.set(cooldownKey, now)
 
+                const isBroken = srAlertType.startsWith('BROKEN')
                 const isResistance = srAlertType.includes('RESISTANCE')
-                const emoji = isResistance ? '🔴' : '🟢'
+                const emoji = isBroken ? '💥' : (isResistance ? '🔴' : '🟢')
                 const levelLabel = isResistance ? 'RESISTANCE' : 'SUPPORT'
                 const distPct = (srDist * 100).toFixed(2)
                 const zonePct = (mgStrongZone * 100).toFixed(2)
 
-                const logMsg = `📍 [SR_ALERT] ${pair}: ${srAlertType} — price=$${midPrice.toFixed(6)} ${levelLabel}=$${srLevel.toFixed(6)} dist=${distPct}% zone=${zonePct}%`
+                const logMsg = `📍 [SR_ALERT] ${pair}: ${srAlertType} — price=$${midPrice.toFixed(6)} ${levelLabel}=$${srLevel.toFixed(6)} dist=${distPct}% zone=${zonePct}% candle15mClose=$${lastCandle15mClose.toFixed(6)}`
                 console.log(logMsg)
 
-                const color = isResistance ? 0xff4444 : 0x44ff44
+                const color = isBroken ? 0xff8800 : (isResistance ? 0xff4444 : 0x44ff44)
                 sendDiscordEmbed({
-                  title: `${emoji} ${pair} — ${srAlertType.replace('_', ' ')}`,
+                  title: `${emoji} ${pair} — ${srAlertType.replace(/_/g, ' ')}`,
                   color,
                   fields: [
                     { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
                     { name: levelLabel, value: `$${srLevel.toFixed(6)}`, inline: true },
                     { name: 'Distance', value: `${distPct}%`, inline: true },
-                    { name: 'ATR Zone', value: `${zonePct}%`, inline: true },
+                    { name: '15m Close', value: `$${lastCandle15mClose.toFixed(6)}`, inline: true },
                     { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
                     { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
                   ],
-                  footer: { text: `S/R from 15m candles (12h lookback) | HTF from 1h (3d) | Cooldown 15min` },
+                  footer: { text: `S/R from 15m candles (12h lookback) | BROKEN = candle close confirmed | Cooldown 15min` },
                   timestamp: new Date().toISOString(),
                 }).catch(() => {})  // fire-and-forget
               }
@@ -8380,8 +8400,63 @@ class HyperliquidMMBot {
 
             let srReductionApplied = false
 
+            // === Grace Period: delay reduction after S/R break AGAINST position ===
+            // LONG + price breaks below support → wait N candles before reducing (fakeout assessment)
+            // SHORT + price breaks above resistance → mirror
+            const graceMs = momGuardConfig.srReductionGraceCandles * 15 * 60 * 1000  // candles × 15min
+            const graceLongKey = `${pair}:LONG_BREAK_SUPPORT`
+            const graceShortKey = `${pair}:SHORT_BREAK_RESIST`
+            let srGraceActive = false
+
+            // LONG + BROKEN SUPPORT (candle close confirmed, prox <= -1.2) → start/check grace
+            if (hasLongPos && mgSupportBody > 0 && mgProxSignal <= -1.2) {
+              if (!this.srBreakGraceStart.has(graceLongKey)) {
+                this.srBreakGraceStart.set(graceLongKey, Date.now())
+                console.log(`⏳ [SR_GRACE] ${pair}: LONG + BROKEN SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
+              }
+              const elapsed = Date.now() - this.srBreakGraceStart.get(graceLongKey)!
+              if (elapsed < graceMs) {
+                srGraceActive = true
+                if (this.tickCount % 10 === 0) {
+                  console.log(`⏳ [SR_GRACE] ${pair}: LONG grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
+                }
+              } else {
+                if (this.tickCount % 20 === 0) {
+                  console.log(`⏳ [SR_GRACE] ${pair}: LONG grace EXPIRED — breakdown confirmed, allowing reduction`)
+                }
+              }
+            } else if (hasLongPos && mgProxSignal > -1.2 && this.srBreakGraceStart.has(graceLongKey)) {
+              // Price recovered (prox no longer BROKEN) → clear grace, resume accumulation
+              console.log(`✅ [SR_GRACE] ${pair}: Price recovered above SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
+              this.srBreakGraceStart.delete(graceLongKey)
+            }
+
+            // SHORT + BROKEN RESISTANCE (candle close confirmed, prox >= 1.2) → start/check grace
+            if (hasShortPos && mgResistBody > 0 && mgProxSignal >= 1.2) {
+              if (!this.srBreakGraceStart.has(graceShortKey)) {
+                this.srBreakGraceStart.set(graceShortKey, Date.now())
+                console.log(`⏳ [SR_GRACE] ${pair}: SHORT + BROKEN RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
+              }
+              const elapsed = Date.now() - this.srBreakGraceStart.get(graceShortKey)!
+              if (elapsed < graceMs) {
+                srGraceActive = true
+                if (this.tickCount % 10 === 0) {
+                  console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
+                }
+              } else {
+                if (this.tickCount % 20 === 0) {
+                  console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace EXPIRED — breakout confirmed, allowing reduction`)
+                }
+              }
+            } else if (hasShortPos && mgProxSignal < 1.2 && this.srBreakGraceStart.has(graceShortKey)) {
+              // Price recovered (prox no longer BROKEN) → clear grace
+              console.log(`✅ [SR_GRACE] ${pair}: Price recovered below RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
+              this.srBreakGraceStart.delete(graceShortKey)
+            }
+
             // SHORT approaching SUPPORT (profitable move down)
-            if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone) {
+            // Grace period suppresses reduction when SHORT broke ABOVE resistance (fakeout assessment)
+            if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone && !srGraceActive) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / reductionZone))
 
               if (absSkewSr > momGuardConfig.srMaxRetainPct) {
@@ -8409,7 +8484,8 @@ class HyperliquidMMBot {
             }
 
             // LONG approaching RESISTANCE (profitable move up)
-            if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone) {
+            // Grace period suppresses reduction when LONG broke BELOW support (fakeout assessment)
+            if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone && !srGraceActive) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / reductionZone))
 
               if (absSkewSr > momGuardConfig.srMaxRetainPct) {
@@ -8466,6 +8542,9 @@ class HyperliquidMMBot {
                 } else {
                   sizeMultipliers.ask *= (1.0 - progress)  // Progressive: keep some asks further from support
                 }
+              } else if (progress > 0.80) {
+                // Strong proximity to support — ZERO out sells to prevent shorting the bounce
+                sizeMultipliers.ask = 0
               } else {
                 sizeMultipliers.ask *= (1.0 - progress * (1.0 - effectiveCounterReduce))
               }
@@ -8498,6 +8577,9 @@ class HyperliquidMMBot {
                 } else {
                   sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
                 }
+              } else if (progress > 0.80) {
+                // Strong proximity to resistance — ZERO out bids to prevent buying into the drop
+                sizeMultipliers.bid = 0
               } else {
                 sizeMultipliers.bid *= (1.0 - progress * (1.0 - effectiveCounterReduce))
               }

@@ -48,6 +48,92 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 5 marca 2026
 
+### 105. S/R Reduction Grace Period — opóźniona redukcja po przełamaniu S/R (05.03)
+
+**Problem:** Gdy cena przebija support/resistance, S/R Reduction natychmiast zaczynał zamykać pozycję. Ale wiele przebić to fakeouty (cena wraca). Bot tracił pozycję na fakeoucie, a potem musiał odbudowywać ją droższej.
+
+**Rozwiązanie:** Grace period — po POTWIERDZONYM przebieceniu S/R (candle close, prox=±1.2) czekaj N candles 15m przed redukcją. Jeśli cena wróci → grace kasuje się, akumulacja kontynuuje.
+
+**Config (`srReductionGraceCandles`):**
+
+| Config | Default | kPEPE |
+|--------|---------|-------|
+| `srReductionGraceCandles` | 2 (30 min) | **3 (45 min)** |
+
+**Logika:**
+- LONG + `mgProxSignal <= -1.2` (BROKEN SUPPORT, candle close below) → start grace timer
+- SHORT + `mgProxSignal >= 1.2` (BROKEN RESISTANCE, candle close above) → start grace timer
+- Podczas grace: `srGraceActive = true` → S/R Reduction suppressed
+- Grace expired → reduction dozwolona (breakdown potwierdzony)
+- Price recovery (`mgProxSignal > -1.2` / `< 1.2`) → grace cleared, accumulation continues
+
+**Kluczowe:** Grace triggeruje TYLKO na `prox=±1.2` (candle close confirmed), NIE na `prox=±1.0` (touch). To chroni przed fakeoutami gdzie tick price spada poniżej supportu ale candle zamyka się powyżej.
+
+**Logi:**
+- `⏳ [SR_GRACE] kPEPE: LONG + BROKEN SUPPORT ($0.003512) prox=-1.2 → grace started (3 candles = 45min)`
+- `⏳ [SR_GRACE] kPEPE: LONG grace active — 30min remaining | prox=-1.2`
+- `⏳ [SR_GRACE] kPEPE: LONG grace EXPIRED — breakdown confirmed, allowing reduction`
+- `✅ [SR_GRACE] kPEPE: Price recovered above SUPPORT ($0.003512) prox=-0.8 → grace cleared, accumulation continues`
+
+**Pliki:** `src/config/short_only_config.ts` (+3: interface, default, kPEPE override), `src/mm_hl.ts` (+1 property `srBreakGraceStart` Map, +~50 linii grace logic)
+
+---
+
+### 104. Proximity Signal prox=±1.0/±1.2 + `lastCandle15mClose` — rozróżnienie touch vs confirmed break (05.03)
+
+**Problem:** Proximity signal miał binarne wartości — cena na supportcie lub nie. Brak rozróżnienia między:
+- Tick price dotknął supportu (może być fakeout, wick)
+- 15m candle ZAMKNĘŁA SIĘ poniżej supportu (potwierdzone przebicie)
+
+**Rozwiązanie:** Nowe wartości prox signal + pole `lastCandle15mClose` w PairAnalysis.
+
+**A) Nowe wartości `mgProxSignal`:**
+
+| Wartość | Znaczenie | Warunek |
+|---------|-----------|---------|
+| -1.0 | AT SUPPORT | `mgSupportDist <= 0` (tick price na/pod supportem) |
+| **-1.2** | **BROKEN SUPPORT** | AT SUPPORT + `lastCandle15mClose < mgSupportBody` |
+| -0.8 | NEAR SUPPORT | `mgSupportDist < mgStrongZone` (1×ATR) |
+| -0.4 | APPROACHING SUPPORT | `mgSupportDist < mgModerateZone` (2×ATR) |
+| +1.0 | AT RESISTANCE | `mgResistDist <= 0` |
+| **+1.2** | **BROKEN RESISTANCE** | AT RESISTANCE + `lastCandle15mClose > mgResistBody` |
+| +0.8 | NEAR RESISTANCE | `mgResistDist < mgStrongZone` |
+| +0.4 | APPROACHING RESISTANCE | `mgResistDist < mgModerateZone` |
+
+**B) `lastCandle15mClose` w `market_vision.ts`:**
+```typescript
+// candles15m[-1] = FORMING candle (current, incomplete)
+// candles15m[-2] = LAST CLOSED candle (complete, used for break detection)
+lastCandle15mClose = candles15m[candles15m.length - 2].c
+```
+
+**Pliki:** `src/signals/market_vision.ts` (+1 field PairAnalysis, +computation), `src/mm_hl.ts` (proximity signal rewrite ~25 linii)
+
+---
+
+### 103. Discord S/R Alerts — BROKEN_SUPPORT/RESISTANCE + AT_SUPPORT/RESISTANCE (05.03)
+
+**Problem:** Discord alerty miały tylko NEAR_SUPPORT/NEAR_RESISTANCE — brak rozróżnienia touch vs confirmed break.
+
+**Rozwiązanie:** 4 nowe typy alertów na podstawie `mgProxSignal`:
+
+| Typ | Kiedy | Emoji | Kolor |
+|-----|-------|-------|-------|
+| `BROKEN_RESISTANCE` | `mgProxSignal >= 1.2` | 💥 | Orange (0xff8800) |
+| `AT_RESISTANCE` | `mgResistDist <= 0` | 🔴 | Red |
+| `NEAR_RESISTANCE` | `mgResistDist < mgStrongZone` | 🟡 | Red |
+| `BROKEN_SUPPORT` | `mgProxSignal <= -1.2` | 💥 | Orange (0xff8800) |
+| `AT_SUPPORT` | `mgSupportDist <= 0` | 🟢 | Green |
+| `NEAR_SUPPORT` | `mgSupportDist < mgStrongZone` | 🟡 | Green |
+
+**Nowe pole w embed:** `15m Close` — pokazuje cenę zamknięcia ostatniej 15m candle (potwierdzenie break).
+
+**Footer:** `"BROKEN = candle close confirmed | Cooldown 30min"`
+
+**Pliki:** `src/mm_hl.ts` (alert type logic + embed update, ~30 linii)
+
+---
+
 ### 102. Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknięciu S/R (05.03)
 
 **Problem:** kPEPE o 08:45 po raz pierwszy odbił od supportu (skew ~0%, flat). Bot zebrał longi ale z normalną siłą (bid×1.54, ask×0.50). Cena poszła ładnie w górę. Gdyby akumulacja była 2-3× silniejsza przy pierwszym dotknięciu (niski skew = flat = świeże odbicie), bot zebrałby dużo więcej longów.
@@ -4452,11 +4538,14 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
-- **kPEPE risk pipeline (04.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (05.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Reduction Grace Period (delay reduction on confirmed break)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat, Fresh Touch Boost)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **Inventory-Aware MG Override (04.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>15%, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15`, `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. Logi: `⚡ [INV_AWARE_MG]`.
 - **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=8%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
 - **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
 - **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
+- **S/R Reduction Grace Period (05.03)**: Po BROKEN S/R (prox=±1.2, candle close confirmed) czekaj N candles 15m przed redukcją pozycji. Chroni przed fakeoutami — jeśli cena wróci powyżej supportu, grace kasuje się i akumulacja kontynuuje. Config: `srReductionGraceCandles` (default=2/30min, kPEPE=3/45min). Property: `srBreakGraceStart: Map<string, number>` na bocie. Grace triggeruje TYLKO na confirmed break (prox=±1.2), NIE na touch (prox=±1.0). Logi: `⏳ [SR_GRACE]` (started/active/expired), `✅ [SR_GRACE]` (recovered).
+- **Proximity Signal prox=±1.0/±1.2 (05.03)**: Rozróżnienie touch vs confirmed break. `-1.0` = AT SUPPORT (tick price on/below), `-1.2` = BROKEN SUPPORT (15m candle CLOSED below), `+1.0` = AT RESISTANCE, `+1.2` = BROKEN RESISTANCE. `lastCandle15mClose` = `candles15m[length-2].c` (last CLOSED candle, nie forming). Używane przez: Grace Period (trigger), Discord alerts (BROKEN vs AT types), downstream systems.
+- **Discord S/R Alerts updated (05.03)**: 6 typów: BROKEN_RESISTANCE/BROKEN_SUPPORT (💥, orange 0xff8800), AT_RESISTANCE/AT_SUPPORT, NEAR_RESISTANCE/NEAR_SUPPORT. Nowe pole embed: `15m Close`. Footer: `"BROKEN = candle close confirmed"`. Cooldown 30min per token per type.
 - **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.
 - **DRY_RUN instanceof guard pattern (02.03)**: W mm_hl.ts, KAŻDE użycie `this.trading as LiveTrading` lub dostęp do LiveTrading-only properties (l2BookCache, shadowTrading, binanceAnchor, vpinAnalyzers, adverseTracker, closePositionForPair) MUSI być chronione `if (this.trading instanceof LiveTrading)` lub nullable pattern: `const lt = this.trading instanceof LiveTrading ? this.trading : null; if (lt?.property)`. PaperTrading NIE ma tych properties → TypeError w DRY_RUN. Dwie różne klasy w pliku: `LiveTrading` (linia ~1479) i `HyperliquidMMBot` (linia ~3595) — metody na jednej NIE są dostępne na drugiej via `this`.
 - **PM2 --update-env (02.03)**: Przy `pm2 restart` po zmianie pliku źródłowego, ZAWSZE dodawaj `--update-env`. Bez tego ESM loader (`--experimental-loader ts-node/esm`) może cacheować starą wersję modułu. Symptom: nowa metoda "is not a function" mimo że grep na serwerze potwierdza jej istnienie w pliku.
