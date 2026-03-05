@@ -8039,3 +8039,96 @@ Kilka zasad:
 | Plik | Zmiana |
 |------|--------|
 | `src/config/short_only_config.ts` | kPEPE `srMaxRetainPct`: 0.08 → 0.15 |
+
+---
+
+## Rozdział 49: Dwa Zegary — Dlaczego S/R z 1h a MM na 15m
+
+*"Strategia mówi ci GDZIE walczyć. Taktyka mówi ci JAK walczyć."*
+
+### Problem: Support który tańczy
+
+Wyobraź sobie radar na okręcie wojennym. Masz dwa tryby:
+- **Bliski zasięg (15m candles)** — widzisz każdą falę, każdą bryzgę. Linia brzegowa "skacze" z każdą falą.
+- **Daleki zasięg (1h candles)** — widzisz kształt zatoki. Linia brzegowa jest stabilna.
+
+Bot miał S/R z 15-minutowych świeczek (48 świeczek = 12h lookback). Problem? Support skakał co kilka minut:
+
+```
+18:42  BROKEN SUPPORT  S=$0.003425
+18:46  AT SUPPORT      S=$0.003421   ← zmienił się o $0.000004!
+18:53  NEAR SUPPORT    S=$0.003431   ← znowu zmiana!
+```
+
+Każda nowa 15m świeczka zmieniała min/max → support się przesuwał → bot dostawał sprzeczne sygnały. "Broken!", "At!", "Near!" — jak GPS w tunelu, który co chwilę mówi "skręć w lewo... nie, w prawo... nie, zawróć!"
+
+### Rozwiązanie: Dwa zegary
+
+**S/R z 1h candles (24 świeczki = 24h)** — stabilne poziomy, zmiana najwyżej raz na godzinę.
+**MM execution na 15m candles** — szybka reakcja na RSI, trend, break detection.
+
+To jak generał i snajper:
+- **Generał (1h)** mówi: "Support jest na $0.003431. Buduj pozycję tam."
+- **Snajper (15m)** mówi: "Candle zamknęła poniżej supportu → BROKEN, wstrzymaj."
+
+Generał nie zmienia zdania co 15 minut. Snajper reaguje szybko na to co widzi, ale w ramach strategii generała.
+
+### Co się zmieniło w kodzie
+
+```
+BYŁO (15m candles):
+  stfLookback = min(48, candles15m.length)    // 48 × 15m = 12h
+  supportBody12h = min(candles15m bodies)      // skacze co tick
+
+JEST (1h candles):
+  stfLookback = min(24, candles.length)        // 24 × 1h = 24h
+  supportBody12h = min(candles 1h bodies)      // stabilne, zmiana max 1×/h
+```
+
+### Co ZOSTAŁO na 15m candles
+
+| Element | Timeframe | Dlaczego |
+|---------|-----------|----------|
+| **S/R levels** | **1h** | Stabilność — generał nie zmienia zdania co 15 min |
+| RSI | 15m | Szybka reakcja na oversold/overbought |
+| Trend (EMA9/21) | 15m | Krótkoterminowy kierunek |
+| Break detection | 15m | `lastCandle15mClose` — czy candle ZAMKNĘŁA się poniżej S/R |
+| Flash crash | 15m | Detekcja 3%+ ruchu w 15 min |
+
+### LONG+DUMP — co to znaczy i dlaczego walczą systemy
+
+W logach widzisz:
+```
+💎LONG+DUMP→holding        — MG mówi: "trzymaj longi, nie sprzedawaj na dnie"
+⚡INV_AWARE→closing_boosted — INV_AWARE mówi: "zamknij! masz za dużo longów!"
+```
+
+**LONG+DUMP** = bot kupił (ma LONG), a cena spada (DUMP). Pozycja jest PRZECIW kierunkowi rynku.
+
+Dwa systemy widzą to zupełnie inaczej:
+
+| System | Co widzi | Co chce zrobić |
+|--------|----------|----------------|
+| **Momentum Guard** | "Cena spada, jesteśmy blisko supportu" | Trzymaj longi (ask×0.10), czekaj na odbicie |
+| **INV_AWARE Override** | "Mamy 22% skew LONG, to za dużo!" | Zamykaj! (ask×1.22), pozbądź się longów |
+
+To jak dwóch doradców krzyczących w ucho kapitana:
+- **Strateg:** "To support, cena odbije. TRZYMAJ!"
+- **Risk Manager:** "Masz za dużo longów! ZAMYKAJ zanim stracisz więcej!"
+
+INV_AWARE wygrywa (override), aski lądują blisko ceny → longi zamykane ze stratą → cena odbija od supportu → bot stracił pozycję którą powinien trzymać.
+
+### Lekcja
+
+1. **Dwa timeframe'y to nie kompromis — to architektura.** Najlepsi traderzy patrzą na wyższy timeframe dla kierunku i niższy dla wejścia. Bot powinien robić to samo.
+
+2. **Stabilność S/R > precyzja S/R.** Lepiej mieć support który jest "w przybliżeniu" prawidłowy i stabilny, niż "dokładny" ale skaczący co tick. Bot reagujący na skaczący support zachowuje się chaotycznie.
+
+3. **Systemy walczą ze sobą.** MG (mean-reversion) i INV_AWARE (risk management) mają sprzeczne cele przy supportcie z dużym skew. To normalne — ale trzeba wiedzieć który ma priorytet w jakiej sytuacji.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/signals/market_vision.ts` | S/R computation: `candles15m` → `candles` (1h), lookback 48→24 |
+| `src/mm_hl.ts` | Log label `S/R(15m)` → `S/R(1h)`, footer Discord alert updated |
