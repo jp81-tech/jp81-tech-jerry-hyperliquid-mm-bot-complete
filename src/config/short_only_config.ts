@@ -300,6 +300,11 @@ export interface MomentumGuardConfig {
   inventoryAwareMgEnabled: boolean       // Enable inventory-aware override (default true)
   inventoryAwareMgThreshold: number      // Min |skew| to trigger (default 0.15 = 15%)
   inventoryAwareMgClosingBoost: number   // Max closing-side multiplier (default 1.3)
+  // S/R Bounce Hold: after S/R Accumulation builds position, hold closing-side until price moves away
+  srBounceHoldEnabled: boolean           // Enable bounce hold (default true)
+  srBounceHoldMinDistAtr: number         // Min distance in ATR multiples before full closing allowed (default 1.5)
+  srBounceHoldAskReduction: number       // Closing-side multiplier at S/R level (default 0.20 = 20% of normal)
+  srBounceHoldMaxMinutes: number         // Max hold time in minutes (default 30)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -344,6 +349,10 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   inventoryAwareMgEnabled: true,
   inventoryAwareMgThreshold: 0.15,     // 15% |skew| minimum to trigger
   inventoryAwareMgClosingBoost: 1.3,   // Max closing-side multiplier
+  srBounceHoldEnabled: true,
+  srBounceHoldMinDistAtr: 1.5,         // 1.5×ATR from S/R before full closing allowed
+  srBounceHoldAskReduction: 0.20,      // 20% of normal closing-side at S/R level
+  srBounceHoldMaxMinutes: 30,          // 30 min timeout
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
@@ -363,6 +372,8 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     srBreakoutTpScoreThreshold: 0.40, // kPEPE: trigger earlier (volatile, momentum is real sooner)
     inventoryAwareMgThreshold: 0.08,   // 8% (was 15% — INV_AWARE must kick in earlier for closing at S/R)
     inventoryAwareMgClosingBoost: 1.5,  // kPEPE: more aggressive closing when stuck against momentum
+    srBounceHoldMinDistAtr: 2.0,         // kPEPE: volatile → give more room for bounce to develop (2×ATR)
+    srBounceHoldAskReduction: 0.15,      // kPEPE: 15% closing at S/R (tighter hold)
   },
 }
 

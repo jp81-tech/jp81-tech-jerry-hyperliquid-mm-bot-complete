@@ -48,6 +48,60 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 5 marca 2026
 
+### 110. S/R Bounce Hold — nie zamykaj longów od razu po odbiciu z supportu (05.03)
+
+**Problem:** S/R Accumulation buduje longi przy supportie (bid×5.84 z Fresh Touch Boost), ale jak cena zaczyna odbijać w górę, MG boostuje aski (ask×1.05→1.30), S/R Accum disengages (cena wychodzi ze strefy), i grid aski fillują się → longi zamknięte z małym zyskiem zamiast poczekać na pełny bounce. Zero mechanizmu "poczekaj aż odbicie się rozwinie".
+
+**Rozwiązanie:** Po tym jak S/R Accumulation zbudowała pozycję przy S/R, **tłum closing-side** dopóki cena nie oddali się wystarczająco od S/R (mierzone w ATR).
+
+**Mechanizm:**
+1. **Tracking** — `srBounceHoldState: Map<string, {timestamp, srLevel, side}>` na bocie. Aktualizowany gdy `srAccumApplied = true`.
+2. **Progressive release** (nie binary on/off):
+   ```
+   distFromSr = (price - support) / atr   // 0 at support, 2.0 at 2×ATR
+   holdProgress = min(1.0, distFromSr / srBounceHoldMinDistAtr)
+   askReduction = srBounceHoldAskReduction + holdProgress × (1.0 - srBounceHoldAskReduction)
+   // 0.15 at support → 1.00 at threshold (full asks)
+   sizeMultipliers.ask *= askReduction
+   ```
+3. **Clear conditions:** dist >= threshold, timeout 30min, position closed (skew<2%), S/R level changed
+
+**Config (`MomentumGuardConfig`):**
+
+| Config | Default | kPEPE |
+|--------|---------|-------|
+| `srBounceHoldEnabled` | true | true |
+| `srBounceHoldMinDistAtr` | 1.5 | **2.0** (volatile → więcej room) |
+| `srBounceHoldAskReduction` | 0.20 | **0.15** (tighter hold) |
+| `srBounceHoldMaxMinutes` | 30 | 30 |
+
+**Pipeline position:** Po S/R Accumulation, PRZED Breakout TP. Hold NIE blokuje Breakout TP (safety valve na strong momentum score>0.40).
+
+**Przykład kPEPE:**
+```
+support=$0.003441, ATR=$0.000065, threshold=2.0×ATR
+
+At support (dist=0.06ATR): askReduction=0.18 → ask×0.18 (HOLD: tiny closing)
+Bouncing (dist=0.60ATR):   askReduction=0.41 → ask×0.41 (some closing)
+Strong bounce (dist=1.68ATR): askReduction=0.86 → ask×0.86 (almost full)
+Past threshold (dist>2.0ATR): HOLD OFF, normal asks
+```
+
+**Logi:**
+- `🔒 [BOUNCE_HOLD] kPEPE: LONG near SUPPORT — dist=0.60ATR progress=30% → ask×0.41 (holding for bounce)`
+- `🔓 [BOUNCE_HOLD] kPEPE: RELEASED — dist=2.06ATR >= 2.0ATR threshold (bounce confirmed)`
+- `⏰ [BOUNCE_HOLD] kPEPE: TIMEOUT — 30min elapsed, resuming normal closing`
+
+**Interakcje:**
+- **S/R Accumulation**: Komplementarne — Accum buduje, Hold chroni
+- **MG multipliers**: Hold redukuje closing-side DODATKOWO po MG (multiplicative)
+- **Breakout TP**: Hold NIE blokuje Breakout TP (safety valve)
+- **INV_AWARE_MG**: INV_AWARE suppressed przy S/R (prox <= -0.5) → brak konfliktu
+
+**Pliki:** `src/config/short_only_config.ts` (+4 interface, +4 defaults, +2 kPEPE override), `src/mm_hl.ts` (+1 property, +63 linii logika)
+
+---
+
 ### 109. Disable NANSEN CONFLICT SL — stop closing longs against Nansen bias (05.03)
 
 **Problem:** NANSEN CONFLICT SL zamykał longi kPEPE ze stratą ($-22 do $-55 per close) bo Nansen bias = SHORT STRONG (+0.07). Bot robi normalny MM (grid obu stron), a ten mechanizm wymuszał zamknięcie każdego LONGA gdy PnL < -$20. Sprzeczne z zasadą że Nansen bias NIE wpływa na grid.
@@ -4622,9 +4676,10 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
-- **kPEPE risk pipeline (05.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Reduction Grace Period (delay reduction on confirmed break)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat, Fresh Touch Boost)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
+- **kPEPE risk pipeline (05.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Reduction Grace Period (delay reduction on confirmed break)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat, Fresh Touch Boost)** → **S/R Bounce Hold (reduce closing-side after accum, progressive release)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **Inventory-Aware MG Override (04.03, updated 05.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>threshold, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15` (kPEPE: 0.08), `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. **S/R Suppression (05.03):** LONG near SUPPORT (prox<=-0.5) lub SHORT near RESISTANCE (prox>=0.5) → INV_AWARE suppressed, S/R Accumulation has priority. Bez tego INV_AWARE zamykał longi zbudowane przez S/R Accum przy supportie ze stratą (-$11.86 na 8 close'ach). Po fix: +$4.98 na 12 close'ach. Logi: `⚡ [INV_AWARE_MG]` (CLOSING OVERRIDE lub SUPPRESSED).
 - **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (default 20%, **kPEPE: 15%** — was 8%, raised 05.03 bo akumulacja stopowała za wcześnie przy 11% skew). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=15%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
+- **S/R Bounce Hold (05.03)**: Po S/R Accumulation zbudowała pozycję przy S/R, redukuje closing-side dopóki cena nie oddali się wystarczająco (w ATR multiples). Progressive release: askReduction = srBounceHoldAskReduction + holdProgress × (1.0 - srBounceHoldAskReduction). Config: `srBounceHoldEnabled=true`, `srBounceHoldMinDistAtr` (1.5/kPEPE: 2.0), `srBounceHoldAskReduction` (0.20/kPEPE: 0.15), `srBounceHoldMaxMinutes=30`. Clear: dist>=threshold, timeout 30min, skew<2%, S/R level changed. NIE blokuje Breakout TP (safety valve). Property: `srBounceHoldState: Map<string, {timestamp, srLevel, side}>`. Logi: `🔒 [BOUNCE_HOLD]` (holding), `🔓 [BOUNCE_HOLD]` (released), `⏰ [BOUNCE_HOLD]` (timeout). Komplementarne z S/R Accumulation — Accum buduje, Hold chroni.
 - **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
 - **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
 - **S/R Reduction Grace Period (05.03)**: Po BROKEN S/R (prox=±1.2, candle close confirmed) czekaj N candles 15m przed redukcją pozycji. Chroni przed fakeoutami — jeśli cena wróci powyżej supportu, grace kasuje się i akumulacja kontynuuje. Config: `srReductionGraceCandles` (default=2/30min, kPEPE=3/45min). Property: `srBreakGraceStart: Map<string, number>` na bocie. Grace triggeruje TYLKO na confirmed break (prox=±1.2), NIE na touch (prox=±1.0). Logi: `⏳ [SR_GRACE]` (started/active/expired), `✅ [SR_GRACE]` (recovered).

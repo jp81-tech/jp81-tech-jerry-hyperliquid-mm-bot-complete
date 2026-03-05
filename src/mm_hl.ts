@@ -3689,6 +3689,7 @@ class HyperliquidMMBot {
   // 📍 S/R DISCORD ALERTS — cooldown tracking (token:level_type → last alert timestamp)
   private srAlertCooldowns: Map<string, number> = new Map()
   private srBreakGraceStart: Map<string, number> = new Map()  // S/R break grace period: pair → timestamp when break first detected
+  private srBounceHoldState: Map<string, { timestamp: number; srLevel: number; side: 'long' | 'short' }> = new Map()  // S/R Bounce Hold: track when S/R Accum built position
   private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
 
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
@@ -8611,6 +8612,71 @@ class HyperliquidMMBot {
                   `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''} fresh×${freshBoost.toFixed(1)} → ` +
                   `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`
                 )
+              }
+            }
+          }
+
+          // === 🔒 S/R BOUNCE HOLD (Hold closing-side after S/R Accumulation) ===
+          // After S/R Accumulation builds a position at S/R, reduce closing-side orders
+          // until price moves far enough away (measured in ATR multiples).
+          // Progressive release: at S/R = minimal closing, at threshold = full closing.
+          // Does NOT block Breakout TP (safety valve on strong momentum).
+          if (momGuardConfig.srBounceHoldEnabled && mgAtr > 0) {
+            const holdKey = pair
+            const atrPrice = mgAtr  // absolute ATR in price units
+
+            // Update tracking when S/R Accumulation is active
+            if (srAccumApplied) {
+              const srLevel = (mgSupportBody > 0 && mgSupportDist < mgResistDist) ? mgSupportBody : mgResistBody
+              const side: 'long' | 'short' = (mgSupportBody > 0 && mgSupportDist < mgResistDist) ? 'long' : 'short'
+              this.srBounceHoldState.set(holdKey, { timestamp: Date.now(), srLevel, side })
+            }
+
+            const holdState = this.srBounceHoldState.get(holdKey)
+            if (holdState) {
+              const elapsedMin = (Date.now() - holdState.timestamp) / 60000
+              const absSkewHold = Math.abs(actualSkew)
+
+              // Clear conditions
+              const timedOut = elapsedMin >= momGuardConfig.srBounceHoldMaxMinutes
+              const positionClosed = absSkewHold < 0.02  // skew < 2% = essentially flat
+              const srLevelChanged = (holdState.side === 'long' && mgSupportBody > 0 && Math.abs(mgSupportBody - holdState.srLevel) / holdState.srLevel > 0.005)
+                || (holdState.side === 'short' && mgResistBody > 0 && Math.abs(mgResistBody - holdState.srLevel) / holdState.srLevel > 0.005)
+
+              // Distance from S/R in ATR multiples
+              const distFromSr = holdState.side === 'long'
+                ? (midPrice - holdState.srLevel) / atrPrice
+                : (holdState.srLevel - midPrice) / atrPrice
+              const pastThreshold = distFromSr >= momGuardConfig.srBounceHoldMinDistAtr
+
+              if (timedOut || positionClosed || srLevelChanged || pastThreshold) {
+                // Clear hold
+                this.srBounceHoldState.delete(holdKey)
+                if (timedOut) {
+                  console.log(`⏰ [BOUNCE_HOLD] ${pair}: TIMEOUT — ${elapsedMin.toFixed(0)}min elapsed, resuming normal closing`)
+                } else if (pastThreshold) {
+                  console.log(`🔓 [BOUNCE_HOLD] ${pair}: RELEASED — dist=${distFromSr.toFixed(2)}ATR >= ${momGuardConfig.srBounceHoldMinDistAtr}ATR threshold (bounce confirmed)`)
+                }
+              } else if (distFromSr >= 0) {
+                // Progressive release: reduce closing-side
+                const holdProgress = Math.min(1.0, distFromSr / momGuardConfig.srBounceHoldMinDistAtr)
+                const askReduction = momGuardConfig.srBounceHoldAskReduction + holdProgress * (1.0 - momGuardConfig.srBounceHoldAskReduction)
+
+                if (holdState.side === 'long') {
+                  // LONG near SUPPORT → reduce asks (don't close longs too early)
+                  sizeMultipliers.ask *= askReduction
+                } else {
+                  // SHORT near RESISTANCE → reduce bids (don't close shorts too early)
+                  sizeMultipliers.bid *= askReduction
+                }
+
+                if (this.tickCount % 20 === 0 || holdProgress < 0.3) {
+                  console.log(
+                    `🔒 [BOUNCE_HOLD] ${pair}: ${holdState.side.toUpperCase()} near ${holdState.side === 'long' ? 'SUPPORT' : 'RESISTANCE'} — ` +
+                    `dist=${distFromSr.toFixed(2)}ATR progress=${(holdProgress*100).toFixed(0)}% → ` +
+                    `${holdState.side === 'long' ? 'ask' : 'bid'}×${askReduction.toFixed(2)} (holding for bounce)`
+                  )
+                }
               }
             }
           }
