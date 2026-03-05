@@ -71,49 +71,9 @@ export function computeSideAutoSpread(
     }
   }
 
-  // 2) Trend – chronimy stronę „pod wiatr”
-  let trendBidMult = 1.0;
-  let trendAskMult = 1.0;
-
-  const alignedBull = trend4h === "bull" && trend15m === "bull";
-  const alignedBear = trend4h === "bear" && trend15m === "bear";
-
-  const trendExtra = 1.15; // +15% szerzej po stronie pod wiatr
-
-  if (alignedBull) {
-    trendAskMult *= trendExtra;
-  } else if (alignedBear) {
-    trendBidMult *= trendExtra;
-  }
-
-  // --- 2b) AI Vision asymetria ---
-  // wzmocnij trendAskMult / trendBidMult wg AI
-  if (visualTrend === "up") {
-    // przy czystym, bullish obrazie i niskim ryzyku:
-    const s = (visualScore - 50) / 50; // -1..1
-    if (s > 0.3 && riskScore < 5) {
-      // chcemy:
-      // - bid troszkę ciaśniej (chętnie kupujemy pullback)
-      // - ask trochę szerzej (chronimy się przed wybiciem/runaway)
-      trendBidMult *= 0.9;
-      trendAskMult *= 1.1;
-    }
-    if (riskScore > 7 || breakoutRisk || squeezeRisk) {
-      // mocne ryzyko → dodatkowe rozszerzenie ask (nie łapać noża w górę przy shortowaniu)
-      trendAskMult *= 1.15;
-    }
-  } else if (visualTrend === "down") {
-    const s = (visualScore - 50) / 50;
-    if (s < -0.3 && riskScore < 5) {
-      // downtrend: chętnie sprzedajemy (ask ciaśniej), bid szerzej
-      trendAskMult *= 0.9;
-      trendBidMult *= 1.1;
-    }
-    if (riskScore > 7 || breakoutRisk || squeezeRisk) {
-      // mocne ryzyko → dodatkowe rozszerzenie bid (nie łapać noża)
-      trendBidMult *= 1.15;
-    }
-  }
+  // 2) Trend + AI Vision — DISABLED. MM is neutral, inventory + S/R handles asymmetry.
+  const trendBidMult = 1.0;
+  const trendAskMult = 1.0;
 
   // 3) Flash crash – oba spready szerzej
   const flashMult = isFlashCrash ? 1.6 : 1.0;

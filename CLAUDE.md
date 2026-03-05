@@ -46,6 +46,31 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
+## Zmiany 5 marca 2026
+
+### 100. Oracle kPEPE-only filter + slack_router silence + log cleanup (05.03)
+
+**Problem:** Logi zaśmiecone przez 3 źródła:
+1. **Oracle BREAKOUT/FLIP spam** — Oracle analizował 13 coinów (`TRACKED_COINS` z NansenFeed), ale bot handluje tylko kPEPE. Logi pełne `💥 BREAKOUT LIT`, `🔄 DIRECTION FLIP DOGE` itp.
+2. **slack_router "No webhook" spam** — Każde `this.notifier.info/warn/error()` (241+ wywołań w mm_hl.ts) generowało `[slack_router] No webhook configured for kind=risk, text="..."` bo Slack webhooks nie są skonfigurowane
+3. **NansenBias logi dla nie-tradowanych coinów** — `tryLoadNansenBiasIntoCache` logowało bias dla LIT, SUI, DOGE, ETH, SOL zamiast tylko kPEPE
+
+**5 zmian:**
+
+| # | Zmiana | Efekt |
+|---|--------|-------|
+| 96 | **Oracle kPEPE-only filter** — early return w `handleOracleSignal()` dla non-MM_ONLY_PAIRS | Zero Oracle logów dla 12 nie-tradowanych coinów |
+| 97 | **slack_router silent return** — usunięto `console.warn` z `sendSlackText()` i `sendSlackPayload()` | Zero `[slack_router] No webhook...` spam |
+| 98 | **NansenBias logCoins** — zmieniono hardcoded `['LIT','SUI','DOGE','ETH','SOL']` na `MM_ONLY_PAIRS` | Tylko kPEPE bias logowany |
+| 99 | **Prediction bias disabled** — oba branche (kPEPE + else) wyłączone, prediction-api i war-room zatrzymane | Zero prediction logów |
+| 100 | **Oracle dashboard table** — `generateSignalDashboard()` wykomentowane | Zero 13-liniowych ASCII tabel co 60s |
+
+**Pliki:** `src/mm_hl.ts` (-77 linii), `src/utils/slack_router.ts` (-10 linii)
+
+**Commit:** `39f5a36` → `feat/next`
+
+---
+
 ## Zmiany 4 marca 2026
 
 ### 95. MIN_PROFIT graduated max-loss cap — fix stuck positions WITHOUT unlimited loss (04-05.03)

@@ -7390,9 +7390,9 @@ class HyperliquidMMBot {
     const skewAdjBidBps = this.gridManager!.getInventoryAdjustment(actualSkew, 'bid')
     const skewAdjAskBps = this.gridManager!.getInventoryAdjustment(actualSkew, 'ask')
 
-    // Nansen factors
-    const nansenBidFactor = nansenBias === 'long' ? config.tightenFactor : nansenBias === 'short' ? config.widenFactor : 1.0
-    const nansenAskFactor = nansenBias === 'long' ? config.widenFactor : nansenBias === 'short' ? config.tightenFactor : 1.0
+    // Nansen factors — DISABLED for grid spread. NansenBias is INFO only (logged but no effect).
+    const nansenBidFactor = 1.0
+    const nansenAskFactor = 1.0
 
     // Behavioural risk factor (will be applied later, but we calculate it here for logging)
     // For now, we'll use 1.0 as default (will be updated after applyBehaviouralRiskToLayers)
@@ -7580,21 +7580,10 @@ class HyperliquidMMBot {
       );
     }
 
-    // 🎯 INSTITUTIONAL BIAS & SKEW CALCULATION
-    const advancedSkewBps = this.calculateAdvancedSkew(pair, inventorySkew, funding);
-    let biasShiftBps = advancedSkewBps + whaleAlphaBps + fundingBiasBps;
-
     // ⚡ MODULE 1 & 2 INTEGRATION: Order Book Micro-Signals
     const bookSignals = this.analyzeOrderBook(pair);
 
-    // 1. Imbalance Alpha: Shift price towards pressure
-    if (Math.abs(bookSignals.imbalance) > 0.3) {
-      const imbalanceShift = bookSignals.imbalance * 5; // Up to 5bps shift based on pressure
-      biasShiftBps += imbalanceShift;
-      this.notifier.info(`📊 [IMBALANCE] ${pair}: ${(bookSignals.imbalance * 100).toFixed(1)}% pressure → shift ${imbalanceShift > 0 ? '+' : ''}${imbalanceShift.toFixed(1)}bps`);
-    }
-
-    // 2. Wall Avoidance: Widen spread if a wall is pushing against us
+    // Wall Avoidance: Widen spread if a wall is pushing against us
     if (bookSignals.wallDetected) {
       adaptive.spreadMult *= 1.25;
       this.notifier.info(`🧱 [WALL DETECTED] ${pair}: ${bookSignals.wallSide.toUpperCase()} wall found → spread widened by 25%`);
@@ -7623,18 +7612,6 @@ class HyperliquidMMBot {
       if (adverseMult > 1.0) {
         adaptive.spreadMult *= adverseMult;
         this.notifier.warn(`⚠️ [ADVERSE SELECTION] ${pair}: Detecting toxic counterparty flow → spread ×${adverseMult}`);
-      }
-    }
-
-    // Apply Bias to Spreads
-    if (biasShiftBps !== 0) {
-      bidSpreadBps += biasShiftBps;
-      askSpreadBps -= biasShiftBps;
-
-      if (Math.abs(biasShiftBps) > 4) {
-        this.notifier.info(
-          `🎯 [BIAS] ${pair} shift=${biasShiftBps.toFixed(1)}bps (FundBias=${(funding * 100 * 5).toFixed(1)}, Tactical=${(this.tacticalSignalBuffer.get(symbol) || 0).toFixed(1)})`
-        );
       }
     }
 
@@ -7701,14 +7678,17 @@ class HyperliquidMMBot {
     const finalAskSpreadBps = this.clampSpreadBps(pair, askSpreadBps)
 
     // Snapshot log – multi-layer
+    // Include getInventoryAdjustment (added inside grid_manager) for accurate effective spread
+    const effectiveBidBps = finalBidSpreadBps + skewAdjBidBps
+    const effectiveAskBps = finalAskSpreadBps + skewAdjAskBps
     const invSkewPct = inventorySkew * 100
     this.logSpreadSnapshot({
       pair,
       profile: this.config.spreadProfile,
       baseRaw: baseL1OffsetBps,
       baseProfiled: baseL1OffsetWithProfile,
-      bidFinal: finalBidSpreadBps,
-      askFinal: finalAskSpreadBps,
+      bidFinal: effectiveBidBps,
+      askFinal: effectiveAskBps,
       invSkewPct,
       mode: 'multi-layer'
     })
