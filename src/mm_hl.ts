@@ -8453,7 +8453,12 @@ class HyperliquidMMBot {
             const hasAnyLong = actualSkew > 0.01
             if (!hasShortPos && mgSupportBody > 0 && mgSupportDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / accumZone))
-              sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
+              // Fresh Touch Boost: stronger accumulation when position is small (first touch of S/R)
+              const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
+              const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
+              const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
+              const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
+              sizeMultipliers.bid *= (1.0 + progress * (effectiveBounceBoost - 1.0))
               // If we have ANY short at support → reduce/zero asks (don't add to wrong-side position)
               if (hasAnyShort) {
                 if (progress > 0.60) {
@@ -8462,7 +8467,7 @@ class HyperliquidMMBot {
                   sizeMultipliers.ask *= (1.0 - progress)  // Progressive: keep some asks further from support
                 }
               } else {
-                sizeMultipliers.ask *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+                sizeMultipliers.ask *= (1.0 - progress * (1.0 - effectiveCounterReduce))
               }
               gridBidMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
@@ -8471,7 +8476,7 @@ class HyperliquidMMBot {
                 console.log(
                   `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${(progress*100).toFixed(0)}% ` +
                   `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''} → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''} fresh×${freshBoost.toFixed(1)} → ` +
                   `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} bidSpread×${gridBidMult.toFixed(2)}`
                 )
               }
@@ -8480,7 +8485,12 @@ class HyperliquidMMBot {
             // At RESISTANCE with small/no position → accumulate SHORTS (sell the reversal)
             else if (!hasLongPos && mgResistBody > 0 && mgResistDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / accumZone))
-              sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
+              // Fresh Touch Boost: stronger accumulation when position is small (first touch of S/R)
+              const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
+              const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
+              const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
+              const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
+              sizeMultipliers.ask *= (1.0 + progress * (effectiveBounceBoost - 1.0))
               // If we have ANY long at resistance → reduce/zero bids (don't add to wrong-side position)
               if (hasAnyLong) {
                 if (progress > 0.60) {
@@ -8489,7 +8499,7 @@ class HyperliquidMMBot {
                   sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
                 }
               } else {
-                sizeMultipliers.bid *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+                sizeMultipliers.bid *= (1.0 - progress * (1.0 - effectiveCounterReduce))
               }
               gridAskMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
@@ -8498,7 +8508,7 @@ class HyperliquidMMBot {
                 console.log(
                   `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${(progress*100).toFixed(0)}% ` +
                   `dist=${(mgResistDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''} → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''} fresh×${freshBoost.toFixed(1)} → ` +
                   `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`
                 )
               }

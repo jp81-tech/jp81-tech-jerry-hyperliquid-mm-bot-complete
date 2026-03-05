@@ -290,6 +290,7 @@ export interface MomentumGuardConfig {
   srAccumBounceBoost: number           // Bounce-side size multiplier at S/R (default 1.5 = 50% more)
   srAccumCounterReduce: number         // Counter-side size multiplier at S/R (default 0.50 = 50% less)
   srAccumSpreadWiden: number           // Bounce-side spread widener at S/R (default 1.3 = 30% wider)
+  srAccumFreshMultiplier: number       // Fresh touch multiplier: stronger accumulation when skew is low (first touch)
   // Breakout TP: aggressively close on strong momentum aligned with position
   srBreakoutTpEnabled: boolean         // Enable breakout TP (default true)
   srBreakoutTpScoreThreshold: number   // Min |momentumScore| to trigger (default 0.50)
@@ -334,6 +335,7 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   srAccumBounceBoost: 1.5,       // 50% more on bounce side at S/R
   srAccumCounterReduce: 0.50,    // 50% less on counter side at S/R
   srAccumSpreadWiden: 1.3,       // 30% wider spread on bounce side at S/R
+  srAccumFreshMultiplier: 2.0,   // Fresh touch: 2× boost when skew=0% (first touch of S/R)
   srBreakoutTpEnabled: true,
   srBreakoutTpScoreThreshold: 0.50,  // Min |score| to trigger breakout TP
   srBreakoutTpClosingBoost: 1.5,     // 1.5× closing-side boost on breakout
@@ -354,6 +356,7 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     srReductionStartAtr: 2.5,    // kPEPE: start earlier (volatile, moves fast)
     srMaxRetainPct: 0.08,        // 8% max at S/R (was 20% — too high, bot ran symmetric grid at -12% skew)
     srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
+    srAccumFreshMultiplier: 3.0,     // kPEPE: 3× fresh touch boost (aggressive on first touch)
     srBreakoutTpScoreThreshold: 0.40, // kPEPE: trigger earlier (volatile, momentum is real sooner)
     inventoryAwareMgThreshold: 0.08,   // 8% (was 15% — INV_AWARE must kick in earlier for closing at S/R)
     inventoryAwareMgClosingBoost: 1.5,  // kPEPE: more aggressive closing when stuck against momentum
