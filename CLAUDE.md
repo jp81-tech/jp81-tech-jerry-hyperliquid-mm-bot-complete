@@ -48,6 +48,23 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 5 marca 2026
 
+### 106. kPEPE srMaxRetainPct 8%→15% — akumulacja trwała za krótko (05.03)
+
+**Problem:** kPEPE AT SUPPORT z skew=11%, ale S/R Accumulation nie działała. Discord alert pokazywał NEAR_SUPPORT, ale logi nie miały `[SR_ACCUM]`.
+
+**Root cause:** kPEPE override `srMaxRetainPct: 0.08` (8%). Akumulacja wymaga `|skew| <= srMaxRetainPct`. Przy 11% skew → `11% > 8%` → akumulacja zablokowana, S/R Reduction przejęła (bo `|skew| > srMaxRetainPct`). Bot zbierał longi do 8% a potem zaczynał je redukować — za wcześnie.
+
+**Fix:** `srMaxRetainPct: 0.08 → 0.15` (15%) w kPEPE override (`short_only_config.ts`).
+
+**Efekt:**
+- Akumulacja kontynuuje do 15% skew (było: stop przy 8%)
+- S/R Reduction przejmuje dopiero powyżej 15% (było: powyżej 8%)
+- Bot buduje większą pozycję przy support zanim zacznie redukować
+
+**Pliki:** `src/config/short_only_config.ts` (1 linia: srMaxRetainPct 0.08→0.15)
+
+---
+
 ### 105. S/R Reduction Grace Period — opóźniona redukcja po przełamaniu S/R (05.03)
 
 **Problem:** Gdy cena przebija support/resistance, S/R Reduction natychmiast zaczynał zamykać pozycję. Ale wiele przebić to fakeouty (cena wraca). Bot tracił pozycję na fakeoucie, a potem musiał odbudowywać ją droższej.
@@ -4540,7 +4557,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
 - **kPEPE risk pipeline (05.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Reduction Grace Period (delay reduction on confirmed break)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat, Fresh Touch Boost)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **Inventory-Aware MG Override (04.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>15%, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15`, `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. Logi: `⚡ [INV_AWARE_MG]`.
-- **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=8%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
+- **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (default 20%, **kPEPE: 15%** — was 8%, raised 05.03 bo akumulacja stopowała za wcześnie przy 11% skew). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=15%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
 - **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
 - **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
 - **S/R Reduction Grace Period (05.03)**: Po BROKEN S/R (prox=±1.2, candle close confirmed) czekaj N candles 15m przed redukcją pozycji. Chroni przed fakeoutami — jeśli cena wróci powyżej supportu, grace kasuje się i akumulacja kontynuuje. Config: `srReductionGraceCandles` (default=2/30min, kPEPE=3/45min). Property: `srBreakGraceStart: Map<string, number>` na bocie. Grace triggeruje TYLKO na confirmed break (prox=±1.2), NIE na touch (prox=±1.0). Logi: `⏳ [SR_GRACE]` (started/active/expired), `✅ [SR_GRACE]` (recovered).

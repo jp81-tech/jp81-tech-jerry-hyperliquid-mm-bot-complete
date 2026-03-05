@@ -7822,3 +7822,132 @@ Technika "proxy variable" — uzycie jednej zmiennej (skew) jako przyblizonego w
 |------|--------|
 | `src/config/short_only_config.ts` | +`srAccumFreshMultiplier` (default 2.0, kPEPE 3.0) |
 | `src/mm_hl.ts` | freshBoost w SUPPORT i RESISTANCE blocks, `fresh×X.X` w logach |
+
+---
+
+## Rozdział 47: Nie Ufaj Knotowi Świecy — Jak Odróżnić Fakeout od Prawdziwego Przełamania (05.03.2026)
+
+### Historia: kPEPE i problem z paniczną redukcją
+
+Wyobraź sobie sytuację: bot trzyma longa na kPEPE. Cena spada i na sekundę przebija support ($0.003512). Bot panikuje — "SUPPORT PRZEBITY!" — i natychmiast zaczyna redukcję pozycji. Ale 30 sekund później cena wraca powyżej supportu. To był **fakeout** — knot świecy (wick) dotknął supportu, ale candle zamknęła się powyżej.
+
+Bot właśnie oddał dobrą pozycję na fakeoucie. Teraz musi ją odbudować drożej.
+
+To jest **fundamentalny problem danych tick-by-tick**: widzisz każde drgnięcie ceny w real-time, ale nie masz pojęcia czy ten ruch jest trwały. Cena dotknęła supportu na 3 sekundy — to przełamanie? Czy to tylko wick, który zaraz wróci?
+
+### Rozwiązanie: "Poczekaj na zamknięcie świecy"
+
+Każdy doświadczony trader powie ci tę samą zasadę: **"Nie reaguj na knoty. Czekaj na close."** To znaczy:
+
+- **Tick price** (cena w danym momencie) = szum. Może skoczyć 2% w dół i wrócić w 10 sekund.
+- **Candle close** (cena zamknięcia 15-minutowej świecy) = sygnał. Jeśli 15-minutowa świeca ZAMKNĘŁA SIĘ poniżej supportu, to rynek zdecydował — to nie wick, to realne przełamanie.
+
+W kodzie to wygląda tak:
+
+```
+Tick price poniżej supportu = prox = -1.0 (AT SUPPORT)
+Candle CLOSE poniżej supportu = prox = -1.2 (BROKEN SUPPORT)
+```
+
+Ta różnica 0.2 w wartości prox jest kluczowa — to różnica między "cena dotknęła supportu" a "support został potwierdzenie przebity".
+
+### Skąd brać candle close?
+
+Tu jest subtlenie — `candles15m[length-1]` to **forming candle** (jeszcze się tworzy, nie zamknęła). Używamy `candles15m[length-2]` — **ostatnia ZAMKNIĘTA candle**:
+
+```typescript
+// candles15m[-1] = FORMING (current, incomplete) — NIE UŻYWAJ do break detection!
+// candles15m[-2] = LAST CLOSED (complete) — TO jest twój sygnał
+lastCandle15mClose = candles15m[candles15m.length - 2].c
+```
+
+To częsty błąd początkujących — bierzesz `candles[-1]` myśląc że to "ostatnia świeca", a to jest świeca która jeszcze się formuje i może wyglądać zupełnie inaczej za 10 minut.
+
+### Grace Period: "Daj mu szansę wrócić"
+
+Nawet potwierdzone przebicie (candle close poniżej supportu) nie musi oznaczać katastrofy. Rynki często robią **false breakdowns** — jedna świeca zamyka poniżej, a następne dwie wracają powyżej.
+
+Dlatego po BROKEN SUPPORT/RESISTANCE bot nie reaguje natychmiast. Zamiast tego startuje **Grace Period** — timer na 2-3 candle (30-45 minut):
+
+```
+TICK 1: Candle close poniżej supportu → prox = -1.2 → START GRACE (45 min)
+TICK 2-10: Grace active → S/R Reduction SUPPRESSED (bot trzyma pozycję)
+...
+Scenariusz A: Cena wraca powyżej → prox > -1.2 → GRACE CLEARED → akumulacja kontynuuje
+Scenariusz B: 45 min mija, cena dalej pod supportem → GRACE EXPIRED → redukcja dozwolona
+```
+
+To jest jak pięciosekundowa zasada w koszykówce — po faulu masz chwilę na podjęcie decyzji. Nie reaguj impulsywnie.
+
+### Dlaczego kPEPE ma 3 candle (45 min) a default to 2 (30 min)?
+
+Memecoiny jak kPEPE mają **więcej fakeoutów**. Wysoka zmienność oznacza, że cena regularnie przebija S/R na 1-2 świece i wraca. Na BTC czy ETH przebicie supportu to poważna sprawa — 2 świece wystarczą do potwierdzenia. Na kPEPE potrzebujesz 3, bo co drugi breakdown to trap.
+
+```typescript
+// Config
+srReductionGraceCandles: 2,    // Default: 30 min — wystarczy dla majors
+// kPEPE override:
+srReductionGraceCandles: 3,    // 45 min — volatile memecoin, więcej fakeoutów
+```
+
+### Discord Alerts: BROKEN vs AT vs NEAR
+
+Teraz Discord alerty rozróżniają trzy stany:
+
+| Alert | Emoji | Co oznacza | Akcja |
+|-------|-------|------------|-------|
+| `NEAR_SUPPORT` | 🟡 | Cena w ATR-zone od supportu | Obserwuj |
+| `AT_SUPPORT` | 🟢 | Tick price na supportcie (może być wick!) | Uwaga |
+| `BROKEN_SUPPORT` | 💥 | Candle CLOSE poniżej = POTWIERDZONY break | Grace period startuje |
+
+Pomarańczowy kolor (0xff8800) dla BROKEN — natychmiast przyciąga uwagę. Plus nowe pole "15m Close" w embed — widzisz dokładną cenę zamknięcia candle.
+
+### Analogia: sędzia w piłce nożnej
+
+Wyobraź sobie sędziego w piłce nożnej. Gracz pcha przeciwnika. Sędzia ma trzy opcje:
+
+1. **Gwizdek natychmiast** (stary system) — reaguj na każde dotknięcie. Problem: co drugie to symulka, tracisz wiarygodność.
+2. **Poczekaj i oceń** (nowy system) — widzisz pchnięcie, ale zamiast natychmiast gwizdać, obserwujesz sekundę. Czy gracz naprawdę upadł? Czy wstaje? VAR potwierdza? Dopiero potem decyzja.
+3. **Advantage** (grace period) — nawet jeśli był faul, dajesz grę kontynuować. Jeśli drużyna i tak zdobywa bramkę, faul był nieistotny.
+
+Grace Period to połączenie opcji 2 i 3 — poczekaj na potwierdzenie (candle close), a nawet po potwierdzeniu daj szansę na powrót (45 min grace).
+
+### Pipeline flow z Grace Period
+
+```
+Momentum Guard → Inventory-Aware Override
+  ↓
+Grace Period Check: "Czy mamy BROKEN S/R?"
+  ├── TAK + grace active → srGraceActive = true → SUPPRESS reduction
+  ├── TAK + grace expired → srGraceActive = false → allow reduction
+  └── NIE (just touch or far away) → srGraceActive = false → normal flow
+  ↓
+S/R Progressive Reduction: if (!srGraceActive) → reduce position
+  ↓
+S/R Accumulation → Breakout TP → Dynamic TP → ...
+```
+
+Grace Period jest wstawiony między Inventory-Aware Override a S/R Reduction — blokuje redukcję ale NIE blokuje akumulacji. To ważne: jeśli cena dotknęła supportu i masz małą pozycję, akumulacja dalej działa (buduj longa na bounce). Grace blokuje TYLKO zamykanie pozycji.
+
+### Lekcja inżynierska: hierarchia pewności sygnałów
+
+Ten feature ilustruje ważną koncepcję — **nie wszystkie sygnały są równe**:
+
+```
+Tick price dotknął supportu (prox=-1.0)  → 50% szansy na przebicie
+Candle close poniżej (prox=-1.2)        → 70% szansy na przebicie
+3 candles poniżej (grace expired)        → 90% szansy na przebicie
+```
+
+Im dłużej rynek potwierdza sygnał, tym bardziej mu ufasz. To samo w software — jeden failed test to może flaky test. Trzy failed testy z rzędu to prawdziwy bug.
+
+W tradingu ta koncepcja nazywa się **confirmation bias** (w pozytywnym sensie) — czekasz na potwierdzenie zanim podejmiesz nieodwracalną decyzję. Redukcja pozycji jest kosztowna (spread + fees + odbudowa), więc warto poczekać 45 minut na potwierdzenie.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/signals/market_vision.ts` | +`lastCandle15mClose` w PairAnalysis, computation z `candles15m[-2]` |
+| `src/config/short_only_config.ts` | +`srReductionGraceCandles` (default=2, kPEPE=3) |
+| `src/mm_hl.ts` | +`srBreakGraceStart` Map, proximity signal rewrite (±1.0/±1.2), grace period logic (~50 LOC), Discord alert types (BROKEN/AT/NEAR) |
+| `src/utils/discord_notifier.ts` | Embed: +`15m Close` field, orange color for BROKEN |

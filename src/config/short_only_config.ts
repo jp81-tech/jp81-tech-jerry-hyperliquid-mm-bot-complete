@@ -356,7 +356,7 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     autoSkewShiftBps: 1.5,       // Gentle skew — hold positions, don't rush to close (30% skew = 4.5bps shift)
     autoSkewMaxShiftBps: 10.0,   // Conservative cap — even at 80% skew, max 10bps shift
     srReductionStartAtr: 2.5,    // kPEPE: start earlier (volatile, moves fast)
-    srMaxRetainPct: 0.08,        // 8% max at S/R (was 20% — too high, bot ran symmetric grid at -12% skew)
+    srMaxRetainPct: 0.15,        // 15% max at S/R (was 8% — too low, accumulation stopped at 11% skew before building full position)
     srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
     srAccumFreshMultiplier: 3.0,     // kPEPE: 3× fresh touch boost (aggressive on first touch)
     srReductionGraceCandles: 3,      // kPEPE: 3 candles (~45 min) grace — volatile, fakeouts common
