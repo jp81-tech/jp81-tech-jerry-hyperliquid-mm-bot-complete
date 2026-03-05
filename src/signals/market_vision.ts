@@ -405,8 +405,10 @@ export class MarketVisionService {
     // 2. Analyze Active Pairs (The "Boats")
     for (const pair of this.activePairs) {
       try {
-        // A. HTF Context: 4h Candles for 200 EMA & Support/Resistance
-        const candles4h = await this.api.getCandles(pair, '4h', now - 60 * 24 * 60 * 60 * 1000, now);
+        // A+B. 1h Candles — volatility, tactical bias, HTF S/R, AND EMA200 trend
+        // Previously fetched 4h candles separately for EMA200 — removed to save 6 API calls/cycle
+        // EMA200 on 1h = 200h = ~8.3 day trend anchor (sufficient for volatile memecoins)
+        const candles = await this.api.getCandles(pair, '1h', now - 34 * 24 * 60 * 60 * 1000, now);
         let trend4h: 'bull' | 'bear' | 'neutral' = 'neutral';
         let ema200_4h = 0;
         let support4h = 0;
@@ -414,21 +416,17 @@ export class MarketVisionService {
         let supportBody4h = 0;
         let resistanceBody4h = 999999;
 
-        if (candles4h && candles4h.length >= 200) {
-          const ema200Series = Technicals.calculateEMA(candles4h, 200);
-          ema200_4h = Technicals.getLatest(ema200Series) || 0;
-          const currentPrice = candles4h[candles4h.length - 1].c;
+        if (!candles || candles.length < 50) continue;
 
+        // EMA200 from 1h candles (200h = ~8.3 day trend anchor)
+        if (candles.length >= 200) {
+          const ema200Series = Technicals.calculateEMA(candles, 200);
+          ema200_4h = Technicals.getLatest(ema200Series) || 0;
+          const currentPrice = candles[candles.length - 1].c;
           if (ema200_4h > 0) {
             trend4h = currentPrice > ema200_4h ? 'bull' : 'bear';
           }
-
-          // HTF S/R still from 4h candles for EMA200 trend only (above)
         }
-
-        // B. MTF Context: 1h Candles for volatility, tactical bias, AND HTF S/R
-        const candles = await this.api.getCandles(pair, '1h', now - 7 * 24 * 60 * 60 * 1000, now);
-        if (!candles || candles.length < 50) continue;
 
         // HTF Support/Resistance from 1h candles (last 72 = 3 days)
         // Previously 4h×30 (5 days) — too wide for volatile memecoins, price never entered ATR zone

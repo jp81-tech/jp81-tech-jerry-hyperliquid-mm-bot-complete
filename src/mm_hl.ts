@@ -8676,25 +8676,43 @@ class HyperliquidMMBot {
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
         // BYPASS when INVENTORY_SL PANIC is active — stop loss must override profit filter.
-        // BYPASS when |skew| > 25% — closing stuck position is more important than 10bps fee optimization.
-        const highSkewBypassMinProfit = Math.abs(actualSkew) > 0.25
-        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic && !highSkewBypassMinProfit) {
+        // HIGH SKEW GRADUATED: at |skew| > 25%, WIDEN the allowed loss window instead of full bypass.
+        //   25% skew → allow up to 50bps (0.5%) loss
+        //   35% skew → allow up to 100bps (1.0%) loss
+        //   45%+ skew → full bypass (INVENTORY_SL panic territory anyway)
+        if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic) {
           const entryPx = position.entryPrice || 0
           if (entryPx > 0) {
-            const minProfitFraction = dynSpreadCfg.minProfitBps / 10000  // 10bps = 0.001
+            const absSkew = Math.abs(actualSkew)
+            let effectiveMinProfitBps = dynSpreadCfg.minProfitBps  // default 10bps
+
+            if (absSkew > 0.45) {
+              // Full bypass — panic territory, close at any price
+              effectiveMinProfitBps = -9999  // negative = allow any loss
+            } else if (absSkew > 0.25) {
+              // Graduated: allow closing at a loss, capped by skew urgency
+              // 25% → -50bps, 35% → -100bps, 45% → -150bps
+              const urgency = (absSkew - 0.25) / 0.20  // 0.0 at 25%, 1.0 at 45%
+              const maxAllowedLossBps = 50 + urgency * 100  // 50-150bps
+              effectiveMinProfitBps = -maxAllowedLossBps
+            }
+
+            const minProfitFraction = effectiveMinProfitBps / 10000
             const isShort = actualSkew < -0.05
             const isLong = actualSkew > 0.05
 
             const beforeMinProfit = gridOrders.length
             if (isShort) {
-              // SHORT: close = bid (buying back). Bid must be < entry - minProfit to be profitable.
+              // SHORT: close = bid (buying back). Bid must be < entry × (1 - fraction).
+              // When effectiveMinProfitBps > 0: profitable close only (bid < entry - 10bps)
+              // When effectiveMinProfitBps < 0: allow loss up to |fraction| (bid < entry + |lossBps|)
               const maxBidPrice = entryPx * (1 - minProfitFraction)
               gridOrders = gridOrders.filter(o => {
                 if (o.side !== 'bid') return true  // keep all asks
                 return o.price <= maxBidPrice
               })
             } else if (isLong) {
-              // LONG: close = ask (selling). Ask must be > entry + minProfit to be profitable.
+              // LONG: close = ask (selling). Ask must be > entry × (1 + fraction).
               const minAskPrice = entryPx * (1 + minProfitFraction)
               gridOrders = gridOrders.filter(o => {
                 if (o.side !== 'ask') return true  // keep all bids
@@ -8703,22 +8721,20 @@ class HyperliquidMMBot {
             }
 
             const removedMinProfit = beforeMinProfit - gridOrders.length
-            if (removedMinProfit > 0 && this.tickCount % 20 === 0) {
-              console.log(
-                `📐 [MIN_PROFIT] ${pair}: Removed ${removedMinProfit} close orders < ${dynSpreadCfg.minProfitBps}bps from entry ` +
-                `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} skew=${(actualSkew*100).toFixed(0)}%`
-              )
+            if (this.tickCount % 20 === 0) {
+              if (absSkew > 0.25 && effectiveMinProfitBps < 0) {
+                console.log(
+                  `📐 [MIN_PROFIT_GRAD] ${pair}: |skew|=${(absSkew*100).toFixed(0)}% → allow loss up to ${Math.abs(effectiveMinProfitBps).toFixed(0)}bps ` +
+                  `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} removed=${removedMinProfit}`
+                )
+              } else if (removedMinProfit > 0) {
+                console.log(
+                  `📐 [MIN_PROFIT] ${pair}: Removed ${removedMinProfit} close orders < ${dynSpreadCfg.minProfitBps}bps from entry ` +
+                  `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} skew=${(actualSkew*100).toFixed(0)}%`
+                )
+              }
             }
           }
-        }
-
-        // Log when high skew bypassed MIN_PROFIT
-        if (highSkewBypassMinProfit && position && midPrice > 0 && this.tickCount % 20 === 0) {
-          const entryPx = position.entryPrice || 0
-          console.log(
-            `📐 [MIN_PROFIT_BYPASS] ${pair}: |skew|=${(Math.abs(actualSkew)*100).toFixed(0)}% > 25% → MIN_PROFIT bypassed ` +
-            `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} — closing position takes priority over fee optimization`
-          )
         }
 
         // ── Toxicity-driven layer removal (overrides skew-based removal) ──

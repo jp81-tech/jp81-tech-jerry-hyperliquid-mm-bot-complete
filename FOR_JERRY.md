@@ -40,6 +40,7 @@
 32. [DRY_RUN Safety — instanceof guard pattern](#dry_run-safety--instanceof-guard-pattern)
 33. [S/R Mean-Reversion Cycle — pelny cykl kupuj dol, sprzedaj gore](#sr-mean-reversion-cycle--pelny-cykl-kupuj-dol-sprzedaj-gore)
 34. [Inventory-Aware MG Override — gdy bot utknal i nie moze sie ruszyc](#inventory-aware-mg-override--gdy-bot-utknal-i-nie-moze-sie-ruszyc)
+35. [MIN_PROFIT Deadlock — gdy dwa systemy bezpieczenstwa sie nawzajem paralizuja](#min_profit-deadlock--gdy-dwa-systemy-bezpieczeństwa-się-nawzajem-paralizują)
 
 ---
 
@@ -7614,3 +7615,138 @@ To jest klasyczny przykład **"less is more"** w software engineering. Bot miał
 | Plik | Zmiana |
 |------|--------|
 | `src/mm_hl.ts` | -90/+7 linii: usunięto Inventory Deviation, AlphaEngine, SM Direction blocking, HOLD_FOR_TP guard |
+
+---
+
+## MIN_PROFIT Deadlock — gdy dwa systemy bezpieczeństwa się nawzajem paraliżują
+
+> **Lekcja:** Każdy system bezpieczeństwa ma sens sam w sobie. Ale dwa systemy bezpieczeństwa razem mogą stworzyć deadlock gorszy niż brak jakiegokolwiek.
+
+### Kontekst: co to jest MIN_PROFIT?
+
+MIN_PROFIT to filtr, który chroni bota przed zamykaniem pozycji **ze stratą na fees**. Na Hyperliquid płacisz 3.5bps (0.035%) za każdy fill. Jeśli zamkniesz shorta na cenie bliskiej entry, fee zje cały "zysk" i wyjdziesz na minus.
+
+MIN_PROFIT mówi: "nie składaj bida (zamykającego shorta) jeśli cena bida jest zbyt blisko entry price — czekaj aż cena spadnie dalej, żeby zamknięcie było opłacalne po odliczeniu fees."
+
+Konkretnie: `maxBidPrice = entryPrice × (1 - 0.001)` — bid musi być co najmniej 10bps poniżej entry żeby przejść filtr.
+
+### Problem: underwater SHORT
+
+kPEPE miał pozycję SHORT:
+- **Entry:** $0.003527 (tu otworzył shorta)
+- **Aktualna cena:** $0.003710 (cena WZROSŁA — short underwater)
+- **maxBidPrice:** $0.003527 × 0.999 = $0.003524
+
+Wszystkie bidy grida są wokół aktualnej ceny ($0.003690+). Każdy bid >> $0.003524. MIN_PROFIT filtruje **WSZYSTKIE** bidy → zero buy orderów.
+
+To ma sens w izolacji! Bot nie powinien zamykać shorta drożej niż otworzył (bo strata). Ale...
+
+### Drugi system: INVENTORY_SL
+
+INVENTORY_SL to "panic mode" — gdy pozycja jest za duża (|skew| > 40%) i underwater (drawdown > 2.5×ATR), bot przechodzi w tryb awaryjny: blokuje new-position side, podwaja closing-side.
+
+INVENTORY_SL **bypassuje** MIN_PROFIT (bo panic close > fee optimization). Ale uruchamia się dopiero przy **40% skew**.
+
+### Deadlock: luka 25-40%
+
+```
+|skew|    0%        15%        25%        40%        50%
+          |          |          |          |          |
+          |  normal  | MG/Skew  |  LUKA!   | PANIC    |
+          |  MM      | rebalance|  ❌❌❌   | mode     |
+          |          |          |          |          |
+          |          |          | MIN_PROFIT| BYPASS   |
+          |          |          | filtruje  | MIN_PROFIT|
+          |          |          | ALL bids  |          |
+```
+
+kPEPE miał **38% skew** — za dużo na normalne MM (systemy rebalancing dawały bid×1.38 ale MIN_PROFIT filtrowało wszystko), za mało na panic mode (threshold 40%). **Deadlock.**
+
+Wynik: **0 orderów przez 8+ godzin**. Bot żywy, serwer odpowiada, logi lecą, wszystkie systemy "działają" — ale zero faktycznych orderów na giełdzie. PnL: -$96.57 (fundingowe straty za trzymanie underwater shorta).
+
+### Analogia: dwa zamki na drzwiach
+
+Wyobraź sobie drzwi z dwoma zamkami. Zamek A (MIN_PROFIT) mówi "nie wychodź jeśli na dworze jest za zimno". Zamek B (INVENTORY_SL) mówi "jeśli dom się pali, otwórz zamek A". Ale zamek B reaguje dopiero gdy temperatura w domu przekroczy 100°C.
+
+Co jeśli temperatura = 80°C? Dom się tli, dym leci, ale zamek B mówi "jeszcze nie panika". A zamek A mówi "na dworze za zimno, nie wychodź". **Zostajesz w tlącym się domu.**
+
+### Fix v1: complete bypass (04.03) — ZA AGRESYWNY
+
+```typescript
+const highSkewBypassMinProfit = Math.abs(actualSkew) > 0.25
+if (... && !inventorySlPanic && !highSkewBypassMinProfit) {
+  // MIN_PROFIT filtering — completely skipped at >25% skew
+}
+```
+
+Wyglądało genialnie. Bot natychmiast dostał 8 buy orderów i zaczął zamykać shorta. Ale...
+
+**Katastrofa:** Bot zamknął 12 shortów na cenie $0.003679-$0.003713, vs entry $0.003527. To **430-530bps** straty na każdym close! 12 fills × ~$4.50 = **~$50 strat** w kilka minut.
+
+Dlaczego? Bo complete bypass = "zamknij po DOWOLNEJ cenie". Bot nie sprawdzał jak daleko od entry jest bid — po prostu kupował na rynku. Zamieniliśmy jeden problem (deadlock) na inny (masowe straty na close).
+
+### Lekcja: chirurgia, nie karabin maszynowy
+
+To klasyczny pattern w programowaniu — "overcorrection". Problem: system za mocno filtruje. Naiwny fix: wyłącz filtr całkowicie. Ale filtr istniał z powodu! Wyłączenie go powoduje nowy problem.
+
+Lepsze podejście: **graduate the response**. Zamiast ON/OFF, daj systemowi suwak.
+
+### Fix v2: graduated max-loss cap (05.03)
+
+```typescript
+if (absSkew > 0.45) {
+  effectiveMinProfitBps = -9999  // Full bypass — panic territory
+} else if (absSkew > 0.25) {
+  const urgency = (absSkew - 0.25) / 0.20  // 0.0 at 25%, 1.0 at 45%
+  const maxAllowedLossBps = 50 + urgency * 100  // 50-150bps
+  effectiveMinProfitBps = -maxAllowedLossBps
+}
+```
+
+Teraz MIN_PROFIT nie jest ON/OFF. Ma **graduated response**:
+
+| Skew | Max dozwolona strata | Co to znaczy |
+|------|---------------------|--------------|
+| < 25% | 0 (profit only) | Normalne — nie zamykaj na minus |
+| 25% | 50bps (0.5%) | Mały skew — pozwól na małą stratę |
+| 30% | 75bps (0.75%) | Rosnąca urgency |
+| 38% | 115bps (1.15%) | Nasze kPEPE scenario |
+| 45%+ | unlimited | Panic territory |
+
+**Przykład kPEPE at 38% skew:**
+- entry = $0.003527
+- Max loss = 115bps → maxBidPrice = $0.003527 × 1.00115 = **$0.003568**
+- Bidy na $0.003700 (490bps loss) → **ODRZUCONE** (za drogo!)
+- Bidy na $0.003550 (65bps loss) → **DOZWOLONE** (w limicie 115bps)
+
+Z v1 fix te $0.003700 bidy **przeszłyby** — i tak się stało, dlatego straciliśmy ~$50. Z v2 bot czeka na lepszą cenę albo na drop bliżej entry.
+
+### Cztery warstwy ochrony (po v2 fixie)
+
+| Skew | System | Co robi |
+|------|--------|---------|
+| 0-25% | MIN_PROFIT (10bps) | Nie zamykaj poniżej entry-10bps |
+| 25-45% | **Graduated loss cap** | Pozwól na stratę 50-150bps (proporcjonalnie do urgency) |
+| 45%+ | **Full bypass** | Zamykaj po dowolnej cenie (panic territory) |
+| 40%+ & drawdown | `inventorySlPanic` | Panic mode — asks=0, bids×2 |
+
+### Dlaczego ten bug przetrwał tak długo?
+
+Bo dwa systemy testowane osobno działały idealnie:
+
+1. **MIN_PROFIT sam** — chroni przed fee-eating na close orderach. Logiczny, testowany, działa.
+2. **INVENTORY_SL sam** — chroni przed ekstremalnym skew. Logiczny, testowany, działa.
+
+Nikt nie testował **interakcji** między nimi. W software engineering to się nazywa **"emergent bug"** — bug który nie istnieje w żadnym pojedynczym komponencie, a pojawia się dopiero gdy komponenty współpracują.
+
+A potem naiwny fix (v1) stworzył **kolejny** bug — overcorrection. To dlatego dobrzy inżynierowie nie robią binarnych ON/OFF fixów na systemach bezpieczeństwa. Zawsze szukaj graduated response.
+
+> **Zasada #1:** Każdy nowy system bezpieczeństwa powinien mieć odpowiedź na pytanie: "co jeśli inny system zablokuje to co ja odblokuję?"
+>
+> **Zasada #2:** Nigdy nie wyłączaj systemu bezpieczeństwa całkowicie. Zamiast tego, dostosuj jego parametry proporcjonalnie do urgency. Suwak, nie przełącznik.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | Graduated MIN_PROFIT: `effectiveMinProfitBps` skalowane urgency skew |

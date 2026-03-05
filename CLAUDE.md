@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-04
+- Data: 2026-03-05
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -48,36 +48,39 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 4 marca 2026
 
-### 95. MIN_PROFIT high-skew bypass — fix 0 bids when underwater SHORT (04.03)
+### 95. MIN_PROFIT graduated max-loss cap — fix stuck positions WITHOUT unlimited loss (04-05.03)
 
-**Problem:** kPEPE (PURE_MM) z SHORT pozycją underwater (entry=$0.003527, mid=$0.003710) miał **0 buy orderów** przez 8+ godzin. MG dawał bid×1.38 (INV_AWARE), Auto-Skew przesuwał grid UP, ale MIN_PROFIT BUFFER filtrował WSZYSTKIE bidy.
+**Problem (04.03):** kPEPE z SHORT underwater (entry=$0.003527, mid=$0.003710) miał **0 buy orderów** przez 8+ godzin. MIN_PROFIT filtrował WSZYSTKIE bidy (maxBidPrice=$0.003524, all grid bids >> that).
 
-**Root cause — deadlock MIN_PROFIT + skew gap:**
-- MIN_PROFIT: `maxBidPrice = entry × (1 - 0.001) = $0.003524`. Wszystkie grid bidy (~$0.003690+) >> $0.003524 → ALL filtered
-- INVENTORY_SL bypass: `inventorySlPanic` only fires at |skew|>40% AND drawdown>2.5×ATR. At |skew|=38% → NOT triggered
-- **Gap 25-40%**: Pozycja za duża na normalne MM, za mała na panic mode → deadlock
+**v1 fix (04.03) — ZA AGRESYWNY:** Complete bypass `highSkewBypassMinProfit` at |skew|>25%. Bot natychmiast zamknął 12 shortów 5% underwater (~$50 strat). Closes at $0.003679-$0.003713 vs entry $0.003527 = 430-530bps loss per trade.
 
-**Fix w `src/mm_hl.ts` (+8 linii):**
+**v2 fix (05.03) — GRADUATED:** Zamiast full bypass, WIDEN allowed loss window proporcjonalnie do urgency skew:
+
+| Skew | Zachowanie | Max dozwolona strata |
+|------|-----------|---------------------|
+| < 25% | Normalne MIN_PROFIT (10bps profit wymagany) | 0bps (only profit) |
+| 25% | Graduated start | 50bps (0.5%) |
+| 35% | Urgency grows | 100bps (1.0%) |
+| 45%+ | Full bypass (panic territory) | unlimited |
+
+**Formuła:**
 ```typescript
-const highSkewBypassMinProfit = Math.abs(actualSkew) > 0.25
-if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic && !highSkewBypassMinProfit) {
-```
-Gdy |skew| > 25%, MIN_PROFIT jest bypassowany — zamknięcie stuck pozycji ważniejsze niż 10bps fee optimization.
-
-**Log:** `📐 [MIN_PROFIT_BYPASS] kPEPE: |skew|=38% > 25% → MIN_PROFIT bypassed | entry=0.0035270 mid=0.0037139 — closing position takes priority over fee optimization`
-
-**Wynik po deploy:**
-```
-Przed: buyLevels=0 sellLevels=8 (0 fills przez 8h, Daily PnL: -$96.57)
-Po:    buyLevels=8 sellLevels=8 (8 buy orders natychmiast, zamykanie SHORT)
+urgency = (|skew| - 0.25) / 0.20     // 0.0 at 25%, 1.0 at 45%
+maxAllowedLossBps = 50 + urgency × 100  // 50-150bps
+effectiveMinProfitBps = -maxAllowedLossBps
+maxBidPrice = entry × (1 + maxAllowedLossBps/10000)  // ABOVE entry (allow loss)
 ```
 
-**Interaction z innymi mechanizmami:**
-- |skew| < 25% → MIN_PROFIT aktywny (normalne filtrowanie, chroni przed fee-eating)
-- |skew| 25-40% → **highSkewBypassMinProfit** (NEW — zamykanie pozycji priorytetem)
-- |skew| > 40% + drawdown → `inventorySlPanic` (panic mode, asks=0 + bids×2)
+**Przykład kPEPE at 38% skew:**
+- urgency = (0.38 - 0.25) / 0.20 = 0.65
+- maxLoss = 50 + 0.65 × 100 = 115bps (1.15%)
+- entry=$0.003527 → maxBidPrice = $0.003527 × 1.00115 = $0.003568
+- Bidy powyżej $0.003568 nadal filtrowane (np. $0.003700 = 490bps loss → odrzucone)
+- Bidy do $0.003568 dozwolone (max 115bps loss zamiast unlimited)
 
-**Pliki:** `src/mm_hl.ts` (+8)
+**Log:** `📐 [MIN_PROFIT_GRAD] kPEPE: |skew|=38% → allow loss up to 115bps | entry=0.0035270 mid=0.0037139 removed=4`
+
+**Pliki:** `src/mm_hl.ts` (replace #95 v1)
 
 ### 94. Remove Inventory Deviation, AlphaEngine, SM Direction — fix 8h stuck skew (04.03)
 
