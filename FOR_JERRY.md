@@ -41,6 +41,7 @@
 33. [S/R Mean-Reversion Cycle — pelny cykl kupuj dol, sprzedaj gore](#sr-mean-reversion-cycle--pelny-cykl-kupuj-dol-sprzedaj-gore)
 34. [Inventory-Aware MG Override — gdy bot utknal i nie moze sie ruszyc](#inventory-aware-mg-override--gdy-bot-utknal-i-nie-moze-sie-ruszyc)
 35. [MIN_PROFIT Deadlock — gdy dwa systemy bezpieczenstwa sie nawzajem paralizuja](#min_profit-deadlock--gdy-dwa-systemy-bezpieczeństwa-się-nawzajem-paralizują)
+36. [Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknieciu S/R](#fresh-touch-boost--silniejsza-akumulacja-na-pierwszym-dotknieciu-sr)
 
 ---
 
@@ -7750,3 +7751,74 @@ A potem naiwny fix (v1) stworzył **kolejny** bug — overcorrection. To dlatego
 | Plik | Zmiana |
 |------|--------|
 | `src/mm_hl.ts` | Graduated MIN_PROFIT: `effectiveMinProfitBps` skalowane urgency skew |
+
+---
+
+## Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknieciu S/R
+
+### Analogia: Surfing
+
+Wyobraz sobie surfera czekajacego na fale. Gdy przychodzi **pierwsza fala** po dlugim spokoju, surfer wskakuje z calych sil — wie, ze to swiezy set, pelno energii. Ale po trzeciej, czwartej fali z tego samego setu? Kazda nastepna jest slabsza, surfer mniej zaangazowany.
+
+S/R Accumulation dzialalo jak surfer ktory traktuje kazda fale tak samo — pierwsza i czwarta mialy ten sam rozmiar bidow. A przeciez **pierwsze dotknięcie** supportu (gdy bot jest flat) to najlepszy moment na agresywna akumulacje!
+
+### Problem
+
+5 marca, 08:45 UTC. kPEPE po raz pierwszy dotyka supportu $0.003533. Bot jest prawie flat (skew ~0%). S/R Accumulation aktywuje sie:
+
+```
+🔄 [SR_ACCUM] kPEPE: SUPPORT → progress=90% skew=0% → bid×1.72 ask×0.50
+```
+
+Dobrze? Tak, ale **za slabo**. Cena odskoczyla ladnie w gore, ale bot zebral longów za zwykla ilosc ($172 zamiast $100 per level). Gdyby bid byl ×5 zamiast ×1.72, bot zebrałby 3× wiecej longow na tym idealnym pierwszym dotknieciu.
+
+Problem: **trzecie dotknięcie** tego samego supportu (14:02 UTC) — skew juz 5% (bot kupil troche na pierwszym i drugim dotknieciu). Ale S/R Accumulation dawalo identyczna sile jak przy pierwszym! A przeciez:
+
+- **Pierwsze dotknięcie** (skew 0%) = swiezy bounce, zadnej pozycji → wchodzmy z calej sily
+- **Trzecie dotknięcie** (skew 5%) = juz mamy troche → normalny rozmiar
+
+### Rozwiazanie: absSkew jako proxy dla "swiezosci"
+
+Genialne w prostocie — **im mniejszy skew, tym swiezsze dotknięcie**. Zero pozycji = na pewno pierwsze dotknięcie. 8% pozycji (srMaxRetainPct) = juz nazbieralismy duzp, normalna sila.
+
+```typescript
+// freshRatio: 1.0 przy skew=0% → 0.0 przy skew=srMaxRetainPct
+const freshRatio = max(0, (srMaxRetainPct - absSkew)) / srMaxRetainPct
+
+// freshBoost: 3.0× przy skew=0% → 1.0× przy skew=8% (kPEPE)
+const freshBoost = 1.0 + freshRatio * (srAccumFreshMultiplier - 1.0)
+
+// Wzmocnione multipliery
+const effectiveBounceBoost = srAccumBounceBoost * freshBoost   // 1.8 × 3.0 = 5.4×!
+const effectiveCounterReduce = srAccumCounterReduce / freshBoost  // 0.50 / 3.0 = 0.17
+```
+
+### Tabela wartosci (kPEPE, progress=90%)
+
+| Skew | freshBoost | bid× | ask× | Interpretacja |
+|------|-----------|------|------|---------------|
+| **0%** (flat) | **3.0×** | **×5.84** | **×0.17** | "Swiezy bounce! Wchodzmy z calej sily!" |
+| 2% | 2.5× | ×5.04 | ×0.20 | "Prawie swiezy, nadal agresywnie" |
+| 4% | 2.0× | ×4.24 | ×0.25 | "Pol drogi, solidna akumulacja" |
+| 6% | 1.5× | ×2.68 | ×0.33 | "Juz blisko max, zwalniamy" |
+| **8%** (max) | **1.0×** | **×1.72** | **×0.50** | "Max pozycja, normalny tryb" |
+
+### Dlaczego to dziala
+
+1. **Pierwszy bounce jest najsilniejszy** — statystycznie, pierwsze odbicie od S/R ma najwyzsza szanse na kontynuacje
+2. **Risk/Reward najlepszy przy flat** — gdy nie masz pozycji, nie masz nic do stracenia. Przy 5% skew juz ryzykujesz
+3. **Self-correcting** — im wiecej bot kupi (skew rosnie), tym wolniej kupuje. Naturalne wyhamowanie
+4. **Counter-side tez sie adaptuje** — ask×0.17 przy flat = prawie zero sprzedazy. Nie oddawaj nic na pierwszym dotknieciu!
+
+### Lekcja inzynierska
+
+**Nie traktuj kazdej okazji tak samo.** W tradingu, w softwarze, w zyciu — pierwsza okazja czesto jest najlepsza. System ktory daje identyczna odpowiedz na kazdy sygnał marnuje najlepsze momenty.
+
+Technika "proxy variable" — uzycie jednej zmiennej (skew) jako przyblizonego wskaznika innej (swiezosc dotknięcia S/R) to potezny pattern. Nie potrzebujesz zliczonego "ile razy dotknelimy support" — skew juz to koduje implicite.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | +`srAccumFreshMultiplier` (default 2.0, kPEPE 3.0) |
+| `src/mm_hl.ts` | freshBoost w SUPPORT i RESISTANCE blocks, `fresh×X.X` w logach |

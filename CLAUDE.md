@@ -48,6 +48,42 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 5 marca 2026
 
+### 102. Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknięciu S/R (05.03)
+
+**Problem:** kPEPE o 08:45 po raz pierwszy odbił od supportu (skew ~0%, flat). Bot zebrał longi ale z normalną siłą (bid×1.54, ask×0.50). Cena poszła ładnie w górę. Gdyby akumulacja była 2-3× silniejsza przy pierwszym dotknięciu (niski skew = flat = świeże odbicie), bot zebrałby dużo więcej longów.
+
+**Pomysł:** Użyć `absSkew` jako proxy dla "świeżości" dotknięcia S/R:
+- Skew 0% = flat = pierwsze dotknięcie = maksymalny boost (3× dla kPEPE)
+- Skew 8% (srMaxRetainPct) = już zaakumulowaliśmy = normalny boost (1×)
+
+**Nowy config param `srAccumFreshMultiplier`:**
+
+| Config | Default | kPEPE |
+|--------|---------|-------|
+| `srAccumFreshMultiplier` | 2.0 | **3.0** |
+
+**Formuła:**
+```typescript
+freshRatio = max(0, (srMaxRetainPct - absSkew)) / srMaxRetainPct  // 1.0 at 0%, 0.0 at max
+freshBoost = 1.0 + freshRatio * (srAccumFreshMultiplier - 1.0)     // 3.0× at 0%, 1.0× at max
+effectiveBounceBoost = srAccumBounceBoost * freshBoost              // 1.8 × 3.0 = 5.4× at 0%
+effectiveCounterReduce = max(0.05, srAccumCounterReduce / freshBoost) // 0.50 / 3.0 = 0.17 at 0%
+```
+
+**Przykładowe wartości (kPEPE, progress=90%):**
+
+| Skew | freshBoost | bid× | ask× | Efekt |
+|------|-----------|------|------|-------|
+| 0% | 3.0× | ×5.84 | ×0.17 | Agresywna akumulacja, prawie zero counter |
+| 4% | 2.0× | ×4.24 | ×0.25 | Silna akumulacja |
+| 8% | 1.0× | ×1.72 | ×0.50 | Normalna (jak dotychczas) |
+
+**Log:** `🔄 [SR_ACCUM] kPEPE: SUPPORT → accumulate LONGS — progress=90% ... fresh×3.0 → bid×5.84 ask×0.17`
+
+**Pliki:** `src/config/short_only_config.ts` (+3: interface, default, kPEPE override), `src/mm_hl.ts` (+8 w SUPPORT block, +8 w RESISTANCE block, updated log format)
+
+---
+
 ### 101. 15m S/R lookback skrócony z 96 do 48 candles (12h zamiast 24h) (05.03)
 
 **Problem:** kPEPE widział resistance na $0.003760 (szczyt z ~24h temu), ale cena to $0.003577 — dystans 5.1%. Lookback 96 candles × 15m = 24h łapał szczyty/dołki z wczoraj, za szeroko dla volatile memecoina z daily range 5-10%.
@@ -4418,7 +4454,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
 - **kPEPE risk pipeline (04.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **Inventory-Aware MG Override (04.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>15%, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15`, `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. Logi: `⚡ [INV_AWARE_MG]`.
-- **S/R Accumulation (04.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3). Logi: `🔄 [SR_ACCUM]`. Complementary z S/R Reduction — never both active (different skew conditions).
+- **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (20%). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=8%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
 - **Breakout TP (04.03)**: Agresywne zamykanie pozycji gdy silny momentum aligned z pozycją. LONG+pump (score>threshold): ask×closingBoost, bid÷closingBoost. SHORT+dump: mirror. Config: `srBreakoutTpEnabled`, `srBreakoutTpScoreThreshold` (0.50/kPEPE: 0.40), `srBreakoutTpClosingBoost` (1.5). Logi: `🚀 [BREAKOUT_TP]`. Multiplicative z MG — combined bid×0.067 ask×1.95 na strong pump z LONG.
 - **S/R Progressive Reduction (04.03)**: Progresywne zamykanie pozycji schodząc do S/R. SHORT near support → reduce asks (stop building), boost bids (close). LONG near resistance → mirror. Zone = mgStrongZone × srReductionStartAtr (kPEPE: 2.5×ATR = ~4.5%). Progress 0→1 w strefie. Disengage gdy |skew| <= srMaxRetainPct (20%). Config: `srReductionEnabled`, `srReductionStartAtr` (3.0/kPEPE: 2.5), `srMaxRetainPct` (0.20), `srClosingBoostMult` (2.0). Logi: `📉 [SR_REDUCTION]` / `📈 [SR_REDUCTION]`. Multiplicative z MG — oba zgadzają się "stop shorting at support".
 - **TOKEN_WEIGHT_OVERRIDES (27.02)**: Per-token prediction weight overrides w `HybridPredictor.ts`. kPEPE: SM=0% (dead signal), redystrybuowane do technical+momentum+trend. Inne tokeny dalej używają `HORIZON_WEIGHTS` (SM 10-65%). Extensible — dodanie kolejnego tokena = 1 wpis w mapie. Kiedy przywrócić SM dla kPEPE: >= 3 SM addresses z >$50K na perps LUB SM spot activity >$500K/tydzień.
