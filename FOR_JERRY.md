@@ -7951,3 +7951,91 @@ W tradingu ta koncepcja nazywa się **confirmation bias** (w pozytywnym sensie) 
 | `src/config/short_only_config.ts` | +`srReductionGraceCandles` (default=2, kPEPE=3) |
 | `src/mm_hl.ts` | +`srBreakGraceStart` Map, proximity signal rewrite (±1.0/±1.2), grace period logic (~50 LOC), Discord alert types (BROKEN/AT/NEAR) |
 | `src/utils/discord_notifier.ts` | Embed: +`15m Close` field, orange color for BROKEN |
+
+---
+
+## Chapter 48: Kiedy Przestać Budować — Próg Akumulacji i Jego Pułapki
+
+*Albo: jak jeden parametr (8% vs 15%) decyduje czy bot zbierze dużą pozycję czy się zatrzyma w połowie.*
+
+### Problem: Bot przestał kupować za wcześnie
+
+5 marca, 15:15 UTC. kPEPE jest AT SUPPORT — cena dotknęła wsparcia na $0.003508. Discord wysyła zielony alert. Sprawdzam logi bota i... cisza. Zero logów `[SR_ACCUM]`. Bot nie akumuluje longów mimo że jest dokładnie na supportcie.
+
+Skew wynosi 11%. Bot ma małego longa — 381K kPEPE ($1,339). To nie jest duża pozycja. Powinien kontynuować zbieranie.
+
+Ale nie zbiera.
+
+### Root Cause: Próg 8% był za niski
+
+Problem okazał się być w jednym parametrze: `srMaxRetainPct`. To próg który decyduje:
+
+```
+|skew| <= srMaxRetainPct  →  S/R ACCUMULATION (buduj pozycję)
+|skew| >  srMaxRetainPct  →  S/R REDUCTION (zamykaj pozycję)
+```
+
+Dla kPEPE ustawiliśmy `srMaxRetainPct: 0.08` (8%). To znaczy:
+
+- Skew 3% → akumulacja aktywna, bot kupuje agresywnie (bid×3.20, ask×0.00)
+- Skew 8% → **granica** — akumulacja się wyłącza
+- Skew 11% → S/R Reduction przejmuje i zaczyna **zamykać** pozycję
+
+Bot dosłownie zbierał longi do 8% skew, a potem zaczynał je oddawać. Budował zamek z piasku i natychmiast go burzył.
+
+### Analogia: Termostat ustawiony za nisko
+
+Wyobraź sobie, że ustawiasz termostat na 18°C w zimie. Grzejnik się włącza, pokój dochodzi do 18°C, grzejnik się wyłącza. Ale tak naprawdę chcesz 22°C — pokój nigdy nie jest wystarczająco ciepły.
+
+Nasz "termostat" S/R Accumulation był ustawiony na 8% — za nisko. Bot nigdy nie budował wystarczająco dużej pozycji żeby naprawdę zarobić na odbiciu od supportu.
+
+### Fix: Jeden parametr
+
+```typescript
+// PRZED:
+srMaxRetainPct: 0.08,  // 8% — za nisko, bot buduje do 8% i zaczyna zamykać
+
+// PO:
+srMaxRetainPct: 0.15,  // 15% — bot buduje do 15% zanim zacznie zamykać
+```
+
+Teraz timeline wygląda tak:
+
+| Skew | Przed (8%) | Po (15%) |
+|------|-----------|----------|
+| 3% | Akumulacja (bid×3.20) | Akumulacja (bid×3.20) |
+| 8% | **STOP → Reduction** | Akumulacja (kontynuuje) |
+| 11% | Reduction (zamykanie!) | **Akumulacja** (nadal buduje) |
+| 15% | Reduction | **Granica** → Reduction |
+| 20% | Reduction | Reduction |
+
+### Dlaczego wcześniej było 8%?
+
+Oryginalny komentarz w kodzie mówił: *"was 20% — too high, bot ran symmetric grid at -12% skew"*. Ktoś (my, tydzień temu) obniżył z 20% na 8% bo bot przy 12% skew nadal zachowywał się jak symmetric market maker zamiast aktywnie zamykać.
+
+Ale to było za dużo w drugą stronę. 8% to tak mało, że bot **nigdy nie zbierał sensownej pozycji**. Każde odbicie od supportu budowało pozycję do 8%, potem natychmiast zaczynało ją redukować, tracąc momentum.
+
+15% to złoty środek:
+- **Wystarczająco duże** żeby zbudować sensowną pozycję na odbiciu
+- **Wystarczająco małe** żeby S/R Reduction miała co zamykać przy resistance
+- Bot ma miejsce na organiczny wzrost pozycji od 0% do 15%
+
+### Lekcja inżynierska: Parametry to dźwignia
+
+W systemach tradingowych (i w software ogólnie) jeden parametr może mieć ogromny wpływ na zachowanie systemu. `srMaxRetainPct` to dosłownie granica między "buduj pozycję" a "zamykaj pozycję" — dwa przeciwne zachowania kontrolowane przez jeden próg.
+
+Kilka zasad:
+
+1. **Nie optymalizuj parametrów na jednym przykładzie.** Obniżyliśmy z 20%→8% bo w jednym przypadku 12% skew był za dużo. Ale 8% okazało się za małe w innym przypadku.
+
+2. **Szukaj złotego środka, nie ekstremum.** 20% za dużo, 8% za mało → 15% w sam raz. Goldilocks principle.
+
+3. **Sprawdzaj komplementarne systemy.** Accumulation i Reduction dzielą ten sam próg — zmiana jednego wpływa na oba. Obniżając próg akumulacji, jednocześnie podwyższyliśmy agresywność redukcji.
+
+4. **Logi nie kłamią.** Discord alert mówił "AT SUPPORT", ale brak logów `[SR_ACCUM]` natychmiast wskazał na problem. Dlatego logujemy co 20 ticków — żeby widzieć co się dzieje (i co się NIE dzieje).
+
+### Kluczowy plik
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | kPEPE `srMaxRetainPct`: 0.08 → 0.15 |
