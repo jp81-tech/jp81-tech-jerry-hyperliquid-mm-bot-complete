@@ -4026,7 +4026,7 @@ class HyperliquidMMBot {
     this.copyTradingMinTraders = Number(process.env.COPY_TRADING_MIN_TRADERS || 3)
 
     // Nansen conflict protection configuration
-    this.nansenConflictCheckEnabled = process.env.NANSEN_CONFLICT_CHECK_ENABLED !== 'false'
+    this.nansenConflictCheckEnabled = false
     this.nansenStrongContraHardCloseUsd = Number(process.env.NANSEN_STRONG_CONTRA_HARD_CLOSE_USD || 10)
     this.nansenStrongContraMaxLossUsd = Number(process.env.NANSEN_STRONG_CONTRA_MAX_LOSS_USD || 25)
     this.nansenStrongContraMaxHours = Number(process.env.NANSEN_STRONG_CONTRA_MAX_HOURS || 3)
@@ -8340,36 +8340,54 @@ class HyperliquidMMBot {
           // === ⚡ INVENTORY-AWARE MG OVERRIDE ===
           // When position is AGAINST momentum direction, ensure closing-side multiplier
           // stays above minimum. MG reduces bids during pump, but SHORT needs bids to close.
+          // EXCEPTION: Do NOT close positions built by S/R Accumulation near S/R levels.
+          // LONG near support (prox <= -0.5) → S/R Accumulation built these longs, don't close them.
+          // SHORT near resistance (prox >= 0.5) → S/R Accumulation built these shorts, don't close them.
           let invOverrideApplied = false
           if (momGuardConfig.inventoryAwareMgEnabled) {
             const absSkewInv = Math.abs(actualSkew)
             if (absSkewInv > momGuardConfig.inventoryAwareMgThreshold) {
-              const urgency = Math.min(1.0, absSkewInv / 0.50) // 15%→0.30, 30%→0.60, 50%→1.00
-              const minClosing = 1.0 + urgency * (momGuardConfig.inventoryAwareMgClosingBoost - 1.0)
+              // S/R proximity suppression: don't fight S/R Accumulation
+              const longNearSupport = hasLongPos && mgProxSignal <= -0.5
+              const shortNearResistance = hasShortPos && mgProxSignal >= 0.5
+              const srSuppressed = (dumpAgainstLong && longNearSupport) || (pumpAgainstShort && shortNearResistance)
 
-              if (pumpAgainstShort) {
-                // SHORT + PUMP → need bids to close, MG is reducing them
-                if (sizeMultipliers.bid < minClosing) {
-                  sizeMultipliers.bid = minClosing
-                  sizeMultipliers.ask = Math.min(sizeMultipliers.ask, 1.0 / minClosing)
-                  invOverrideApplied = true
+              if (srSuppressed) {
+                if (this.tickCount % 20 === 0) {
+                  console.log(
+                    `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
+                    `skew=${(actualSkew*100).toFixed(0)}% prox=${mgProxSignal.toFixed(2)} → ` +
+                    `SUPPRESSED (position near ${longNearSupport ? 'SUPPORT' : 'RESISTANCE'}, S/R Accumulation has priority)`
+                  )
                 }
-              } else if (dumpAgainstLong) {
-                // LONG + DUMP → need asks to close, MG is reducing them
-                if (sizeMultipliers.ask < minClosing) {
-                  sizeMultipliers.ask = minClosing
-                  sizeMultipliers.bid = Math.min(sizeMultipliers.bid, 1.0 / minClosing)
-                  invOverrideApplied = true
-                }
-              }
+              } else {
+                const urgency = Math.min(1.0, absSkewInv / 0.50) // 15%→0.30, 30%→0.60, 50%→1.00
+                const minClosing = 1.0 + urgency * (momGuardConfig.inventoryAwareMgClosingBoost - 1.0)
 
-              if (invOverrideApplied) {
-                console.log(
-                  `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
-                  `skew=${(actualSkew*100).toFixed(0)}% score=${momentumScore.toFixed(2)} ` +
-                  `urgency=${(urgency*100).toFixed(0)}% minClosing=${minClosing.toFixed(2)} → ` +
-                  `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING OVERRIDE)`
-                )
+                if (pumpAgainstShort) {
+                  // SHORT + PUMP → need bids to close, MG is reducing them
+                  if (sizeMultipliers.bid < minClosing) {
+                    sizeMultipliers.bid = minClosing
+                    sizeMultipliers.ask = Math.min(sizeMultipliers.ask, 1.0 / minClosing)
+                    invOverrideApplied = true
+                  }
+                } else if (dumpAgainstLong) {
+                  // LONG + DUMP → need asks to close, MG is reducing them
+                  if (sizeMultipliers.ask < minClosing) {
+                    sizeMultipliers.ask = minClosing
+                    sizeMultipliers.bid = Math.min(sizeMultipliers.bid, 1.0 / minClosing)
+                    invOverrideApplied = true
+                  }
+                }
+
+                if (invOverrideApplied) {
+                  console.log(
+                    `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
+                    `skew=${(actualSkew*100).toFixed(0)}% score=${momentumScore.toFixed(2)} ` +
+                    `urgency=${(urgency*100).toFixed(0)}% minClosing=${minClosing.toFixed(2)} → ` +
+                    `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING OVERRIDE)`
+                  )
+                }
               }
             }
           }

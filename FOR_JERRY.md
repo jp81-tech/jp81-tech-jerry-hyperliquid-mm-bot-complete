@@ -8132,3 +8132,61 @@ INV_AWARE wygrywa (override), aski lądują blisko ceny → longi zamykane ze st
 |------|--------|
 | `src/signals/market_vision.ts` | S/R computation: `candles15m` → `candles` (1h), lookback 48→24 |
 | `src/mm_hl.ts` | Log label `S/R(15m)` → `S/R(1h)`, footer Discord alert updated |
+
+---
+
+## Chapter 50: Wyłączanie mechanizmu który walczy z Twoim botem — NANSEN CONFLICT SL
+
+> "Najgorszy wróg to ten, którego sam sobie stworzyłeś."
+
+### Problem
+
+Bot kPEPE (PURE_MM) robił normalny market making — grid z bidami i askami po obu stronach. S/R Accumulation budowała longi przy supportcie (Chapter 46-49). Wszystko działało... dopóki nie włączył się NANSEN CONFLICT SL.
+
+Ten mechanizm (`checkNansenConflicts()`) sprawdzał jedną prostą rzecz: **"Czy Twoja pozycja jest przeciw Nansen bias?"**. Nansen bias mówił SHORT STRONG. Bot miał longi. Wniosek: **zamknij longi force-close ze stratą**.
+
+Wynik? Bot budował longi przy supportcie (koszt: fees + spread), a potem NANSEN CONFLICT SL je zamykał gdy PnL spadło poniżej -$20. Każde zamknięcie to strata $22-55. Jak Syzyf toczący kamień pod górę — bot budował, system niszczył, bot budował od nowa.
+
+### Dlaczego ten mechanizm w ogóle istniał?
+
+NANSEN CONFLICT SL miał sens w **starym modelu** (War Doctrine, styczeń 2026) — bot SM-following, który podążał za Smart Money. Jeśli bot trzymał LONG a SM mówili SHORT → pozycja jest **źle ustawiona** → zamknij ze stratą zanim stracisz więcej.
+
+Ale od kiedy kPEPE przeszedł na **PURE_MM** (czysty market making), ten mechanizm stał się szkodliwy. Market maker **musi** mieć pozycje w obu kierunkach — to nie jest bug, to jest feature. Grid buduje longi przy supportcie i shorty przy resistance. NANSEN CONFLICT SL nie rozumiał tego kontekstu.
+
+### Analogia: Strażnik w szpitalu
+
+Wyobraź sobie strażnika w szpitalu, który ma prostą zasadę: "Nie wpuszczaj obcych." Zasada miała sens gdy szpital był zamknięty. Ale teraz szpital jest otwarty i przyjmuje pacjentów. Strażnik nadal blokuje wejście. Pacjenci (longi) wchodzą tylnymi drzwiami (grid), a strażnik ich wyrzuca (force-close).
+
+Rozwiązanie? Nie "naucz strażnika kto jest pacjentem" — to byłoby over-engineering. Po prostu **wyłącz strażnika**. Szpital ma teraz inne systemy bezpieczeństwa (Inventory SL, S/R Reduction, MG proximity).
+
+### Fix: jedna linia
+
+```typescript
+// PRZED: Domyślnie włączony, trzeba explicit 'false' w env żeby wyłączyć
+this.nansenConflictCheckEnabled = process.env.NANSEN_CONFLICT_CHECK_ENABLED !== 'false'
+
+// PO: Hardcode wyłączony
+this.nansenConflictCheckEnabled = false
+```
+
+Dlaczego hardcode `false` zamiast ustawienia env var `NANSEN_CONFLICT_CHECK_ENABLED=false`?
+
+1. **Czytelność** — każdy kto czyta kod widzi od razu że mechanizm jest wyłączony
+2. **Bezpieczeństwo** — restart bota bez env var nie włączy mechanizmu przypadkowo
+3. **Dokumentacja w kodzie** — `= false` mówi "świadoma decyzja", nie "zapomniano ustawić env"
+
+### Lekcja
+
+1. **Mechanizmy ochronne mają kontekst.** SL który chroni SM-following bota może niszczyć PURE_MM bota. Gdy zmieniasz strategię (SM-following → PURE_MM), przejrzyj WSZYSTKIE mechanizmy ochronne i sprawdź czy nadal mają sens w nowym kontekście.
+
+2. **Hardcode > env var gdy decyzja jest architekturalna.** Env var to "konfiguracja" — sugeruje że wartość może się zmieniać. Hardcode to "architektura" — mówi "to jest tak a nie inaczej, okres".
+
+3. **Szukaj conflicting systems.** Gdy bot traci mimo poprawnej logiki, sprawdź czy dwa systemy nie walczą ze sobą. Tu: S/R Accumulation budowała longi, NANSEN CONFLICT SL je zamykał. Oba działały "poprawnie" w izolacji — problem był w ich interakcji.
+
+4. **Logi mówią prawdę.** `🛑 [NANSEN CONFLICT SL] Closing LONG on kPEPE (PnL: $-27.03)` — te logi były w error log przez wiele ticków. Wystarczyło grep'nąć żeby zobaczyć problem.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/mm_hl.ts` | Linia 4029: `nansenConflictCheckEnabled = false` (hardcode disable) |
