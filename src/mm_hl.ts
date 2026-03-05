@@ -3688,7 +3688,7 @@ class HyperliquidMMBot {
 
   // 📍 S/R DISCORD ALERTS — cooldown tracking (token:level_type → last alert timestamp)
   private srAlertCooldowns: Map<string, number> = new Map()
-  private static readonly SR_ALERT_COOLDOWN_MS = 30 * 60 * 1000  // 30 min per token per level type
+  private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
 
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
   private predictionCache: Map<string, { direction: string; change: number; confidence: number; fetchedAt: number }> = new Map()
@@ -8167,7 +8167,7 @@ class HyperliquidMMBot {
               : 0
 
           // 3. Proximity to resistance/support (35% weight)
-          // Use SHORT-TERM body-based S/R from 15m candles (96 candles = 24h lookback)
+          // Use SHORT-TERM body-based S/R from 15m candles (48 candles = 12h lookback)
           // 15m gives 4× finer granularity than old 1h×24 — tighter intraday levels
           // Fallback to HTF 1h×72 S/R if 15m not available
           const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
@@ -8254,7 +8254,7 @@ class HyperliquidMMBot {
                     { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
                     { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
                   ],
-                  footer: { text: `S/R from 15m candles (24h lookback) | HTF from 1h (3d) | Cooldown 30min` },
+                  footer: { text: `S/R from 15m candles (12h lookback) | HTF from 1h (3d) | Cooldown 15min` },
                   timestamp: new Date().toISOString(),
                 }).catch(() => {})  // fire-and-forget
               }
