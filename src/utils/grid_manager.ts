@@ -281,7 +281,7 @@ export class GridManager {
    * Calculate inventory skew adjustment (±10 bps per 15% skew)
    */
   getInventoryAdjustment(skew: number, side: 'bid' | 'ask'): number {
-    const skewThreshold = 0.15 // 15% skew
+    const skewThreshold = 0.05 // 5% skew (was 15% — too high, zero adjustment in 0-15% dead zone)
 
     if (Math.abs(skew) < skewThreshold) {
       return 0 // No adjustment
@@ -289,7 +289,8 @@ export class GridManager {
 
     // If net long (skew > 0), widen bids, narrow asks
     // If net short (skew < 0), narrow bids, widen asks
-    const adjustmentBps = (skew / skewThreshold) * 10 // ±10 bps per 15% skew
+    const rawAdjustmentBps = (skew / skewThreshold) * 10 // ±10 bps per 5% skew
+    const adjustmentBps = Math.max(-15, Math.min(15, rawAdjustmentBps)) // Cap at ±15bps to prevent grid gap
 
     return side === 'bid'
       ? adjustmentBps      // Positive skew = widen bids (+10 bps)

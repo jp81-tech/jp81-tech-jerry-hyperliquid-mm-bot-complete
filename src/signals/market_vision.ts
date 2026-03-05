@@ -291,8 +291,8 @@ export type PairAnalysis = {
   resistance4h: number; // HTF Resistance Price — 1h candles, last 72 (3 days)
   supportBody4h: number; // HTF Support from candle bodies (min of O/C) — 1h×72, wick-filtered
   resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — 1h×72, wick-filtered
-  supportBody12h: number; // Short-term support from 15m candle bodies (last 96 = 24h) for MG proximity
-  resistanceBody12h: number; // Short-term resistance from 15m candle bodies (last 96 = 24h) for MG proximity
+  supportBody12h: number; // Short-term support from 15m candle bodies (last 48 = 12h) for MG proximity
+  resistanceBody12h: number; // Short-term resistance from 15m candle bodies (last 48 = 12h) for MG proximity
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -441,7 +441,7 @@ export class MarketVisionService {
           resistanceBody4h = Math.max(...htf1h.map(c => Math.max(c.o, c.c)));
         }
 
-        // STF S/R from 15m candles (last 96 = 24h) — for Momentum Guard proximity
+        // STF S/R from 15m candles (last 48 = 12h) — for Momentum Guard proximity
         // Previously 1h×24 (24h) — now 15m×96 (24h) for 4× finer granularity
         // Body-based filtering keeps it clean despite higher resolution
         let supportBody12h = 0;
@@ -462,8 +462,8 @@ export class MarketVisionService {
             trend15m = ema9_15m > ema21_15m ? 'bull' : 'bear';
           }
 
-          // STF S/R from 15m candle bodies (last 96 = 24h) — 4× finer than old 1h×24
-          const stfLookback = Math.min(96, candles15m.length);
+          // STF S/R from 15m candle bodies (last 48 = 12h) — 4× finer than old 1h×24
+          const stfLookback = Math.min(48, candles15m.length);
           if (stfLookback >= 24) {
             const recent15m = candles15m.slice(-stfLookback);
             supportBody12h = Math.min(...recent15m.map(c => Math.min(c.o, c.c)));
@@ -727,15 +727,6 @@ export class MarketVisionService {
         };
 
         this.pairAnalysis.set(pair, analysis);
-
-        // Console log vital changes
-        if (trend15m === 'bull' && trend4h === 'bear') {
-          console.log(`👁️  ${pair}: GOLDEN TICKET! 4h Bear but 15m Bullish Cross.`);
-        }
-
-        if (reversalWarning !== 'none') {
-          console.log(`👁️  ${pair}: Reversal Signal (${reversalWarning})! Score=${score} (4h=${trend4h})`);
-        }
 
         // THROTTLE REQUESTS: Prevent 429 on Hyperliquid and Nansen
         await new Promise(resolve => setTimeout(resolve, 2000));

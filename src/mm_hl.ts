@@ -322,11 +322,11 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
 // FIX 26.02: Dynamic Spread — ATR-based L1 scaling to prevent fee-eating in choppy markets.
 // ─────────────────────────────────────────────────────────────────────────────
 const KPEPE_GRID_LAYERS_DEFAULT: GridLayer[] = [
-  { level: 1, offsetBps: 18, capitalPct: 12, ordersPerSide: 2, isActive: true },  // Core (fallback when ATR unavailable)
-  { level: 2, offsetBps: 30, capitalPct: 24, ordersPerSide: 2, isActive: true },  // Buffer
-  { level: 3, offsetBps: 45, capitalPct: 28, ordersPerSide: 2, isActive: true },  // Wide
-  { level: 4, offsetBps: 65, capitalPct: 20, ordersPerSide: 2, isActive: true },  // Sweep
-  // 16% reserve (not allocated = available for rebalancing)
+  { level: 1, offsetBps: 18, capitalPct: 5, ordersPerSide: 3, isActive: true },   // Core — smallest (noise)
+  { level: 2, offsetBps: 30, capitalPct: 10, ordersPerSide: 3, isActive: true },  // Buffer
+  { level: 3, offsetBps: 45, capitalPct: 20, ordersPerSide: 3, isActive: true },  // Wide
+  { level: 4, offsetBps: 65, capitalPct: 30, ordersPerSide: 3, isActive: true },  // Sweep — big
+  { level: 5, offsetBps: 150, capitalPct: 35, ordersPerSide: 3, isActive: true }, // Deep — biggest (extremes)
 ]
 
 /**
@@ -360,10 +360,11 @@ function getKpepeGridLayers(atrPct: number): GridLayer[] {
   l1Bps = Math.max(minL1, Math.min(maxL1, Math.round(l1Bps)))
 
   return [
-    { level: 1, offsetBps: l1Bps, capitalPct: 12, ordersPerSide: 2, isActive: true },
-    { level: 2, offsetBps: Math.round(l1Bps * cfg.l2Ratio), capitalPct: 24, ordersPerSide: 2, isActive: true },
-    { level: 3, offsetBps: Math.round(l1Bps * cfg.l3Ratio), capitalPct: 28, ordersPerSide: 2, isActive: true },
-    { level: 4, offsetBps: Math.round(l1Bps * cfg.l4Ratio), capitalPct: 20, ordersPerSide: 2, isActive: true },
+    { level: 1, offsetBps: l1Bps, capitalPct: 5, ordersPerSide: 3, isActive: true },
+    { level: 2, offsetBps: Math.round(l1Bps * cfg.l2Ratio), capitalPct: 10, ordersPerSide: 3, isActive: true },
+    { level: 3, offsetBps: Math.round(l1Bps * cfg.l3Ratio), capitalPct: 20, ordersPerSide: 3, isActive: true },
+    { level: 4, offsetBps: Math.round(l1Bps * cfg.l4Ratio), capitalPct: 30, ordersPerSide: 3, isActive: true },
+    { level: 5, offsetBps: Math.round(l1Bps * cfg.l5Ratio), capitalPct: 35, ordersPerSide: 3, isActive: true },
   ]
 }
 
@@ -8384,7 +8385,13 @@ class HyperliquidMMBot {
               const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / reductionZone))
 
               if (absSkewSr > momGuardConfig.srMaxRetainPct) {
-                sizeMultipliers.ask *= (1.0 - progress)
+                // Only zero asks when VERY close to support (progress > 60%)
+                // Below that, progressively reduce to keep grid active
+                if (progress > 0.60) {
+                  sizeMultipliers.ask = 0  // ZERO new shorts — very close to support
+                } else {
+                  sizeMultipliers.ask *= (1.0 - progress)  // Progressive: 0%→100%, 38%→62%, 60%→40%
+                }
                 sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
                 srReductionApplied = true
               }
@@ -8406,7 +8413,12 @@ class HyperliquidMMBot {
               const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / reductionZone))
 
               if (absSkewSr > momGuardConfig.srMaxRetainPct) {
-                sizeMultipliers.bid *= (1.0 - progress)
+                // Only zero bids when VERY close to resistance (progress > 60%)
+                if (progress > 0.60) {
+                  sizeMultipliers.bid = 0  // ZERO new longs — very close to resistance
+                } else {
+                  sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
+                }
                 sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
                 srReductionApplied = true
               }
@@ -8436,10 +8448,22 @@ class HyperliquidMMBot {
             let srAccumApplied = false
 
             // At SUPPORT with small/no position → accumulate LONGS (buy the bounce)
+            // hasShortPos uses -10% threshold — but ANY short (even -1%) should block new asks at support
+            const hasAnyShort = actualSkew < -0.01
+            const hasAnyLong = actualSkew > 0.01
             if (!hasShortPos && mgSupportBody > 0 && mgSupportDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / accumZone))
               sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
-              sizeMultipliers.ask *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              // If we have ANY short at support → reduce/zero asks (don't add to wrong-side position)
+              if (hasAnyShort) {
+                if (progress > 0.60) {
+                  sizeMultipliers.ask = 0  // Very close to support — fully block
+                } else {
+                  sizeMultipliers.ask *= (1.0 - progress)  // Progressive: keep some asks further from support
+                }
+              } else {
+                sizeMultipliers.ask *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              }
               gridBidMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
 
@@ -8447,7 +8471,7 @@ class HyperliquidMMBot {
                 console.log(
                   `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${(progress*100).toFixed(0)}% ` +
                   `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''} → ` +
                   `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} bidSpread×${gridBidMult.toFixed(2)}`
                 )
               }
@@ -8457,7 +8481,16 @@ class HyperliquidMMBot {
             else if (!hasLongPos && mgResistBody > 0 && mgResistDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
               const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / accumZone))
               sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srAccumBounceBoost - 1.0))
-              sizeMultipliers.bid *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              // If we have ANY long at resistance → reduce/zero bids (don't add to wrong-side position)
+              if (hasAnyLong) {
+                if (progress > 0.60) {
+                  sizeMultipliers.bid = 0  // Very close to resistance — fully block
+                } else {
+                  sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
+                }
+              } else {
+                sizeMultipliers.bid *= (1.0 - progress * (1.0 - momGuardConfig.srAccumCounterReduce))
+              }
               gridAskMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
 
@@ -8465,7 +8498,7 @@ class HyperliquidMMBot {
                 console.log(
                   `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${(progress*100).toFixed(0)}% ` +
                   `dist=${(mgResistDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''} → ` +
                   `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`
                 )
               }
@@ -8596,20 +8629,31 @@ class HyperliquidMMBot {
         const dynSpreadCfg = getDynamicSpreadConfig(pair)
         const dynamicLayers = getKpepeGridLayers(atrPct)
 
+        // === 📊 DYNAMIC POSITION SIZING: ATR inverse scaling ===
+        // High volatility → smaller orders (protect capital)
+        // Low volatility → larger orders (capture more spread)
+        // volScalar = baselineAtr / currentAtr, clamped [0.3, 2.0]
+        const KPEPE_BASELINE_ATR_PCT = 1.8  // Typical kPEPE ATR% (~1.5-2.0%)
+        const volScalar = atrPct > 0
+          ? Math.max(0.3, Math.min(2.0, KPEPE_BASELINE_ATR_PCT / atrPct))
+          : 1.0
+        const dynamicCapital = capitalPerPair * volScalar
+
         if (dynSpreadCfg.enabled && dynSpreadCfg.atrScalingEnabled && atrPct > 0 && this.tickCount % 20 === 0) {
           const l1 = dynamicLayers[0].offsetBps
           const regime = atrPct < dynSpreadCfg.lowVolAtrPctThreshold ? 'LOW_VOL'
             : atrPct > dynSpreadCfg.highVolAtrPctThreshold ? 'HIGH_VOL' : 'NORMAL'
           console.log(
             `📐 [DYNAMIC_SPREAD] ${pair}: ATR=${atrPct.toFixed(3)}% → L1=${l1}bps L2=${dynamicLayers[1].offsetBps}bps ` +
-            `L3=${dynamicLayers[2].offsetBps}bps L4=${dynamicLayers[3].offsetBps}bps | ${regime}`
+            `L3=${dynamicLayers[2].offsetBps}bps L4=${dynamicLayers[3].offsetBps}bps | ${regime} | ` +
+            `volScalar=${volScalar.toFixed(2)} capital=$${dynamicCapital.toFixed(0)} (base=$${capitalPerPair.toFixed(0)})`
           )
         }
 
         gridOrders = this.gridManager!.generateGridOrdersCustom(
           pair,
           skewedMidPrice,  // ← shifted mid price instead of raw midPrice
-          capitalPerPair,
+          dynamicCapital,  // ← ATR-scaled capital instead of static capitalPerPair
           dynamicLayers,   // ← ATR-scaled layers instead of fixed KPEPE_GRID_LAYERS
           0.001,
           inventorySkew,
@@ -8936,10 +8980,17 @@ class HyperliquidMMBot {
     const rebucketTarget = pairSizeCfg ? Math.max(GLOBAL_CLIP, pairSizeCfg.targetUsd) : GLOBAL_CLIP
     const rebucketMin = pairSizeCfg ? Math.max(MIN_NOTIONAL, pairSizeCfg.minUsd) : MIN_NOTIONAL
     const totalBefore = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
-    gridOrders = normalizeChildNotionals(
-      gridOrders,
-      { targetUsd: rebucketTarget, minUsd: rebucketMin }
-    )
+
+    // kPEPE custom grid: preserve per-layer sizing from capitalPct, only filter below minUsd
+    // Other tokens: rebucket to uniform targetUsd (legacy behavior)
+    if (pair === 'kPEPE') {
+      gridOrders = gridOrders.filter((o: GridOrder) => o.sizeUsd >= rebucketMin)
+    } else {
+      gridOrders = normalizeChildNotionals(
+        gridOrders,
+        { targetUsd: rebucketTarget, minUsd: rebucketMin }
+      )
+    }
     let totalAfter = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
 
     if (this.positionRiskManager && gridOrders.length > 0) {

@@ -352,9 +352,10 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     autoSkewShiftBps: 1.5,       // Gentle skew — hold positions, don't rush to close (30% skew = 4.5bps shift)
     autoSkewMaxShiftBps: 10.0,   // Conservative cap — even at 80% skew, max 10bps shift
     srReductionStartAtr: 2.5,    // kPEPE: start earlier (volatile, moves fast)
-    srMaxRetainPct: 0.20,        // 20% max at S/R
+    srMaxRetainPct: 0.08,        // 8% max at S/R (was 20% — too high, bot ran symmetric grid at -12% skew)
     srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
     srBreakoutTpScoreThreshold: 0.40, // kPEPE: trigger earlier (volatile, momentum is real sooner)
+    inventoryAwareMgThreshold: 0.08,   // 8% (was 15% — INV_AWARE must kick in earlier for closing at S/R)
     inventoryAwareMgClosingBoost: 1.5,  // kPEPE: more aggressive closing when stuck against momentum
   },
 }
@@ -384,10 +385,11 @@ export interface DynamicSpreadConfig {
   highVolAtrPctThreshold: number // ATR% above this = high vol (trending) → tighten L1
   lowVolL1Bps: number            // L1 in low vol regime (wider = safer)
   highVolL1Bps: number           // L1 in high vol regime (tighter = capture more)
-  // L2-L4 scale proportionally: L2 = L1 × l2Ratio, etc.
+  // L2-L5 scale proportionally: L2 = L1 × l2Ratio, etc.
   l2Ratio: number                // L2/L1 ratio (default 1.67 = 30/18)
   l3Ratio: number                // L3/L1 ratio (default 2.50 = 45/18)
   l4Ratio: number                // L4/L1 ratio (default 3.61 = 65/18)
+  l5Ratio: number                // L5/L1 ratio (default 8.33 = 150/18)
 
   // Min Profit Buffer: filter close orders below fee threshold
   minProfitEnabled: boolean
@@ -412,6 +414,7 @@ export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
   l2Ratio: 1.67,                 // 30/18
   l3Ratio: 2.50,                 // 45/18
   l4Ratio: 3.61,                 // 65/18
+  l5Ratio: 8.33,                 // 150/18
 
   minProfitEnabled: true,
   minProfitBps: 10,              // 3.5 bps fee + 6.5 bps safety
