@@ -291,8 +291,8 @@ export type PairAnalysis = {
   resistance4h: number; // HTF Resistance Price — 1h candles, last 72 (3 days)
   supportBody4h: number; // HTF Support from candle bodies (min of O/C) — 1h×72, wick-filtered
   resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — 1h×72, wick-filtered
-  supportBody12h: number; // Short-term support from 15m candle bodies (last 48 = 12h) for MG proximity
-  resistanceBody12h: number; // Short-term resistance from 15m candle bodies (last 48 = 12h) for MG proximity
+  supportBody12h: number; // Short-term support from 1h candle bodies (last 24 = 24h) for MG proximity
+  resistanceBody12h: number; // Short-term resistance from 1h candle bodies (last 24 = 24h) for MG proximity
   lastCandle15mClose: number; // Last CLOSED 15m candle close price (for confirmed S/R break detection)
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
@@ -442,9 +442,8 @@ export class MarketVisionService {
           resistanceBody4h = Math.max(...htf1h.map(c => Math.max(c.o, c.c)));
         }
 
-        // STF S/R from 15m candles (last 48 = 12h) — for Momentum Guard proximity
-        // Previously 1h×24 (24h) — now 15m×96 (24h) for 4× finer granularity
-        // Body-based filtering keeps it clean despite higher resolution
+        // STF S/R from 1h candles (last 24 = 24h) — for Momentum Guard proximity
+        // Using 1h candles for stable S/R levels, MM operates on 15m candles for execution
         let supportBody12h = 0;
         let resistanceBody12h = 0;
 
@@ -463,12 +462,13 @@ export class MarketVisionService {
             trend15m = ema9_15m > ema21_15m ? 'bull' : 'bear';
           }
 
-          // STF S/R from 15m candle bodies (last 48 = 12h) — 4× finer than old 1h×24
-          const stfLookback = Math.min(48, candles15m.length);
-          if (stfLookback >= 24) {
-            const recent15m = candles15m.slice(-stfLookback);
-            supportBody12h = Math.min(...recent15m.map(c => Math.min(c.o, c.c)));
-            resistanceBody12h = Math.max(...recent15m.map(c => Math.max(c.o, c.c)));
+          // STF S/R from 1h candle bodies (last 24 = 24h) — stable levels from hourly candles
+          // MM still operates on 15m candles for execution timing
+          const stfLookback = Math.min(24, candles.length);
+          if (stfLookback >= 12) {
+            const recent1h = candles.slice(-stfLookback);
+            supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
+            resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
           }
         }
 

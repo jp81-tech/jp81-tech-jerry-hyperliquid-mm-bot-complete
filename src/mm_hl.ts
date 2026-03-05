@@ -8168,7 +8168,7 @@ class HyperliquidMMBot {
               : 0
 
           // 3. Proximity to resistance/support (35% weight)
-          // Use SHORT-TERM body-based S/R from 15m candles (48 candles = 12h lookback)
+          // Use SHORT-TERM body-based S/R from 1h candles (24 candles = 24h lookback)
           // 15m gives 4× finer granularity than old 1h×24 — tighter intraday levels
           // Fallback to HTF 1h×72 S/R if 15m not available
           const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
@@ -8274,7 +8274,7 @@ class HyperliquidMMBot {
                     { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
                     { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
                   ],
-                  footer: { text: `S/R from 15m candles (12h lookback) | BROKEN = candle close confirmed | Cooldown 15min` },
+                  footer: { text: `S/R from 1h candles (24h lookback) | BROKEN = candle close confirmed | Cooldown 15min` },
                   timestamp: new Date().toISOString(),
                 }).catch(() => {})  // fire-and-forget
               }
@@ -8385,7 +8385,7 @@ class HyperliquidMMBot {
               `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
               `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
               `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}` +
-              ` | S/R(15m): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
+              ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
             )
           }
 
