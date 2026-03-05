@@ -4253,7 +4253,7 @@ class HyperliquidMMBot {
     // ════════════════════════════════════════════════════════════════════════
     try {
       await oracleEngine.start()
-      this.notifier.info('🔮 Oracle Vision started (60s interval)')
+      console.log('🔮 Oracle Vision started (60s interval)')
 
       // Subscribe to Oracle signals for enhanced trading decisions
       oracleEngine.on('signal', (signal: OracleSignal) => {
@@ -4263,7 +4263,8 @@ class HyperliquidMMBot {
       // Log Oracle dashboard periodically (every 5 minutes)
       setInterval(() => {
         if (oracleEngine.isRunning()) {
-          console.log(generateSignalDashboard())
+          // Dashboard table disabled — too noisy for PURE_MM (logs 13 coins)
+          // Oracle signals still processed via handleOracleSignal (filtered to traded coins)
           const alerts = generateDivergenceAlerts()
           if (alerts.includes('DIVERGENCE')) {
             console.log(alerts)
@@ -4271,9 +4272,9 @@ class HyperliquidMMBot {
         }
       }, 5 * 60 * 1000)
 
-      this.notifier.info('✅ Oracle Vision event listeners active')
+      console.log('✅ Oracle Vision event listeners active')
     } catch (err) {
-      this.notifier.warn(`⚠️ Oracle Vision failed to start: ${err}`)
+      console.warn(`⚠️ Oracle Vision failed to start: ${err}`)
     }
   }
 
@@ -5838,12 +5839,13 @@ class HyperliquidMMBot {
    * Used to adjust grid bias based on price predictions
    */
   private handleOracleSignal(signal: OracleSignal): void {
+    // Oracle only for traded coins (MM_ONLY_PAIRS)
+    const isTradedCoin = MM_ONLY_PAIRS.length === 0 || MM_ONLY_PAIRS.includes(signal.coin)
+    if (!isTradedCoin) return
+
     const pair = `${signal.coin}-PERP`
     const prevAction = this.oraclePrevAction.get(signal.coin) || 'NEUTRAL'
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // 🔔 SIGNAL FLIP DETECTION - Alert when action changes significantly
-    // ═══════════════════════════════════════════════════════════════════════════
     const isFlip = prevAction !== signal.action && signal.action !== 'NEUTRAL'
     const isDirectionChange = (
       (prevAction.includes('LONG') && signal.action.includes('SHORT')) ||
@@ -5858,18 +5860,7 @@ class HyperliquidMMBot {
       const flipMsg = `${alertType} ${flipEmoji} ${signal.coin}: ${prevAction} → ${signal.action} ` +
         `| Score: ${signal.score} | RSI: ${signal.momentum.rsi.toFixed(0)} | R²: ${signal.regression.r2.toFixed(2)}`
 
-      console.log(`\n${'═'.repeat(80)}`)
-      console.log(`🔮 ORACLE SIGNAL FLIP DETECTED`)
-      console.log(`${'═'.repeat(80)}`)
       console.log(flipMsg)
-      console.log(`${'═'.repeat(80)}\n`)
-
-      this.notifier.info(flipMsg)
-
-      // Send Telegram alert for significant flips
-      if (isDirectionChange || Math.abs(signal.score) > 30) {
-        sendRiskAlert(flipMsg).catch(() => {})
-      }
     }
 
     // Update previous action tracking
@@ -5880,16 +5871,8 @@ class HyperliquidMMBot {
 
     // Only log significant signals (|score| > 40)
     if (Math.abs(signal.score) > 40) {
-      const emoji = signal.score > 0 ? '🟢' : '🔴'
-      const msg = `🔮 [ORACLE] ${signal.coin}: Score=${signal.score} Action=${signal.action} ` +
-        `(Conf: ${signal.confidence}%, RSI: ${signal.momentum.rsi.toFixed(0)})`
-      this.notifier.info(msg)
-
-      // Log divergence alerts
-      if (signal.divergence.hasDivergence) {
-        const divEmoji = signal.divergence.type === 'bullish' ? '🟢' : '🔴'
-        this.notifier.info(`${divEmoji} [ORACLE] ${signal.coin}: ${signal.divergence.description}`)
-      }
+      console.log(`🔮 [ORACLE] ${signal.coin}: Score=${signal.score} Action=${signal.action} ` +
+        `(Conf: ${signal.confidence}%, RSI: ${signal.momentum.rsi.toFixed(0)})`)
     }
 
     // Strong signals (|score| > 60) trigger immediate logging
@@ -8166,22 +8149,7 @@ class HyperliquidMMBot {
         sizeMultipliers.bid *= toxOut.sizeMultBid * toxSizeMult
         sizeMultipliers.ask *= toxOut.sizeMultAsk * toxSizeMult
 
-        // === 📊 PREDICTION BIAS: h4 prediction from prediction-api ===
-        // Proactive signal — anticipates direction BEFORE price moves
-        // Soft bias: max ±15% on bid/ask multipliers, only when confidence >= 50%
-        try {
-          await this.fetchPrediction(symbol)
-          const predBias = this.getPredictionBias(symbol)
-          if (predBias.reason) {
-            sizeMultipliers.bid *= predBias.bidMult
-            sizeMultipliers.ask *= predBias.askMult
-            if (this.tickCount % 20 === 0) {
-              console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
-            }
-          }
-        } catch {
-          // prediction-api down — no bias applied, continue normally
-        }
+        // PREDICTION BIAS disabled — prediction-api and war-room removed
 
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
@@ -8675,9 +8643,10 @@ class HyperliquidMMBot {
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
         // BYPASS when INVENTORY_SL PANIC is active — stop loss must override profit filter.
-        // HIGH SKEW GRADUATED: at |skew| > 25%, WIDEN the allowed loss window instead of full bypass.
-        //   25% skew → allow up to 50bps (0.5%) loss
-        //   35% skew → allow up to 100bps (1.0%) loss
+        // HIGH SKEW GRADUATED: at |skew| > 15%, WIDEN the allowed loss window instead of full bypass.
+        //   15% skew → allow up to 30bps (0.3%) loss
+        //   25% skew → allow up to 80bps (0.8%) loss
+        //   35% skew → allow up to 130bps (1.3%) loss
         //   45%+ skew → full bypass (INVENTORY_SL panic territory anyway)
         if (dynSpreadCfg.minProfitEnabled && position && midPrice > 0 && !inventorySlPanic) {
           const entryPx = position.entryPrice || 0
@@ -8688,11 +8657,11 @@ class HyperliquidMMBot {
             if (absSkew > 0.45) {
               // Full bypass — panic territory, close at any price
               effectiveMinProfitBps = -9999  // negative = allow any loss
-            } else if (absSkew > 0.25) {
+            } else if (absSkew > 0.15) {
               // Graduated: allow closing at a loss, capped by skew urgency
-              // 25% → -50bps, 35% → -100bps, 45% → -150bps
-              const urgency = (absSkew - 0.25) / 0.20  // 0.0 at 25%, 1.0 at 45%
-              const maxAllowedLossBps = 50 + urgency * 100  // 50-150bps
+              // 15% → -30bps, 25% → -80bps, 35% → -130bps, 45% → -180bps
+              const urgency = (absSkew - 0.15) / 0.30  // 0.0 at 15%, 1.0 at 45%
+              const maxAllowedLossBps = 30 + urgency * 150  // 30-180bps
               effectiveMinProfitBps = -maxAllowedLossBps
             }
 
@@ -8721,7 +8690,7 @@ class HyperliquidMMBot {
 
             const removedMinProfit = beforeMinProfit - gridOrders.length
             if (this.tickCount % 20 === 0) {
-              if (absSkew > 0.25 && effectiveMinProfitBps < 0) {
+              if (absSkew > 0.15 && effectiveMinProfitBps < 0) {
                 console.log(
                   `📐 [MIN_PROFIT_GRAD] ${pair}: |skew|=${(absSkew*100).toFixed(0)}% → allow loss up to ${Math.abs(effectiveMinProfitBps).toFixed(0)}bps ` +
                   `| entry=${entryPx.toFixed(7)} mid=${midPrice.toFixed(7)} removed=${removedMinProfit}`
@@ -8787,21 +8756,7 @@ class HyperliquidMMBot {
         console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} tz=${timeZone.spreadMult.toFixed(2)}/${timeZone.sizeMult.toFixed(2)} bidMult=${(gridBidMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)} askMult=${(gridAskMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)}`)
       }
     } else {
-      // === 📊 PREDICTION BIAS: h4 prediction from prediction-api ===
-      // Applies to ALL non-kPEPE tokens (kPEPE has its own in the branch above)
-      try {
-        await this.fetchPrediction(symbol)
-        const predBias = this.getPredictionBias(symbol)
-        if (predBias.reason) {
-          sizeMultipliers.bid *= predBias.bidMult
-          sizeMultipliers.ask *= predBias.askMult
-          if (this.tickCount % 20 === 0) {
-            console.log(`📊 [PREDICTION_BIAS] ${pair}: ${predBias.reason}`)
-          }
-        }
-      } catch {
-        // prediction-api down — no bias applied, continue normally
-      }
+      // PREDICTION BIAS disabled — prediction-api and war-room removed
 
       gridOrders = this.gridManager!.generateGridOrders(
         pair,
@@ -10288,11 +10243,11 @@ class HyperliquidMMBot {
           console.log(`[AlphaEngine] Using real-time SM data for ${Object.keys(alphaCache.data).length} coins`)
         } else {
           // AlphaEngine running but no data yet - use JSON fallback
-          tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
+          tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: MM_ONLY_PAIRS.length > 0 ? MM_ONLY_PAIRS : [] })
         }
       } else {
         // AlphaEngine not running or stale - use JSON fallback
-        tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: ['LIT', 'SUI', 'DOGE', 'ETH', 'SOL'] })
+        tryLoadNansenBiasIntoCache(this.nansenBiasCache, { logCoins: MM_ONLY_PAIRS.length > 0 ? MM_ONLY_PAIRS : [] })
       }
     } catch (e) {
       // Silent fail
