@@ -42,6 +42,7 @@
 34. [Inventory-Aware MG Override — gdy bot utknal i nie moze sie ruszyc](#inventory-aware-mg-override--gdy-bot-utknal-i-nie-moze-sie-ruszyc)
 35. [MIN_PROFIT Deadlock — gdy dwa systemy bezpieczenstwa sie nawzajem paralizuja](#min_profit-deadlock--gdy-dwa-systemy-bezpieczeństwa-się-nawzajem-paralizują)
 36. [Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknieciu S/R](#fresh-touch-boost--silniejsza-akumulacja-na-pierwszym-dotknieciu-sr)
+37. [S/R Bounce Hold — nie sprzedawaj za wczesnie po odbiciu](#sr-bounce-hold--nie-sprzedawaj-za-wczesnie-po-odbiciu)
 
 ---
 
@@ -8190,3 +8191,145 @@ Dlaczego hardcode `false` zamiast ustawienia env var `NANSEN_CONFLICT_CHECK_ENAB
 | Plik | Zmiana |
 |------|--------|
 | `src/mm_hl.ts` | Linia 4029: `nansenConflictCheckEnabled = false` (hardcode disable) |
+
+---
+
+## S/R Bounce Hold — nie sprzedawaj za wczesnie po odbiciu
+
+> "Cierpliwosc jest brogia. Bot ktory sprzedaje zbyt wczesnie jest jak rybak ktory wyciaga wedke zanim ryba ugryzla."
+
+### Problem: wygrywasz bitwe, ale przegrywasz wojne
+
+Wyobraz sobie taka sytuacje. Bot kPEPE robi dokladnie to co powinien:
+
+1. Cena spada do supportu ($0.003441)
+2. S/R Accumulation aktywuje sie: "Support! Kupuj longi!"
+3. Fresh Touch Boost daje bid×5.84 (agresywne kupowanie, Chapter 36)
+4. Bot zbiera longi — skew rosnie do 10%, 12%, 15%
+
+Wszystko swietnie. Bot zbudowal pozycje w idealnym miejscu. A potem...
+
+5. Cena zaczyna odbijac w gore (to dobrze! nasz plan dziala!)
+6. Momentum Guard widzi pump → boostuje aski: ask×1.05 → ask×1.15 → ask×1.30
+7. S/R Accumulation disengages (cena wychodzi ze strefy supportu)
+8. Grid aski filluja sie → longi zamkniete z malym zyskiem ($2-5)
+
+Bot "wygral" — zamknal z zyskiem. Ale cena idzie dalej w gore o 1.5-2× ATR (+$0.000130 dla kPEPE). Gdyby poczeral, zarobilby 3-5× wiecej.
+
+To jak sprzedaz akcji Apple po +2% bo "lepszy wrobel w garci". Technicznie poprawne, ale tracisz ogromny potencjal.
+
+### Dlaczego to sie dzialo?
+
+Pipeline bota mial dziure — **zero mechanizmu ktory mowi "poczekaj az odbicie sie rozwinie"**.
+
+Grace Period (Chapter 47) chronil przed fakeoutem **W DOL** (break supportu — nie zamykaj od razu, moze wroci). Ale nic nie chronilo przed zamknieciem **ZA WCZESNIE W GORE**.
+
+```
+SUPPORT → Accumulation → Bounce starts → MG boosts asks → Fills → CLOSED
+                                                            ↑
+                                                     TU JEST PROBLEM
+                                              Bot zamyka po 0.06 ATR
+                                          zamiast czekac na 1.5-2.0 ATR
+```
+
+### Rozwiazanie: S/R Bounce Hold
+
+Pomysl jest prosty: po tym jak S/R Accumulation zbudowala pozycje przy S/R, **tlum closing-side ordery** dopoki cena nie oddali sie wystarczajaco od supportu/resistance.
+
+Ale "wystarczajaco" to nie binary on/off. Bot nie powinien nagle z "zero asków" przeskakiwac na "pelne aski". Zamiast tego — **progressive release**.
+
+### Jak to dziala — Progressive Release
+
+Wyobraz sobie ze trzymasz balon na lince. Im dalej balon odleci od ziemi (support), tym bardziej luzujesz linke. Przy ziemi — trzymasz mocno. W polowie drogi — luzno. Gdy balon jest wystarczajaco wysoko — puszczasz.
+
+```
+distFromSr = (price - support) / ATR    // 0.0 = at support, 2.0 = 2× ATR away
+holdProgress = min(1.0, distFromSr / srBounceHoldMinDistAtr)
+// holdProgress: 0.0 = przy supportcie, 1.0 = przy thresholdzie
+
+askReduction = srBounceHoldAskReduction + holdProgress × (1.0 - srBounceHoldAskReduction)
+// askReduction: 0.15 przy supportcie → 1.00 przy thresholdzie
+sizeMultipliers.ask *= askReduction
+```
+
+Przebieg dla kPEPE (support=$0.003441, ATR=$0.000065, threshold=2.0× ATR):
+
+| Tick | Cena | Dystans | Progress | askReduction | Efekt |
+|------|------|---------|----------|-------------|-------|
+| 1 | $0.003445 | 0.06 ATR | 3% | ask×0.18 | **HOLD**: prawie zero asków |
+| 5 | $0.003480 | 0.60 ATR | 30% | ask×0.41 | Troche asków, ale ciagle trzyma |
+| 15 | $0.003550 | 1.68 ATR | 84% | ask×0.86 | Prawie pelne aski, bounce prawie potwierdzony |
+| 20 | $0.003575 | 2.06 ATR | 100% | **HOLD OFF** | Normalne aski, bounce potwierdzony |
+
+### Cztery wyjscia awaryjne
+
+Bot nie trzyma pozycji w nieskonczonosc. Sa 4 "clear conditions":
+
+1. **Dystans >= threshold** — cena oddallila sie wystarczajaco (bounce potwierdzony) → hold off
+2. **Timeout 30 minut** — jesli po 30 min cena nadal przy supportcie, moze to nie jest bounce → hold off
+3. **Pozycja zamknieta** — skew spadl ponizej 2% → nic do trzymania → hold off
+4. **S/R level sie zmienil** — nowe candle dalo nowy support/resistance → hold off
+
+### Safety valve: Breakout TP
+
+Kluczowa zasada: **Bounce Hold NIE blokuje Breakout TP**. To safety valve.
+
+Gdy momentum score > 0.40 (silny pump) i bot ma LONG → Breakout TP nadal zamyka agresywnie (Chapter 33). Bounce Hold redukuje "normalne" closing aski, ale nie moze zablokowac Breakout TP ktory strzela na silnym momentum.
+
+To jak hamulec reczny w samochodzie — trzyma go na miejscu na parkingu, ale jesli kierowca wcisnnie gaz do dechy, hamulec reczny nie zatrzyma auta.
+
+### Gdzie to siedzi w pipeline
+
+```
+S/R Progressive Reduction (zamyka duze pozycje przy S/R)
+S/R Accumulation (buduje pozycje, USTAWIA tracking bouncehold)
+>>> S/R BOUNCE HOLD (NEW — redukuje closing-side po accum) <<<
+Breakout TP (nadal dziala na strong momentum — safety valve)
+Dynamic TP
+```
+
+Bounce Hold jest multiplicative z MG — jesli MG daje ask×1.30 (pump), a Bounce Hold daje ask×0.41, wynik = ask × 1.30 × 0.41 = ask×0.53. Oba wplywaja, ale Bounce Hold "lagodziacy" closing.
+
+### Analogia: poker i "slow play"
+
+W pokerze jest cos co sie nazywa "slow play" — masz silna reke (AA, KK), ale zamiast stawiac agresywnie od razu, grasz pasywnie i czekasz az przeciwnik zbuduje pot za Ciebie.
+
+S/R Bounce Hold to slow play. Bot zbudowal pozycje przy supportcie (silna reka). Zamiast od razu ja zamykac z malym zyskiem (fold za wczesnie), czeka az bounce sie rozwinie (pot rosnie). Dopiero gdy cena jest 2× ATR od supportu, zaczyna zamykac (showdown).
+
+Ale jak kazdy slow play — ma timeout. Nie czekasz cala noc. 30 minut i tyle.
+
+### Logi
+
+```
+🔒 [BOUNCE_HOLD] kPEPE: LONG near SUPPORT — dist=0.60ATR progress=30% → ask×0.41 (holding for bounce)
+🔓 [BOUNCE_HOLD] kPEPE: RELEASED — dist=2.06ATR >= 2.0ATR threshold (bounce confirmed)
+⏰ [BOUNCE_HOLD] kPEPE: TIMEOUT — 30min elapsed, resuming normal closing
+```
+
+### Config
+
+| Parametr | Default | kPEPE | Opis |
+|----------|---------|-------|------|
+| `srBounceHoldEnabled` | true | true | Wlaczony/wylaczony |
+| `srBounceHoldMinDistAtr` | 1.5 | **2.0** | Ile ATR od S/R zanim pelne closing (volatile → wiecej room) |
+| `srBounceHoldAskReduction` | 0.20 | **0.15** | Min closing-side przy S/R (15% = prawie zero) |
+| `srBounceHoldMaxMinutes` | 30 | 30 | Timeout |
+
+kPEPE ma wyzszy threshold (2.0 vs 1.5) bo jest volatile — potrzebuje wiecej miejsca na bounce. I nizszy min closing (0.15 vs 0.20) bo chcemy trzymac mocniej.
+
+### Lekcja
+
+1. **"Zysk" to nie tylko "zamkniete z plusem".** Bot ktory zamyka z +$3 gdy mogl zarobic +$15 przegrywa strategicznie. Drobne zyski zjadaja spread i fees. Trzeba pozwolić zyskom rosnac.
+
+2. **Progressive > binary.** Naiwne rozwiazanie: "blokuj aski na 30 minut". Lepsze: progressywne release — im dalej od supportu, tym wiecej asków. Bot nie musi "zgadywac" kiedy bounce sie skonczy — po prostu skaluje.
+
+3. **Safety valves sa kluczowe.** Kazdy mechanizm "hold" potrzebuje wyjscia awaryjnego. Tu: Breakout TP (silny momentum), timeout (30 min), dystans (2.0× ATR). Bez safety valve, "hold" zamienia sie w "stuck".
+
+4. **Systemy buduja na sobie.** Bounce Hold nie ma sensu bez S/R Accumulation (Chapter 33). Accumulation nie ma sensu bez Fresh Touch Boost (Chapter 36). Fresh Touch nie ma sensu bez stabilnych S/R levels z 1h candles (Chapter 49). Kazdy system jest warstwa — sam w sobie prosty, ale razem tworzą cos poteznego.
+
+### Kluczowe pliki
+
+| Plik | Zmiana |
+|------|--------|
+| `src/config/short_only_config.ts` | +4 interface fields, +4 defaults, +2 kPEPE overrides |
+| `src/mm_hl.ts` | +1 property (`srBounceHoldState` Map), +63 linii logika (tracking, clear, progressive release, logging) |
