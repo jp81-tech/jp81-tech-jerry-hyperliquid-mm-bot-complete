@@ -8536,11 +8536,10 @@ class HyperliquidMMBot {
           // At support: boost bids (buy), reduce asks (don't sell), widen bid spread (buy below support)
           // At resistance: boost asks (sell), reduce bids (don't buy), widen ask spread (sell above resistance)
           // Complementary with S/R Reduction: Reduction handles |skew| > srMaxRetainPct, Accumulation handles |skew| <= srMaxRetainPct
+          let srAccumApplied = false
           if (momGuardConfig.srAccumulationEnabled && mgAtr > 0) {
             const absSkewAccum = Math.abs(actualSkew)
             const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr  // same zone as S/R Reduction
-
-            let srAccumApplied = false
 
             // At SUPPORT with small/no position → accumulate LONGS (buy the bounce)
             // hasShortPos uses -10% threshold — but ANY short (even -1%) should block new asks at support
