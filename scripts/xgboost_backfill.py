@@ -56,7 +56,7 @@ from xgboost_collect import (
 # --- Configuration ---
 TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
 DATASET_DIR = "/tmp"
-NUM_FEATURES = 65
+NUM_FEATURES = 73
 MIN_CANDLES = 60  # Need 60+ hourly candles for RSI/MACD/BB
 API_CHUNK_DAYS = 180  # HL API returns max ~5000 hourly candles (~208 days)
 
@@ -391,8 +391,11 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
             # [62-64] BTC prediction proxy — not available historically
             btc_pred_feat = [0.0] * 3
 
+            # [65-72] 15m candle features — can't compute from 1h candles
+            feat_15m = [0.0] * 8
+
             # Assemble
-            features = tech + nansen + extra + candle_feat + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat
+            features = tech + nansen + extra + candle_feat + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m
             assert len(features) == NUM_FEATURES, f"Expected {NUM_FEATURES}, got {len(features)}"
 
             # Compute labels (look-ahead — we know the future price!)

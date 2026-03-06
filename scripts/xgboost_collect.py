@@ -72,7 +72,7 @@ def hl_post(payload: dict, timeout: int = 15) -> dict | list | None:
 
 def fetch_candles(coin: str, interval: str = "1h", count: int = CANDLE_COUNT) -> list[dict]:
     """Fetch OHLCV candles from Hyperliquid."""
-    interval_seconds = {"1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
+    interval_seconds = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
     end_time = int(time.time() * 1000)
     start_time = end_time - (interval_seconds * count * 1000)
 
@@ -892,6 +892,127 @@ def compute_btc_pred_features(btc_pred: dict | None, token: str) -> list[float]:
     ]
 
 
+def compute_15m_features(token: str) -> list[float]:
+    """Compute 8 features from 15m candles [65-72].
+
+    Features:
+      [65] rsi_15m              — 15m RSI (14-period) / 100 → [0, 1]
+      [66] change_15m           — Last 15m candle change %, tanh(change/5) → [-1, 1]
+      [67] change_1h_15m        — 4× 15m candle change (granular 1h), tanh(change/10) → [-1, 1]
+      [68] ema9_ema21_cross_15m — EMA9/EMA21 cross signal, tanh((ema9-ema21)/ema21 × 100) → [-1, 1]
+      [69] momentum_15m         — Rate of change last 4 candles (1h lookback), tanh(roc/10) → [-1, 1]
+      [70] volatility_15m       — Std dev of last 16 15m returns (4h window), min(vol/5, 1.0) → [0, 1]
+      [71] body_ratio_15m       — Average body/range ratio last 4 candles → [0, 1]
+      [72] consecutive_dir_15m  — Consecutive same-direction candles / 8, [-1, 1] neg=bear
+    """
+    try:
+        candles = fetch_candles(token, "15m", 96)  # 96 × 15m = 24h
+    except Exception:
+        return [0.0] * 8
+
+    if len(candles) < 24:
+        return [0.0] * 8
+
+    closes = [c["c"] for c in candles]
+
+    # [65] RSI 15m
+    rsi_vals = calculate_rsi(closes, 14)
+    rsi_15m = rsi_vals[-1] / 100.0 if rsi_vals else 0.5
+
+    # [66] change_15m — last candle change
+    if len(candles) >= 2:
+        last_close = candles[-1]["c"]
+        prev_close = candles[-2]["c"]
+        change_15m = ((last_close - prev_close) / prev_close * 100) if prev_close else 0
+        change_15m = math.tanh(change_15m / 5)
+    else:
+        change_15m = 0.0
+
+    # [67] change_1h_15m — 4-candle (1h) change on 15m data
+    if len(candles) >= 5:
+        c_now = candles[-1]["c"]
+        c_4ago = candles[-5]["c"]
+        change_1h = ((c_now - c_4ago) / c_4ago * 100) if c_4ago else 0
+        change_1h_15m = math.tanh(change_1h / 10)
+    else:
+        change_1h_15m = 0.0
+
+    # [68] EMA9/EMA21 cross signal
+    ema9 = calculate_ema(closes, 9)
+    ema21 = calculate_ema(closes, 21)
+    if ema9 and ema21:
+        ema9_last = ema9[-1]
+        ema21_last = ema21[-1]
+        if ema21_last != 0:
+            cross_signal = math.tanh((ema9_last - ema21_last) / ema21_last * 100)
+        else:
+            cross_signal = 0.0
+    else:
+        cross_signal = 0.0
+
+    # [69] momentum_15m — rate of change last 4 candles
+    if len(candles) >= 5:
+        roc = ((candles[-1]["c"] - candles[-5]["c"]) / candles[-5]["c"] * 100) if candles[-5]["c"] else 0
+        momentum_15m = math.tanh(roc / 10)
+    else:
+        momentum_15m = 0.0
+
+    # [70] volatility_15m — std dev of last 16 15m returns
+    if len(candles) >= 17:
+        returns_15m = []
+        for j in range(len(candles) - 16, len(candles)):
+            if candles[j - 1]["c"] > 0:
+                ret = (candles[j]["c"] - candles[j - 1]["c"]) / candles[j - 1]["c"] * 100
+                returns_15m.append(ret)
+        if returns_15m:
+            mean_r = sum(returns_15m) / len(returns_15m)
+            var_r = sum((r - mean_r) ** 2 for r in returns_15m) / len(returns_15m)
+            vol = var_r ** 0.5
+            volatility_15m = min(vol / 5.0, 1.0)
+        else:
+            volatility_15m = 0.0
+    else:
+        volatility_15m = 0.0
+
+    # [71] body_ratio_15m — avg body/range ratio last 4 candles
+    body_ratios = []
+    for c in candles[-4:]:
+        rng = c["h"] - c["l"]
+        if rng > 0:
+            body = abs(c["c"] - c["o"])
+            body_ratios.append(body / rng)
+        else:
+            body_ratios.append(0.0)
+    body_ratio_15m = sum(body_ratios) / len(body_ratios) if body_ratios else 0.0
+
+    # [72] consecutive_dir_15m — consecutive same-direction candles / 8
+    consecutive = 0
+    if len(candles) >= 2:
+        last_dir = 1 if candles[-1]["c"] >= candles[-1]["o"] else -1
+        for j in range(len(candles) - 1, max(len(candles) - 9, -1), -1):
+            c = candles[j]
+            d = 1 if c["c"] >= c["o"] else -1
+            if d == last_dir:
+                consecutive += 1
+            else:
+                break
+        consecutive_dir_15m = (consecutive / 8.0) * last_dir
+        consecutive_dir_15m = max(-1.0, min(1.0, consecutive_dir_15m))
+    else:
+        consecutive_dir_15m = 0.0
+
+    return [
+        round(rsi_15m, 6),
+        round(change_15m, 6),
+        round(change_1h_15m, 6),
+        round(cross_signal, 6),
+        round(momentum_15m, 6),
+        round(volatility_15m, 6),
+        round(body_ratio_15m, 6),
+        round(consecutive_dir_15m, 6),
+    ]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -983,9 +1104,10 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     meta_extra = compute_meta_extra_features(token, meta_ctx)
     derived = compute_derived_features(candles)
     btc_pred_feat = compute_btc_pred_features(btc_pred, token)
+    feat_15m = compute_15m_features(token)
 
-    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat
-    assert len(features) == 65, f"Expected 65 features, got {len(features)}"
+    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m
+    assert len(features) == 73, f"Expected 73 features, got {len(features)}"
 
     # Build row
     row = {

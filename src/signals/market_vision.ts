@@ -826,6 +826,68 @@ export class MarketVisionService {
   }
 
   /**
+   * Vision-based directional bid/ask bias for PURE_MM grid.
+   * Returns { bidMult, askMult } — multiplicative adjustments to sizeMultipliers.
+   *
+   * Unlike getSizeSkew() (which injects into inventorySkew and is bypassed for PURE_MM),
+   * this returns direct multipliers for the kPEPE pipeline.
+   *
+   * Signals used:
+   * 1. Trend alignment (4h + 15m) — strongest signal (40%)
+   * 2. RSI extremes (overbought/oversold) (25%)
+   * 3. AI Vision (visualScore, exhaustion) (20%)
+   * 4. S/R proximity (near support = bullish, near resistance = bearish) (15%)
+   *
+   * Range: bidMult/askMult in [0.80, 1.20] — soft ±20% max bias.
+   */
+  getDirectionalBias(symbol: string): { bidMult: number; askMult: number; reason: string } {
+    const analysis = this.pairAnalysis.get(symbol);
+    if (!analysis) return { bidMult: 1.0, askMult: 1.0, reason: '' };
+
+    let score = 0; // -1.0 (bearish) to +1.0 (bullish)
+
+    // 1. Trend alignment (weight 40%)
+    const t4h = analysis.trend4h;
+    const t15m = analysis.trend15m;
+    if (t4h === 'bull' && t15m === 'bull') score += 0.40;
+    else if (t4h === 'bear' && t15m === 'bear') score -= 0.40;
+    else if (t4h === 'bull') score += 0.15;
+    else if (t4h === 'bear') score -= 0.15;
+
+    // 2. RSI (weight 25%)
+    const rsi = analysis.rsi;
+    if (rsi > 75) score -= 0.25 * ((rsi - 75) / 25);
+    else if (rsi < 25) score += 0.25 * ((25 - rsi) / 25);
+
+    // 3. AI Vision (weight 20%)
+    const v = analysis.visualAnalysis;
+    if (v) {
+      const vs = (v.visualScore - 50) / 50; // -1..+1
+      score += 0.20 * vs;
+      if (v.exhaustion) score *= 0.5; // halve conviction when exhausted
+    }
+
+    // 4. S/R proximity (weight 15%)
+    if (analysis.supportDist < 0.02) score += 0.15;
+    if (analysis.resistanceDist < 0.02) score -= 0.15;
+
+    // Clamp score to [-1, 1]
+    score = Math.max(-1.0, Math.min(1.0, score));
+
+    // Convert to multipliers — max ±20% bias
+    const maxBias = 0.20;
+    const bias = score * maxBias;
+    const bidMult = 1.0 + bias;
+    const askMult = 1.0 - bias;
+
+    const reason = Math.abs(score) >= 0.10
+      ? `score=${score.toFixed(2)} t4h=${t4h} t15m=${t15m} RSI=${rsi.toFixed(0)}${v ? ` vs=${v.visualScore}` : ''}`
+      : '';
+
+    return { bidMult, askMult, reason };
+  }
+
+  /**
    * Calculates directional size skew (-1.0 to 1.0)
    * Positive = skew towards Longs (bid heavy)
    * Negative = skew towards Shorts (ask heavy)

@@ -107,9 +107,12 @@ export const FEATURE_NAMES = [
   'volume_momentum', 'price_acceleration', 'volume_price_divergence',
   // BTC prediction proxy (3)
   'btc_pred_direction', 'btc_pred_change', 'btc_pred_confidence',
+  // 15m candle features (8)
+  'rsi_15m', 'change_15m', 'change_1h_15m', 'ema9_ema21_cross_15m',
+  'momentum_15m', 'volatility_15m', 'body_ratio_15m', 'consecutive_dir_15m',
 ];
 
-const NUM_FEATURES = 65;
+const NUM_FEATURES = 73;
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12'] as const;
 const MODEL_DIR = '/tmp';
@@ -325,18 +328,20 @@ export class XGBoostPredictor {
       return null;
     }
 
-    // Accept 30/45/49/53/62/65-feature vectors, pad old ones with zeros
+    // Accept 30/45/49/53/62/65/73-feature vectors, pad old ones with zeros
     let paddedFeatures = features;
     if (features.length === 30) {
-      paddedFeatures = [...features, ...new Array(35).fill(0)];
+      paddedFeatures = [...features, ...new Array(43).fill(0)];
     } else if (features.length === 45) {
-      paddedFeatures = [...features, ...new Array(20).fill(0)];
+      paddedFeatures = [...features, ...new Array(28).fill(0)];
     } else if (features.length === 49) {
-      paddedFeatures = [...features, ...new Array(16).fill(0)];
+      paddedFeatures = [...features, ...new Array(24).fill(0)];
     } else if (features.length === 53) {
-      paddedFeatures = [...features, ...new Array(12).fill(0)];
+      paddedFeatures = [...features, ...new Array(20).fill(0)];
     } else if (features.length === 62) {
-      paddedFeatures = [...features, ...new Array(3).fill(0)];
+      paddedFeatures = [...features, ...new Array(11).fill(0)];
+    } else if (features.length === 65) {
+      paddedFeatures = [...features, ...new Array(8).fill(0)];
     } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;

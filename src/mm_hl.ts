@@ -3690,6 +3690,7 @@ class HyperliquidMMBot {
   private srAlertCooldowns: Map<string, number> = new Map()
   private srBreakGraceStart: Map<string, number> = new Map()  // S/R break grace period: pair → timestamp when break first detected
   private srBounceHoldState: Map<string, { timestamp: number; srLevel: number; side: 'long' | 'short' }> = new Map()  // S/R Bounce Hold: track when S/R Accum built position
+  private srPrevPhases: Map<string, Set<string>> = new Map()  // S/R Phase tracking: pair → active phases last tick
   private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
 
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
@@ -7288,7 +7289,7 @@ class HyperliquidMMBot {
     }
 
     // 🛡️ Nansen Conflict Stop-Loss: Close positions against strong bias early
-    if (position) {
+    if (position && this.nansenConflictCheckEnabled) {
       const positionValueUsd = position.size * midPrice
       // Calculate unrealized PnL based on current price vs entry price
       const unrealizedPnlUsd = position.side === 'long'
@@ -8132,7 +8133,13 @@ class HyperliquidMMBot {
         sizeMultipliers.bid *= toxOut.sizeMultBid * toxSizeMult
         sizeMultipliers.ask *= toxOut.sizeMultAsk * toxSizeMult
 
-        // PREDICTION BIAS disabled — prediction-api and war-room removed
+        // === 👁️ VISION RATIO: directional bias from MarketVision ===
+        const visionBias = this.marketVision?.getDirectionalBias(pair) ?? { bidMult: 1.0, askMult: 1.0, reason: '' }
+        sizeMultipliers.bid *= visionBias.bidMult
+        sizeMultipliers.ask *= visionBias.askMult
+        if (visionBias.reason && this.tickCount % 20 === 0) {
+          console.log(`👁️ [VISION_RATIO] ${pair}: bid×${visionBias.bidMult.toFixed(2)} ask×${visionBias.askMult.toFixed(2)} | ${visionBias.reason}`)
+        }
 
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
@@ -8215,6 +8222,8 @@ class HyperliquidMMBot {
 
           // === 📍 S/R DISCORD ALERTS ===
           // Alert when price enters strong zone (1×ATR) or breaks S/R level
+          let srAlertPending = false
+          let srAlertData: { type: string; level: number; dist: number; emoji: string; levelLabel: string; color: number } | null = null
           if (mgProxSignal !== 0) {
             const now = Date.now()
             let srAlertType: string | null = null
@@ -8247,6 +8256,7 @@ class HyperliquidMMBot {
               srDist = mgSupportDist
             }
 
+            // Defer sending — collect pipeline status first, send after BREAKOUT_TP
             if (srAlertType) {
               const cooldownKey = `${pair}:${srAlertType}`
               const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
@@ -8264,20 +8274,8 @@ class HyperliquidMMBot {
                 console.log(logMsg)
 
                 const color = isBroken ? 0xff8800 : (isResistance ? 0xff4444 : 0x44ff44)
-                sendDiscordEmbed({
-                  title: `${emoji} ${pair} — ${srAlertType.replace(/_/g, ' ')}`,
-                  color,
-                  fields: [
-                    { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
-                    { name: levelLabel, value: `$${srLevel.toFixed(6)}`, inline: true },
-                    { name: 'Distance', value: `${distPct}%`, inline: true },
-                    { name: '15m Close', value: `$${lastCandle15mClose.toFixed(6)}`, inline: true },
-                    { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
-                    { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
-                  ],
-                  footer: { text: `S/R from 1h candles (24h lookback) | BROKEN = candle close confirmed | Cooldown 15min` },
-                  timestamp: new Date().toISOString(),
-                }).catch(() => {})  // fire-and-forget
+                srAlertPending = true
+                srAlertData = { type: srAlertType, level: srLevel, dist: srDist, emoji, levelLabel, color }
               }
             }
           }
@@ -8285,6 +8283,15 @@ class HyperliquidMMBot {
           // Weights: proximity (S/R) is most important for ranging memecoins
           // Momentum lags in choppy markets → reduced weight
           const momentumScore = momentumNorm * 0.35 + mgRsiSignal * 0.30 + mgProxSignal * 0.35
+
+          // Pipeline status for Discord S/R alerts (collected across phases, sent after BREAKOUT_TP)
+          const srPipelineStatus = {
+            phase: '' as string,
+            detail: '' as string,
+            progress: 0,
+            bidMult: sizeMultipliers.bid,
+            askMult: sizeMultipliers.ask,
+          }
 
           // Position-aware guard: don't block position-CLOSING orders
           // SHORT position (actualSkew < -0.10) + pump (score > 0) → bids CLOSE the short → don't reduce bids
@@ -8413,11 +8420,12 @@ class HyperliquidMMBot {
           // SHORT approaching support (profitable) → reduce asks (stop building), boost bids (close shorts)
           // LONG approaching resistance (profitable) → reduce bids (stop building), boost asks (close longs)
           // At S/R with position <= maxRetainPct → disengage → normal MM (MG proximity handles bounce/break)
+          let srReductionApplied = false
+          let srGraceActive = false
+          let srAccumApplied = false
           if (momGuardConfig.srReductionEnabled && position && mgAtr > 0) {
             const absSkewSr = Math.abs(actualSkew)
             const reductionZone = mgStrongZone * momGuardConfig.srReductionStartAtr
-
-            let srReductionApplied = false
 
             // === Grace Period: delay reduction after S/R break AGAINST position ===
             // LONG + price breaks below support → wait N candles before reducing (fakeout assessment)
@@ -8425,7 +8433,6 @@ class HyperliquidMMBot {
             const graceMs = momGuardConfig.srReductionGraceCandles * 15 * 60 * 1000  // candles × 15min
             const graceLongKey = `${pair}:LONG_BREAK_SUPPORT`
             const graceShortKey = `${pair}:SHORT_BREAK_RESIST`
-            let srGraceActive = false
 
             // LONG + BROKEN SUPPORT (candle close confirmed, prox <= -1.2) → start/check grace
             if (hasLongPos && mgSupportBody > 0 && mgProxSignal <= -1.2) {
@@ -8436,6 +8443,8 @@ class HyperliquidMMBot {
               const elapsed = Date.now() - this.srBreakGraceStart.get(graceLongKey)!
               if (elapsed < graceMs) {
                 srGraceActive = true
+                srPipelineStatus.phase = 'GRACE'
+                srPipelineStatus.detail = `grace LONG ${((graceMs - elapsed)/60000).toFixed(0)}min left`
                 if (this.tickCount % 10 === 0) {
                   console.log(`⏳ [SR_GRACE] ${pair}: LONG grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
                 }
@@ -8459,6 +8468,8 @@ class HyperliquidMMBot {
               const elapsed = Date.now() - this.srBreakGraceStart.get(graceShortKey)!
               if (elapsed < graceMs) {
                 srGraceActive = true
+                srPipelineStatus.phase = 'GRACE'
+                srPipelineStatus.detail = `grace SHORT ${((graceMs - elapsed)/60000).toFixed(0)}min left`
                 if (this.tickCount % 10 === 0) {
                   console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
                 }
@@ -8476,28 +8487,32 @@ class HyperliquidMMBot {
             // SHORT approaching SUPPORT (profitable move down)
             // Grace period suppresses reduction when SHORT broke ABOVE resistance (fakeout assessment)
             if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone && !srGraceActive) {
-              const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / reductionZone))
+              const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / reductionZone) * 100))
 
-              if (absSkewSr > momGuardConfig.srMaxRetainPct) {
-                // Only zero asks when VERY close to support (progress > 60%)
+              const srReductionMinSkewShort = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
+              if (absSkewSr > srReductionMinSkewShort) {
+                // Only zero asks when VERY close to support (>60%)
                 // Below that, progressively reduce to keep grid active
-                if (progress > 0.60) {
+                if (progressPct > 60) {
                   sizeMultipliers.ask = 0  // ZERO new shorts — very close to support
                 } else {
-                  sizeMultipliers.ask *= (1.0 - progress)  // Progressive: 0%→100%, 38%→62%, 60%→40%
+                  sizeMultipliers.ask *= (1.0 - progressPct / 100)  // Progressive: 0%→100%, 38%→62%, 60%→40%
                 }
-                sizeMultipliers.bid *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
+                sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
                 srReductionApplied = true
+                srPipelineStatus.phase = 'REDUCTION'
+                srPipelineStatus.progress = progressPct
+                srPipelineStatus.detail = `SHORT→SUPPORT TP ${progressPct.toFixed(0)}%`
               }
 
               if (this.tickCount % 20 === 0 || srReductionApplied) {
                 console.log(
-                  `📉 [SR_REDUCTION] ${pair}: SHORT near SUPPORT — progress=${(progress*100).toFixed(0)}% ` +
+                  `📉 [SR_REDUCTION] ${pair}: SHORT near SUPPORT — progress=${progressPct.toFixed(0)}% ` +
                   `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
                   `skew=${(actualSkew*100).toFixed(0)}% → ` +
                   (srReductionApplied
                     ? `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} (REDUCING)`
-                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(momGuardConfig.srMaxRetainPct*100).toFixed(0)}% → normal MM)`)
+                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(srReductionMinSkewShort*100).toFixed(0)}% → normal MM)`)
                 )
               }
             }
@@ -8505,27 +8520,31 @@ class HyperliquidMMBot {
             // LONG approaching RESISTANCE (profitable move up)
             // Grace period suppresses reduction when LONG broke BELOW support (fakeout assessment)
             if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone && !srGraceActive) {
-              const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / reductionZone))
+              const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / reductionZone) * 100))
 
-              if (absSkewSr > momGuardConfig.srMaxRetainPct) {
-                // Only zero bids when VERY close to resistance (progress > 60%)
-                if (progress > 0.60) {
+              const srReductionMinSkewLong = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
+              if (absSkewSr > srReductionMinSkewLong) {
+                // Only zero bids when VERY close to resistance (>60%)
+                if (progressPct > 60) {
                   sizeMultipliers.bid = 0  // ZERO new longs — very close to resistance
                 } else {
-                  sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
+                  sizeMultipliers.bid *= (1.0 - progressPct / 100)  // Progressive reduction
                 }
-                sizeMultipliers.ask *= (1.0 + progress * (momGuardConfig.srClosingBoostMult - 1.0))
+                sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
                 srReductionApplied = true
+                srPipelineStatus.phase = 'REDUCTION'
+                srPipelineStatus.progress = progressPct
+                srPipelineStatus.detail = `LONG→RESISTANCE TP ${progressPct.toFixed(0)}%`
               }
 
               if (this.tickCount % 20 === 0 || srReductionApplied) {
                 console.log(
-                  `📈 [SR_REDUCTION] ${pair}: LONG near RESISTANCE — progress=${(progress*100).toFixed(0)}% ` +
+                  `📈 [SR_REDUCTION] ${pair}: LONG near RESISTANCE — progress=${progressPct.toFixed(0)}% ` +
                   `dist=${(mgResistDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
                   `skew=${(actualSkew*100).toFixed(0)}% → ` +
                   (srReductionApplied
                     ? `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (REDUCING)`
-                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(momGuardConfig.srMaxRetainPct*100).toFixed(0)}% → normal MM)`)
+                    : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(srReductionMinSkewLong*100).toFixed(0)}% → normal MM)`)
                 )
               }
             }
@@ -8536,7 +8555,7 @@ class HyperliquidMMBot {
           // At support: boost bids (buy), reduce asks (don't sell), widen bid spread (buy below support)
           // At resistance: boost asks (sell), reduce bids (don't buy), widen ask spread (sell above resistance)
           // Complementary with S/R Reduction: Reduction handles |skew| > srMaxRetainPct, Accumulation handles |skew| <= srMaxRetainPct
-          let srAccumApplied = false
+          srAccumApplied = false
           if (momGuardConfig.srAccumulationEnabled && mgAtr > 0) {
             const absSkewAccum = Math.abs(actualSkew)
             const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr  // same zone as S/R Reduction
@@ -8546,34 +8565,41 @@ class HyperliquidMMBot {
             const hasAnyShort = actualSkew < -0.01
             const hasAnyLong = actualSkew > 0.01
             if (!hasShortPos && mgSupportBody > 0 && mgSupportDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
-              const progress = Math.max(0, Math.min(1, 1.0 - mgSupportDist / accumZone))
+              const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / accumZone) * 100))
               // Fresh Touch Boost: stronger accumulation when position is small (first touch of S/R)
               const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
               const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
               const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
               const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
-              sizeMultipliers.bid *= (1.0 + progress * (effectiveBounceBoost - 1.0))
+              sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (effectiveBounceBoost - 1.0))
               // If we have ANY short at support → reduce/zero asks (don't add to wrong-side position)
               if (hasAnyShort) {
-                if (progress > 0.60) {
+                if (progressPct > 60) {
                   sizeMultipliers.ask = 0  // Very close to support — fully block
                 } else {
-                  sizeMultipliers.ask *= (1.0 - progress)  // Progressive: keep some asks further from support
+                  sizeMultipliers.ask *= (1.0 - progressPct / 100)  // Progressive: keep some asks further from support
                 }
-              } else if (progress > 0.80) {
+              } else if (progressPct > 80 && !hasAnyLong) {
                 // Strong proximity to support — ZERO out sells to prevent shorting the bounce
+                // But ONLY if not LONG — if LONG, we NEED asks to close the position
                 sizeMultipliers.ask = 0
+              } else if (progressPct > 80 && hasAnyLong) {
+                // LONG near support — keep reduced asks for closing (same formula as <80%)
+                sizeMultipliers.ask *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
               } else {
-                sizeMultipliers.ask *= (1.0 - progress * (1.0 - effectiveCounterReduce))
+                sizeMultipliers.ask *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
               }
-              gridBidMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
+              gridBidMult *= (1.0 + (progressPct / 100) * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
+              srPipelineStatus.phase = 'ACCUM'
+              srPipelineStatus.progress = progressPct
+              srPipelineStatus.detail = `accumulate LONGS fresh×${freshBoost.toFixed(1)}`
 
               if (this.tickCount % 20 === 0 || srAccumApplied) {
                 console.log(
-                  `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${(progress*100).toFixed(0)}% ` +
+                  `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${progressPct.toFixed(0)}% ` +
                   `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''} fresh×${freshBoost.toFixed(1)} → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''}${hasAnyLong && progressPct > 80 ? ' HAS_LONG→ask_reduced' : ''} fresh×${freshBoost.toFixed(1)} → ` +
                   `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} bidSpread×${gridBidMult.toFixed(2)}`
                 )
               }
@@ -8581,34 +8607,41 @@ class HyperliquidMMBot {
 
             // At RESISTANCE with small/no position → accumulate SHORTS (sell the reversal)
             else if (!hasLongPos && mgResistBody > 0 && mgResistDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
-              const progress = Math.max(0, Math.min(1, 1.0 - mgResistDist / accumZone))
+              const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / accumZone) * 100))
               // Fresh Touch Boost: stronger accumulation when position is small (first touch of S/R)
               const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
               const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
               const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
               const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
-              sizeMultipliers.ask *= (1.0 + progress * (effectiveBounceBoost - 1.0))
+              sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (effectiveBounceBoost - 1.0))
               // If we have ANY long at resistance → reduce/zero bids (don't add to wrong-side position)
               if (hasAnyLong) {
-                if (progress > 0.60) {
+                if (progressPct > 60) {
                   sizeMultipliers.bid = 0  // Very close to resistance — fully block
                 } else {
-                  sizeMultipliers.bid *= (1.0 - progress)  // Progressive reduction
+                  sizeMultipliers.bid *= (1.0 - progressPct / 100)  // Progressive reduction
                 }
-              } else if (progress > 0.80) {
+              } else if (progressPct > 80 && !hasAnyShort) {
                 // Strong proximity to resistance — ZERO out bids to prevent buying into the drop
+                // But ONLY if not SHORT — if SHORT, we NEED bids to close the position
                 sizeMultipliers.bid = 0
+              } else if (progressPct > 80 && hasAnyShort) {
+                // SHORT near resistance — keep reduced bids for closing (same formula as <80%)
+                sizeMultipliers.bid *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
               } else {
-                sizeMultipliers.bid *= (1.0 - progress * (1.0 - effectiveCounterReduce))
+                sizeMultipliers.bid *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
               }
-              gridAskMult *= (1.0 + progress * (momGuardConfig.srAccumSpreadWiden - 1.0))
+              gridAskMult *= (1.0 + (progressPct / 100) * (momGuardConfig.srAccumSpreadWiden - 1.0))
               srAccumApplied = true
+              srPipelineStatus.phase = 'ACCUM'
+              srPipelineStatus.progress = progressPct
+              srPipelineStatus.detail = `accumulate SHORTS fresh×${freshBoost.toFixed(1)}`
 
               if (this.tickCount % 20 === 0 || srAccumApplied) {
                 console.log(
-                  `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${(progress*100).toFixed(0)}% ` +
+                  `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${progressPct.toFixed(0)}% ` +
                   `dist=${(mgResistDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
-                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''} fresh×${freshBoost.toFixed(1)} → ` +
+                  `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''}${hasAnyShort && progressPct > 80 ? ' HAS_SHORT→bid_reduced' : ''} fresh×${freshBoost.toFixed(1)} → ` +
                   `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`
                 )
               }
@@ -8656,10 +8689,11 @@ class HyperliquidMMBot {
                 } else if (pastThreshold) {
                   console.log(`🔓 [BOUNCE_HOLD] ${pair}: RELEASED — dist=${distFromSr.toFixed(2)}ATR >= ${momGuardConfig.srBounceHoldMinDistAtr}ATR threshold (bounce confirmed)`)
                 }
-              } else if (distFromSr >= 0) {
+              } else if (distFromSr >= 0 && !srAccumApplied) {
                 // Progressive release: reduce closing-side
-                const holdProgress = Math.min(1.0, distFromSr / momGuardConfig.srBounceHoldMinDistAtr)
-                const askReduction = momGuardConfig.srBounceHoldAskReduction + holdProgress * (1.0 - momGuardConfig.srBounceHoldAskReduction)
+                // Skip when SR_ACCUM active — it already handles closing-side reduction
+                const holdProgressPct = Math.min(100, (distFromSr / momGuardConfig.srBounceHoldMinDistAtr) * 100)
+                const askReduction = momGuardConfig.srBounceHoldAskReduction + (holdProgressPct / 100) * (1.0 - momGuardConfig.srBounceHoldAskReduction)
 
                 if (holdState.side === 'long') {
                   // LONG near SUPPORT → reduce asks (don't close longs too early)
@@ -8668,12 +8702,22 @@ class HyperliquidMMBot {
                   // SHORT near RESISTANCE → reduce bids (don't close shorts too early)
                   sizeMultipliers.bid *= askReduction
                 }
+                srPipelineStatus.phase = 'BOUNCE_HOLD'
+                srPipelineStatus.progress = holdProgressPct
+                srPipelineStatus.detail = `${holdState.side.toUpperCase()} dist=${distFromSr.toFixed(2)}ATR`
 
-                if (this.tickCount % 20 === 0 || holdProgress < 0.3) {
+                if (this.tickCount % 20 === 0 || holdProgressPct < 30) {
                   console.log(
                     `🔒 [BOUNCE_HOLD] ${pair}: ${holdState.side.toUpperCase()} near ${holdState.side === 'long' ? 'SUPPORT' : 'RESISTANCE'} — ` +
-                    `dist=${distFromSr.toFixed(2)}ATR progress=${(holdProgress*100).toFixed(0)}% → ` +
+                    `dist=${distFromSr.toFixed(2)}ATR progress=${holdProgressPct.toFixed(0)}% → ` +
                     `${holdState.side === 'long' ? 'ask' : 'bid'}×${askReduction.toFixed(2)} (holding for bounce)`
+                  )
+                }
+              } else if (distFromSr >= 0 && srAccumApplied) {
+                // SR_ACCUM handles closing-side — BOUNCE_HOLD tracking only (no double-reduction)
+                if (this.tickCount % 20 === 0) {
+                  console.log(
+                    `🔒 [BOUNCE_HOLD] ${pair}: tracking (SR_ACCUM active) — dist=${distFromSr.toFixed(2)}ATR`
                   )
                 }
               }
@@ -8685,8 +8729,8 @@ class HyperliquidMMBot {
           // LONG + strong pump → boost asks (sell to close), reduce bids (don't buy more)
           // SHORT + strong dump → boost bids (buy to close), reduce asks (don't sell more)
           // Multiplicative with MG — amplifies the natural mean-reversion closing effect
+          let breakoutApplied = false
           if (momGuardConfig.srBreakoutTpEnabled && Math.abs(momentumScore) > momGuardConfig.srBreakoutTpScoreThreshold) {
-            let breakoutApplied = false
 
             if (hasLongPos && momentumScore > momGuardConfig.srBreakoutTpScoreThreshold) {
               // Strong pump + LONG = profitable → aggressively close longs
@@ -8700,13 +8744,119 @@ class HyperliquidMMBot {
               breakoutApplied = true
             }
 
-            if (breakoutApplied && (this.tickCount % 20 === 0 || Math.abs(momentumScore) > 0.6)) {
-              console.log(
-                `🚀 [BREAKOUT_TP] ${pair}: ${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} — ` +
-                `score=${momentumScore.toFixed(2)} > ${momGuardConfig.srBreakoutTpScoreThreshold} ` +
-                `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING)`
-              )
+            if (breakoutApplied) {
+              srPipelineStatus.phase = 'BREAKOUT_TP'
+              srPipelineStatus.detail = `${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} score=${momentumScore.toFixed(2)}`
+              if (this.tickCount % 20 === 0 || Math.abs(momentumScore) > 0.6) {
+                console.log(
+                  `🚀 [BREAKOUT_TP] ${pair}: ${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} — ` +
+                  `score=${momentumScore.toFixed(2)} > ${momGuardConfig.srBreakoutTpScoreThreshold} ` +
+                  `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING)`
+                )
+              }
             }
+          }
+
+          // Update pipeline status multipliers (after all phases applied)
+          srPipelineStatus.bidMult = sizeMultipliers.bid
+          srPipelineStatus.askMult = sizeMultipliers.ask
+
+          // === Send pending S/R Discord alert with pipeline status ===
+          if (srAlertPending && srAlertData) {
+            const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', GRACE: '⏳', INV_AWARE: '⚡' }
+            const fields = [
+              { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
+              { name: srAlertData.levelLabel, value: `$${srAlertData.level.toFixed(6)}`, inline: true },
+              { name: 'Distance', value: `${(srAlertData.dist * 100).toFixed(2)}%`, inline: true },
+              { name: '15m Close', value: `$${lastCandle15mClose.toFixed(6)}`, inline: true },
+              { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
+              { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
+            ]
+
+            if (srPipelineStatus.phase) {
+              const phEmoji = phaseEmojiMap[srPipelineStatus.phase] || '⚙️'
+              fields.push({
+                name: 'Pipeline',
+                value: `${phEmoji} **${srPipelineStatus.phase}** ${srPipelineStatus.progress > 0 ? `${srPipelineStatus.progress.toFixed(0)}%` : ''}\n${srPipelineStatus.detail}`,
+                inline: false,
+              })
+              fields.push(
+                { name: 'bid×', value: `${srPipelineStatus.bidMult.toFixed(2)}`, inline: true },
+                { name: 'ask×', value: `${srPipelineStatus.askMult.toFixed(2)}`, inline: true },
+                { name: 'MG Score', value: `${momentumScore.toFixed(2)}`, inline: true },
+              )
+            } else {
+              fields.push({ name: 'Pipeline', value: 'Normal MG (no S/R phase active)', inline: false })
+            }
+
+            sendDiscordEmbed({
+              title: `${srAlertData.emoji} ${pair} — ${srAlertData.type.replace(/_/g, ' ')}`,
+              color: srAlertData.color,
+              fields,
+              footer: { text: `S/R 1h (24h) | Cooldown 15min` },
+              timestamp: new Date().toISOString(),
+            }).catch(() => {})
+          }
+
+          // === Phase transition alerts ===
+          {
+            const currentPhases = new Set<string>()
+            if (srAccumApplied) currentPhases.add('SR_ACCUM')
+            if (srReductionApplied) currentPhases.add('SR_REDUCTION')
+            if (this.srBounceHoldState.has(pair) && !srAccumApplied && srPipelineStatus.phase === 'BOUNCE_HOLD') currentPhases.add('BOUNCE_HOLD')
+            if (breakoutApplied) currentPhases.add('BREAKOUT_TP')
+            if (srGraceActive) currentPhases.add('GRACE')
+
+            const prevPhases = this.srPrevPhases.get(pair) || new Set()
+
+            const phaseAlertConfig: Record<string, { emoji: string; color: number; startLabel: string; endLabel: string }> = {
+              SR_ACCUM:     { emoji: '🔄', color: 0x3498db, startLabel: 'SR_ACCUM START', endLabel: 'SR_ACCUM END' },
+              SR_REDUCTION: { emoji: '📉', color: 0x9b59b6, startLabel: 'SR_REDUCTION START', endLabel: 'SR_REDUCTION END' },
+              BOUNCE_HOLD:  { emoji: '🔒', color: 0x1abc9c, startLabel: 'BOUNCE_HOLD START', endLabel: 'BOUNCE_HOLD RELEASED' },
+              GRACE:        { emoji: '⏳', color: 0xf1c40f, startLabel: 'GRACE START', endLabel: 'GRACE EXPIRED' },
+              BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
+            }
+
+            const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
+              const cfg = phaseAlertConfig[phase]
+              if (!cfg) return
+              const cooldownKey = `${pair}:PHASE_${phase}_${transition}`
+              const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
+              if (Date.now() - lastAlert < HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) return
+              this.srAlertCooldowns.set(cooldownKey, Date.now())
+
+              const label = transition === 'START' ? cfg.startLabel : cfg.endLabel
+              const transEmoji = transition === 'START' ? cfg.emoji : (phase === 'BOUNCE_HOLD' ? '🔓' : '⏰')
+
+              sendDiscordEmbed({
+                title: `${transEmoji} ${pair} — ${label}`,
+                color: cfg.color,
+                fields: [
+                  { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
+                  { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
+                  { name: 'MG Score', value: `${momentumScore.toFixed(2)}`, inline: true },
+                  { name: 'bid×', value: `${sizeMultipliers.bid.toFixed(2)}`, inline: true },
+                  { name: 'ask×', value: `${sizeMultipliers.ask.toFixed(2)}`, inline: true },
+                  { name: 'S/R', value: `R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`, inline: true },
+                ],
+                footer: { text: `Phase transition | Cooldown 15min` },
+                timestamp: new Date().toISOString(),
+              }).catch(() => {})
+            }
+
+            // Detect START transitions
+            for (const phase of currentPhases) {
+              if (!prevPhases.has(phase)) {
+                sendPhaseAlert(phase, 'START')
+              }
+            }
+            // Detect END transitions
+            for (const phase of prevPhases) {
+              if (!currentPhases.has(phase)) {
+                sendPhaseAlert(phase, 'END')
+              }
+            }
+            this.srPrevPhases.set(pair, currentPhases)
           }
 
           // === 🎯 DYNAMIC TP (Spread Widener) ===
@@ -8825,6 +8975,24 @@ class HyperliquidMMBot {
           )
         }
 
+        // Dynamic Spread floor — prevent skewAdj from compressing grid below ATR-based L1
+        // gridMult < 1.0 means skewAdj is tightening spread below the dynamic layer offset
+        // For a memecoin with 1.8% ATR, this creates asks too tight to cover volatility
+        const prevGridBidMult = gridBidMult
+        const prevGridAskMult = gridAskMult
+        if (gridBidMult < 1.0) gridBidMult = 1.0
+        if (gridAskMult < 1.0) gridAskMult = 1.0
+        if (prevGridBidMult !== gridBidMult || prevGridAskMult !== gridAskMult) {
+          if (this.tickCount % 20 === 0) {
+            console.log(
+              `📐 [SPREAD_FLOOR] ${pair}: gridMult clamped` +
+              ` bid: ${prevGridBidMult.toFixed(2)}→${gridBidMult.toFixed(2)}` +
+              ` ask: ${prevGridAskMult.toFixed(2)}→${gridAskMult.toFixed(2)}` +
+              ` | L1=${dynamicLayers[0].offsetBps}bps preserved`
+            )
+          }
+        }
+
         gridOrders = this.gridManager!.generateGridOrdersCustom(
           pair,
           skewedMidPrice,  // ← shifted mid price instead of raw midPrice
@@ -8853,13 +9021,13 @@ class HyperliquidMMBot {
             const absSkew = Math.abs(actualSkew)
             let effectiveMinProfitBps = dynSpreadCfg.minProfitBps  // default 10bps
 
-            if (absSkew > 0.45) {
+            if (absSkew > 0.55) {
               // Full bypass — panic territory, close at any price
               effectiveMinProfitBps = -9999  // negative = allow any loss
-            } else if (absSkew > 0.15) {
+            } else if (absSkew > 0.30) {
               // Graduated: allow closing at a loss, capped by skew urgency
-              // 15% → -30bps, 25% → -80bps, 35% → -130bps, 45% → -180bps
-              const urgency = (absSkew - 0.15) / 0.30  // 0.0 at 15%, 1.0 at 45%
+              // 30% → -30bps, 40% → -90bps, 50% → -150bps, 55% → -180bps
+              const urgency = (absSkew - 0.30) / 0.25  // 0.0 at 30%, 1.0 at 55%
               const maxAllowedLossBps = 30 + urgency * 150  // 30-180bps
               effectiveMinProfitBps = -maxAllowedLossBps
             }

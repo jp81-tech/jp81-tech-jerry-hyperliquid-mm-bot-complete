@@ -284,6 +284,7 @@ export interface MomentumGuardConfig {
   srReductionEnabled: boolean         // Enable S/R progressive reduction (default true)
   srReductionStartAtr: number         // Start reduction zone at N × ATR from S/R (default 3.0)
   srMaxRetainPct: number              // Max position to retain at S/R level (default 0.20 = 20%)
+  srReductionMinSkew: number           // Min |skew| to trigger S/R Reduction (default 0.05 = 5%)
   srClosingBoostMult: number          // Closing-side multiplier boost at S/R (default 2.0)
   // S/R Accumulation: build position at S/R when flat/small
   srAccumulationEnabled: boolean       // Enable S/R accumulation (default true)
@@ -336,6 +337,7 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   srReductionEnabled: true,
   srReductionStartAtr: 3.0,      // Start zone at 3×ATR from S/R
   srMaxRetainPct: 0.20,          // 20% max position at S/R level
+  srReductionMinSkew: 0.05,       // 5% min skew for S/R Reduction (decoupled from srMaxRetainPct)
   srClosingBoostMult: 2.0,       // 2× closing-side boost at S/R
   srAccumulationEnabled: true,
   srAccumBounceBoost: 1.5,       // 50% more on bounce side at S/R
@@ -366,6 +368,7 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     autoSkewMaxShiftBps: 10.0,   // Conservative cap — even at 80% skew, max 10bps shift
     srReductionStartAtr: 2.5,    // kPEPE: start earlier (volatile, moves fast)
     srMaxRetainPct: 0.15,        // 15% max at S/R (was 8% — too low, accumulation stopped at 11% skew before building full position)
+    srReductionMinSkew: 0.05,        // 5% min skew for S/R Reduction
     srAccumBounceBoost: 1.8,         // kPEPE: more aggressive accumulation (strong bounce from support)
     srAccumFreshMultiplier: 3.0,     // kPEPE: 3× fresh touch boost (aggressive on first touch)
     srReductionGraceCandles: 3,      // kPEPE: 3 candles (~45 min) grace — volatile, fakeouts common

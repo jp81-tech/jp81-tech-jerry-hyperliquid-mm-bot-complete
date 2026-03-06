@@ -89,7 +89,7 @@ TOKEN_THRESHOLDS: dict[str, dict[str, float]] = {
         "h12": 0.025,
     },
     "kPEPE": {
-        "h1":  0.003,   # 0.3% (kPEPE median h1 move ~0.5%)
+        "h1":  0.0025,  # 0.25% (tighter — 15m features give granular signal)
         "h4":  0.008,   # 0.8% (kPEPE median h4 move ~1.0%)
         "h12": 0.020,   # 2.0% (kPEPE std h12 ~3.5%)
     },
@@ -193,6 +193,30 @@ TOKEN_XGB_PARAMS: dict[str, dict] = {
     "HYPE": dict(_REGULARIZED_PARAMS),
 }
 
+# Per-token dead feature masking — drop features that are structurally always zero
+# These features are informative when available (live data) but always zero in backfill/history
+# kPEPE: no SM tracking, no funding/OI in backfill, no orderbook/meta in backfill
+TOKEN_DEAD_FEATURES: dict[str, list[int]] = {
+    "kPEPE": [
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen [11-21] — no SM tracking for kPEPE
+        22, 23, 24,                                      # funding, OI [22-24] — zero in backfill
+        53, 54, 55,                                      # orderbook [53-55] — zero in backfill
+        56, 57, 58,                                      # meta ctx [56-58] — zero in backfill
+    ],
+    "FARTCOIN": [
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen — limited SM data
+        22, 23, 24,                                      # funding, OI
+        53, 54, 55,                                      # orderbook
+        56, 57, 58,                                      # meta ctx
+    ],
+    "LIT": [
+        11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen — limited SM data
+        22, 23, 24,                                      # funding, OI
+        53, 54, 55,                                      # orderbook
+        56, 57, 58,                                      # meta ctx
+    ],
+}
+
 # Early stopping rounds — stops training when test accuracy stops improving
 EARLY_STOPPING_ROUNDS = 30
 
@@ -228,9 +252,12 @@ FEATURE_NAMES = [
     "volume_momentum", "price_acceleration", "volume_price_divergence",
     # BTC prediction proxy (3)
     "btc_pred_direction", "btc_pred_change", "btc_pred_confidence",
+    # 15m candle features (8)
+    "rsi_15m", "change_15m", "change_1h_15m", "ema9_ema21_cross_15m",
+    "momentum_15m", "volatility_15m", "body_ratio_15m", "consecutive_dir_15m",
 ]
 
-NUM_FEATURES = 65  # 62 base + 3 btc_pred
+NUM_FEATURES = 73  # 65 base + 8 15m features
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -261,20 +288,22 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) not in (30, 45, 49, 53, 62, NUM_FEATURES):
+            if not feat or len(feat) not in (30, 45, 49, 53, 62, 65, NUM_FEATURES):
                 continue
 
             # Backward compat: pad old rows with zeros
             if len(feat) == 30:
-                feat = feat + [0.0] * 35  # 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
+                feat = feat + [0.0] * 43  # 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
             elif len(feat) == 45:
-                feat = feat + [0.0] * 20  # 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
+                feat = feat + [0.0] * 28  # 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
             elif len(feat) == 49:
-                feat = feat + [0.0] * 16  # 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred
+                feat = feat + [0.0] * 24  # 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
             elif len(feat) == 53:
-                feat = feat + [0.0] * 12  # 3 orderbook + 3 meta + 3 derived + 3 btc_pred
+                feat = feat + [0.0] * 20  # 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
             elif len(feat) == 62:
-                feat = feat + [0.0] * 3   # 3 btc_pred
+                feat = feat + [0.0] * 11  # 3 btc_pred + 8 15m
+            elif len(feat) == 65:
+                feat = feat + [0.0] * 8   # 8 15m features
 
             features.append(feat)
 
@@ -359,6 +388,13 @@ def train_model(
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.int32)
 
+    # Dead feature masking — drop structurally zero columns for this token
+    dead_features = TOKEN_DEAD_FEATURES.get(token, [])
+    live_mask = [i for i in range(X.shape[1]) if i not in dead_features]
+    if dead_features:
+        X = X[:, live_mask]
+        print(f"    {horizon}: Masked {len(dead_features)} dead features → {X.shape[1]} live features")
+
     # Chronological train/test split (80/20)
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X[:split_idx], X[split_idx:]
@@ -416,13 +452,20 @@ def train_model(
 
     print(f"    {horizon}: train_acc={train_acc:.3f}, test_acc={test_acc:.3f} (n_train={len(X_train)}, n_test={len(X_test)})")
 
-    # Feature importance
+    # Feature importance (map back to original feature names when masked)
     importance = model.feature_importances_
-    top_features = sorted(
-        [(FEATURE_NAMES[i], float(importance[i])) for i in range(len(importance))],
-        key=lambda x: x[1],
-        reverse=True,
-    )[:10]
+    if dead_features:
+        top_features = sorted(
+            [(FEATURE_NAMES[live_mask[i]], float(importance[i])) for i in range(len(importance))],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:10]
+    else:
+        top_features = sorted(
+            [(FEATURE_NAMES[i], float(importance[i])) for i in range(len(importance))],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:10]
 
     # Save model as JSON
     model_path = os.path.join(MODEL_DIR, f"xgboost_model_{token}_{horizon}.json")

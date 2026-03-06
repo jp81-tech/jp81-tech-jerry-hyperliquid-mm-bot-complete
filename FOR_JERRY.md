@@ -43,6 +43,7 @@
 35. [MIN_PROFIT Deadlock — gdy dwa systemy bezpieczenstwa sie nawzajem paralizuja](#min_profit-deadlock--gdy-dwa-systemy-bezpieczeństwa-się-nawzajem-paralizują)
 36. [Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknieciu S/R](#fresh-touch-boost--silniejsza-akumulacja-na-pierwszym-dotknieciu-sr)
 37. [S/R Bounce Hold — nie sprzedawaj za wczesnie po odbiciu](#sr-bounce-hold--nie-sprzedawaj-za-wczesnie-po-odbiciu)
+38. [S/R Pipeline — Zestawienie faz w zaleznosci od progresu](#sr-pipeline--zestawienie-faz-w-zaleznosci-od-progresu)
 
 ---
 
@@ -8333,3 +8334,600 @@ kPEPE ma wyzszy threshold (2.0 vs 1.5) bo jest volatile — potrzebuje wiecej mi
 |------|--------|
 | `src/config/short_only_config.ts` | +4 interface fields, +4 defaults, +2 kPEPE overrides |
 | `src/mm_hl.ts` | +1 property (`srBounceHoldState` Map), +63 linii logika (tracking, clear, progressive release, logging) |
+
+---
+
+## Anatomia Spreadu: Jak daleko od mid price bot stawia ordery (kPEPE)
+
+### O czym jest ten rozdzial
+
+Wyobraz sobie, ze prowadzisz stoisko z wymiana walut na lotnisku. Masz tablice z kursami kupna i sprzedazy. Kurs kupna (bid) jest zawsze nizszy niz kurs sprzedazy (ask) — ta roznica to Twoj zarobek, czyli **spread**.
+
+Bot robi dokladnie to samo, tylko na kryptowalutach i z wieloma warstwami cenowymi jednoczesnie. Ten rozdzial jest pelna mapa tego, jak bot oblicza cene kazdego orderu — od "srodka rynku" (mid price) az po finalny order price na gieldzie.
+
+To jest **czysto analityczny rozdzial** — nic nie zmieniamy w kodzie. Dokumentujemy istniejacy pipeline, zeby zrozumiec jak wszystkie czesci wspolpracuja.
+
+### 1. Mid Price — punkt wyjscia
+
+Mid price to aktualna cena rynkowa tokena, pobierana z Hyperliquid API (`allMids`). To jest "srodek" wokol ktorego bot buduje cala siatke orderow.
+
+Ale mid price moze byc **przesuniete** przez Auto-Skew:
+
+```
+skewedMidPrice = midPrice x (1 + shiftBps / 10000)
+```
+
+Dla kPEPE Auto-Skew daje 1.5 bps na kazde 10% skew, max 10 bps. Przy skew = -43% (bot trzyma duzego shorta):
+
+```
+shiftBps = -(-43% x 10 x 1.5) = +6.45 bps
+skewedMidPrice = $0.003500 x (1 + 6.45/10000) = $0.003502
+```
+
+Mid przesuniete w gore = bidy blizej rynku = bot agresywniej zamyka shorta.
+
+**Analogia:** To jak gdyby kelner w restauracji nieco przesuwat stolik blizej kuchni gdy ma duzo zamowien do wyniesienia — zeby szybciej obslugiwac.
+
+### 2. Base Spread — ile bps od mid na kazdej warstwie
+
+Base spread to bazowa odleglosc kazdej warstwy (L1, L2, L3, L4) od mid price, mierzona w **basis pointach** (bps). 1 bps = 0.01%.
+
+Zrodlem jest `baseL1OffsetBps` z `NANSEN_TOKENS[kPEPE].baseSpreadBps` (25 bps) lub default 20 bps.
+
+Ale prawdziwa magia dzieje sie w **Dynamic Spread** (`getKpepeGridLayers()`), ktory skaluje L1 na podstawie ATR% (Average True Range — miara zmiennosci):
+
+| ATR% | Regime | L1 (bps) | L2 | L3 | L4 | L5 |
+|------|--------|----------|-----|-----|-----|-----|
+| <=0.30% | LOW_VOL | 22 | 37 | 55 | 79 | — |
+| 0.30-1.20% | NORMAL | 22-32 (interpolated) | x1.67 | x2.50 | x3.61 | x4.69 |
+| >=1.20% | HIGH_VOL | **32** | 53 | 80 | 116 | 150 |
+
+kPEPE override: `lowVolL1Bps=22`, `highVolL1Bps=32`, `highVolAtrPctThreshold=1.20`.
+
+Fallback (bez danych ATR): L1=18, L2=30, L3=45, L4=65, L5=150.
+
+**Kluczowa zasada:** Im wieksza zmiennosc, tym szerszy spread. Gdy rynek szaleje (HIGH_VOL), bot stawia ordery dalej od mid — chroni sie przed adverse selection (kupowaniem na szczytach, sprzedawaniem na dolkach). Gdy rynek spi (LOW_VOL), bot zaciesnia spread — wiecej szans na fill, mniejszy zarobek per trade ale wiecej tradow.
+
+**Analogia:** To jak gdyby kantor na lotnisku rozszerzal marze w Sylwestra (duzy ruch, nieprzewidywalnosc) i zaciesnial ja w poniedzialek rano (spokoj).
+
+### 3. Spread Multipliers — rozciaganie lub sciaganie spreadu
+
+Spread multipliers modyfikuja `offsetBps` per warstwa:
+
+```
+bidOffsetBps = layer.offsetBps x spreadMultipliers.bid + inventoryAdjustment
+askOffsetBps = layer.offsetBps x spreadMultipliers.ask + inventoryAdjustment
+```
+
+Co wplywa na spread multipliers:
+
+| Modul | Efekt | Kiedy |
+|-------|-------|-------|
+| `computeSideAutoSpread()` | Inventory ratio + trend + flash crash + Vision | Zawsze |
+| S/R Accumulation | `bidSpread x 1.23` (srAccumSpreadWiden=1.3) | Przy supportcie/resistance |
+| Dynamic TP | spread x 1.5 na closing-side | Micro-reversal z pozycja |
+| Nansen bid/ask factors | Zawsze 1.0 (DISABLED) | Nigdy (wylaczone) |
+
+**Uwaga:** Unholy Trinity (FARTCOIN/HYPE/LIT) dostaje spread x2.0 (calm) lub x6.0 (volatile), ale kPEPE NIE — ma wlasny grid system.
+
+### 4. Inventory Adjustment — asymetryczne przesuwanie
+
+`getInventoryAdjustment(skew, side)` w `grid_manager.ts` dodaje/odejmuje bps od offsetu na podstawie inventory skew:
+
+```
+skewThreshold = 5%
+rawAdjBps = (skew / 0.05) x 10     // +/-10 bps per 5% skew
+capped at +/-15 bps
+```
+
+| Skew | Bid adj | Ask adj | Efekt |
+|------|---------|---------|-------|
+| 0% | 0 | 0 | Symetryczny grid |
+| +10% (LONG) | +15 bps | -15 bps | Bidy dalej (mniej kupuj), aski blizej (zamykaj longa) |
+| -20% (SHORT) | -15 bps | +15 bps | Bidy blizej (zamykaj shorta), aski dalej (mniej shortuj) |
+
+To jest **addytywne** (nie multiplikatywne) — dodawane do offsetu warstwy po przemnozeniu przez spread multiplier.
+
+**Analogia:** Wyobraz sobie wage szalkowa. Gdy jedna strona (np. SHORT) jest za ciezka, bot przesuwa punkt podparcia tak, zeby "ciezsza" strona miala latwiej sie rozladowac. Bidy bliZej = latwiej kupic = zamknac shorta.
+
+### 5. Order Stagger — rozrzucenie orderow w warstwie
+
+Kazda warstwa ma `ordersPerSide = 3` ordery. Zeby nie leZaly dokladnie na tej samej cenie, bot dodaje stagger:
+
+```
+Order 1: offset + 0 bps
+Order 2: offset + 2 bps
+Order 3: offset + 4 bps
+```
+
+To daje "mikroskopiczne" rozrzucenie — 3 ordery rozlozone na 4 bps zamiast jednego duzego orderu. Efekt: lepsze prawdopodobienstwo czesciowego fill (nie "all or nothing") i mniejszy market impact.
+
+### 6. Final Order Price — wzor koncowy
+
+```
+bidPrice = midPrice x (1 - (bidOffsetBps + staggerBps) / 10000)
+askPrice = midPrice x (1 + (askOffsetBps + staggerBps) / 10000)
+```
+
+To jest cena ktora leci na gielde. Caly pipeline od mid price do tego momentu mozna podsumowac:
+
+```
+         midPrice
+            |
+      [Auto-Skew]           przesuwa mid w gore/dol na podstawie skew
+            |
+      skewedMidPrice
+            |
+   +--------+--------+
+   |                  |
+  BID                ASK
+   |                  |
+[layer.offsetBps]  [layer.offsetBps]
+   |                  |
+[x spreadMult]     [x spreadMult]
+   |                  |
+[+ invAdj]         [+ invAdj]
+   |                  |
+[+ stagger]        [+ stagger]
+   |                  |
+[clamp 6-140bps]   [clamp 6-140bps]
+   |                  |
+ bidPrice          askPrice
+```
+
+### 7. Size Multipliers — to nie spread!
+
+Wazne rozroznienie: `sizeMultipliers.bid` / `sizeMultipliers.ask` modyfikuja **rozmiar** orderu, NIE cene:
+
+```
+orderSizeUsd = (layerCapital / (ordersPerSide x 2)) x sizeMultiplier
+```
+
+Gdy widzisz `bid x 0.81` w logach, to znaczy ze bid ordery maja 81% normalnego rozmiaru ($81 zamiast $100), ale **sa na tej samej cenie** co normalnie.
+
+Moduly ktore modyfikuja rozmiar (nie cene):
+- Toxicity Engine (toksyczny flow -> zmniejsz)
+- TimeZone (Asia night -> zwieksz, US open -> zmniejsz)
+- Prediction Bias (h4 BEARISH -> zmniejsz bidy)
+- Momentum Guard (pump -> zmniejsz bidy)
+- INV_AWARE_MG (stuck position -> zwieksz closing side)
+- S/R Accumulation/Reduction (blisko S/R -> asymetria)
+- Bounce Hold (trzymaj pozycje po odbicie od S/R)
+- Breakout TP (silny momentum -> zamknij)
+- Inventory SL (panic -> podwoj closing side)
+
+### 8. Clamp — granice bezpieczenstwa
+
+`clampSpreadBps()` wymusza minimalny i maksymalny spread:
+
+- **Min:** 6-8 bps (zeby nie quotowac za ciasno i nie tracic na fees)
+- **Max:** 120-140 bps (zeby nie quotowac za szeroko i nie byc niewidocznym w orderbooku)
+
+Per-pair overrides mozliwe via `PAIR_SPREAD_LIMITS`.
+
+### 9. Przyklad: kPEPE w HIGH_VOL (ATR=1.8%)
+
+Zalozenia: `mid = $0.003500` (po Auto-Skew), `L1 = 32 bps`, `skew = -15%`, `spreadMult bid = 1.0`, `spreadMult ask = 1.0`.
+
+Inventory adjustment: bid = -15 bps (blizej), ask = +15 bps (dalej).
+
+**L1 Bid (zamykanie shorta — agresywne):**
+```
+offset = 32 x 1.0 + (-15) = 17 bps
+Order 1: $0.003500 x (1 - 17/10000) = $0.003494  (0.17% od mid)
+Order 2: $0.003500 x (1 - 19/10000) = $0.003493  (0.19% od mid)
+Order 3: $0.003500 x (1 - 21/10000) = $0.003493  (0.21% od mid)
+```
+
+**L1 Ask (nowe shorty — pasywne):**
+```
+offset = 32 x 1.0 + 15 = 47 bps
+Order 1: $0.003500 x (1 + 47/10000) = $0.003516  (0.47% od mid)
+Order 2: $0.003500 x (1 + 49/10000) = $0.003517  (0.49% od mid)
+Order 3: $0.003500 x (1 + 51/10000) = $0.003518  (0.51% od mid)
+```
+
+**L2 (53 bps):**
+```
+Bid offset = 53 - 15 = 38 bps  ->  $0.003487  (0.38% od mid)
+Ask offset = 53 + 15 = 68 bps  ->  $0.003524  (0.68% od mid)
+```
+
+**L3 (80 bps):**
+```
+Bid offset = 80 - 15 = 65 bps  ->  $0.003477  (0.65% od mid)
+Ask offset = 80 + 15 = 95 bps  ->  $0.003533  (0.95% od mid)
+```
+
+**L4 (116 bps):**
+```
+Bid offset = 116 - 15 = 101 bps  ->  $0.003465  (1.01% od mid)
+Ask offset = 116 + 15 = 131 bps  ->  $0.003546  (1.31% od mid)
+```
+
+**Asymetria widoczna golymokiem:**
+- Bidy: 0.17% — 1.01% od mid (BLISKO = agresywne zamykanie SHORT)
+- Aski: 0.47% — 1.31% od mid (DALEKO = pasywne shortowanie)
+
+Inventory adjustment przesuwa caly grid — przy SHORT bot agresywniej kupuje (zamyka pozycje) a mniej agresywnie sprzedaje (nie dodaje do pozycji).
+
+### 10. Porownanie rezimow — round-trip spread
+
+Round-trip spread = bid offset + ask offset (ile musialby sie ruszyc rynek zeby bot kupil I sprzedal).
+
+| Rezim | L1 bid (bps) | L1 ask (bps) | Round-trip L1 |
+|-------|-------------|-------------|---------------|
+| LOW_VOL (flat) | 22 | 22 | 44 bps (0.44%) |
+| LOW_VOL (skew -15%) | 7 | 37 | 44 bps |
+| HIGH_VOL (flat) | 32 | 32 | 64 bps (0.64%) |
+| HIGH_VOL (skew -15%) | 17 | 47 | 64 bps |
+| + S/R Accum (spread x 1.3) | 22 | 61 | 83 bps |
+
+**Kluczowa obserwacja:** Round-trip spread jest STALY niezaleznie od skew (inventory adj jest symetryczny: -15 na bid, +15 na ask = suma ta sama). Ale POZYCJA grida jest asymetryczna — przy SHORT bidy sa blizej rynku.
+
+To eleganckie rozwiazanie: bot nie traci na zarobku per round-trip (spread ten sam), ale zmienia PRAWDOPODOBIENSTWO fill na kazdej stronie. Blisze bidy = wieksze prawdopodobienstwo kupna = szybsze zamykanie shorta.
+
+### 11. Lekcje z tego rozdzialu
+
+1. **Spread to nie jedna liczba — to pipeline.** Od mid price do finalnego orderu jest 6+ krokow transformacji. Kazdy modul dodaje swoje "zdanie" — ATR mowi o zmiennosci, inventory adjustment o pozycji, stagger o rozrzuceniu. Efekt koncowy to wypadkowa wielu niezaleznych sygnalow.
+
+2. **Cena vs rozmiar to dwa rozne kanaly.** Spread multipliers (cena) i size multipliers (rozmiar) sa NIEZALEZNE. Bot moze miec ordery na tej samej cenie co zwykle, ale z polowa rozmiaru — lub na dwukrotnie szerszym spreadzie z normalnym rozmiarem. To daje ogromna elastycznosc.
+
+3. **Symetria round-trip z asymetria pozycji.** Inventory adjustment nie zmienia ILE bot zarabia per trade (round-trip staly), ale GDZIE stoi w orderbooku. To jak przesuwanie siatki rybackiej — ta sama siatka, ale w innym miejscu latwiej lapie ryby.
+
+4. **ATR to krol Dynamic Spread.** Jesli ATR jest 0.3% (spokoj), L1 = 22 bps. Jesli ATR to 1.8% (szalenstwo), L1 = 32 bps. Roznica 10 bps moze wydawac sie mala, ale na round-trip to 20 bps — przy 500 tradow dziennie to 100 bps = 1% dodatkowej ochrony.
+
+5. **Clamp to ostatnia linia obrony.** Nawet jesli jakis modul zrobi cos szalonego (np. spread multiplier = 0.01 z powodu buga), clamp zatrzyma wynik w rozsadnych granicach (6-140 bps). Defensive programming w czystej formie.
+
+### Kluczowe pliki
+
+| Plik | Rola w spread pipeline |
+|------|----------------------|
+| `src/mm_hl.ts` | Auto-Skew, Momentum Guard spread mults, Dynamic Spread selection, stagger, clamp |
+| `src/mm/grid_manager.ts` | `getInventoryAdjustment()`, `generateGridOrdersCustom()` — final order price calculation |
+| `src/config/short_only_config.ts` | `DynamicSpreadConfig`, `MomentumGuardConfig` — per-token spread params |
+| `src/signals/market_vision.ts` | `NANSEN_TOKENS[kPEPE].baseSpreadBps` — base spread source |
+
+---
+
+## S/R Pipeline — Zestawienie faz w zaleznosci od progresu
+
+> "Wyobraz sobie ze idziesz wzdluz brzegu rzeki. Im blizej podchodzisz do wody, tym bardziej zmienia sie twoje zachowanie — najpierw zwalniasz, potem zdejmujesz buty, a na samym brzegu klekasz i nabierasz wode. S/R Pipeline dziala dokladnie tak samo — im blizej supportu lub resistance'u, tym bardziej zmienia sie zachowanie bota."
+
+To jest najwazniejszy rozdzial jesli chcesz zrozumiec JAK bot handluje kPEPE. Poprzednie rozdzialy (#33-#37) opisywaly poszczegolne fazy osobno — teraz zobaczymy **jak wspolgraja ze soba**, co sie wlacza kiedy, i jak caly pipeline zachowuje sie w roznych scenariuszach.
+
+### Parametry kPEPE (z `short_only_config.ts`)
+
+Zanim zaczniemy — oto "pokretla" ktore konfiguruja caly S/R system dla kPEPE:
+
+| Parametr | Wartosc | Opis |
+|----------|---------|------|
+| `mgStrongZone` | ~1.86% (ATR/price) | 1xATR strefa — "strong zone" wokol S/R |
+| `srReductionStartAtr` | 2.5 | Strefa redukcji = 2.5xATR (~4.65% od S/R) |
+| `srMaxRetainPct` | 15% | **Granica skew**: Accumulation <= 15%, Reduction > 15% |
+| `srReductionMinSkew` | 5% | Min skew zeby Reduction sie wlaczyla |
+| `srAccumBounceBoost` | 1.8x | Boost bounce-side przy akumulacji |
+| `srAccumFreshMultiplier` | 3.0x | Extra boost na pierwszym dotkniecium S/R |
+| `srAccumCounterReduce` | 0.50 | Redukcja counter-side przy akumulacji |
+| `srBounceHoldMinDistAtr` | 2.0 | Dystans (w ATR) do pelnego release |
+| `srBounceHoldAskReduction` | 0.15 | Min closing-side przy S/R (15%) |
+| `srBreakoutTpScoreThreshold` | 0.40 | Min momentum score dla Breakout TP |
+| `srReductionGraceCandles` | 3 | Grace period (3x15min = 45min) po break |
+
+`srMaxRetainPct` to kluczowy przelacznik — **rozdziela swiat na dwie polowy**: ponizej 15% skew bot AKUMULUJE pozycje, powyzej 15% bot REDUKUJE. Nigdy oba naraz.
+
+### Metafora: Generał na polu bitwy
+
+Pomysl o S/R pipeline jak o generalu dowodzacym armia:
+
+- **S/R Accumulation** = "Rekrutuj zolnierzy" (buduj pozycje gdy masz malo)
+- **S/R Bounce Hold** = "Trzymaj linie!" (nie oddawaj pozycji za wczesnie)
+- **S/R Reduction** = "Realizuj zyski!" (zamykaj pozycje blisko celu)
+- **Breakout TP** = "Szarza!" (agresywnie zamykaj na silnym momentum)
+- **Grace Period** = "Zwiad!" (poczekaj — moze to fakeout)
+
+Generał nie robi wszystkiego naraz. Kazda faza ma swoj moment:
+
+```
+Flat przy supportcie → REKRUTUJ zolnierzy (Accumulation)
+Armia zbudowana      → TRZYMAJ LINIE (Bounce Hold)
+Cena poszla w gore   → Stopniowo REALIZUJ ZYSKI (Reduction)
+Silny ruch           → SZARZA! (Breakout TP)
+S/R przebity?        → ZWIAD (Grace) — moze fakeout?
+```
+
+### Scenariusz A: Bot jest FLAT (skew ~0%) — budowanie pozycji
+
+Wyobraz sobie: cena kPEPE spada w kierunku supportu. Bot nie ma pozycji (flat). Co sie dzieje?
+
+```
+RESISTANCE ─────────────────────────────────────────────── R
+│
+│  Poza strefa — normalny MG (Momentum Guard only)
+│
+│ ─ ─ ─ ─ ─ ─ 4.65% od support ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  Granica strefy
+│
+│  SR_ACCUM: progress 0→100%
+│  bid x1.0→5.4 (fresh boost), ask x1.0→0.17
+│  Im blizej supportu, tym agresywniej kupuje
+│
+│ ─ ─ ─ ─ ─ ─ ~0.93% od support (progress>80%) ─ ─ ─ ─  Prog ask=0
+│
+│  SR_ACCUM: progress 80-100%
+│  bid x5.4 (max), ask=0 (zero shortowania)
+│  BOUNCE_HOLD: tracking only (nie aplikuje redukcji)
+│
+SUPPORT ════════════════════════════════════════════════════ S
+```
+
+**Tabela wartosci** (skew=0%, freshBoost=3.0x):
+
+| Dystans od S | Progress | Faza | bid x | ask x | Co robi |
+|-------------|----------|------|-------|-------|---------|
+| 4.65% (granica) | 0% | SR_ACCUM start | 1.0 | 1.0 | Wchodzi w strefe |
+| 3.50% | 25% | SR_ACCUM | ~2.1 | ~0.63 | Zaczyna kupowac |
+| 2.33% | 50% | SR_ACCUM | ~3.2 | ~0.42 | Mocniej kupuje |
+| 1.16% | 75% | SR_ACCUM | ~4.3 | ~0.26 | Agresywne bidy |
+| 0.93% | 80% | SR_ACCUM (ask=0) | ~4.5 | **0** | Zero askow (flat → nie shortuj) |
+| 0.47% | 90% | SR_ACCUM (ask=0) | ~5.0 | **0** | Max akumulacja |
+| 0% (AT support) | 100% | SR_ACCUM (ask=0) | ~5.4 | **0** | Na supportcie |
+
+**Skad sie biora te liczby?**
+
+Fresh Touch Boost sprawia ze przy skew=0% (calkowicie flat, "pierwsze dotknieciem S/R") akumulacja jest 3x silniejsza:
+```typescript
+freshRatio = (srMaxRetainPct - absSkew) / srMaxRetainPct  // (0.15 - 0.00) / 0.15 = 1.0
+freshBoost = 1.0 + freshRatio * (srAccumFreshMultiplier - 1.0)  // 1.0 + 1.0 * 2.0 = 3.0
+effectiveBounceBoost = srAccumBounceBoost * freshBoost    // 1.8 * 3.0 = 5.4
+effectiveCounterReduce = max(0.05, srAccumCounterReduce / freshBoost)  // max(0.05, 0.50/3.0) = 0.17
+```
+
+Przy progress=100%: `bid = 1.0 + 1.0 * (5.4 - 1.0) = 5.4x`. To znaczy ze kazdy bid order jest **5.4 razy wiekszy** niz normalnie — bot naprawde chce kupic na supportcie!
+
+**Kluczowa lekcja:** `ask=0` przy progress>80% to **tylko** gdy bot jest FLAT lub SHORT. Jesli bot jest juz LONG, ask NIE zeruje sie — potrzebuje askow zeby zamknac longi z zyskiem (patrz Scenariusz B).
+
+### Scenariusz B: Bot ma LONG 12% skew — akumulacja + ochrona
+
+Bot juz zbudowal troche longow (12% skew). Cena jest blisko supportu. Co sie zmienia?
+
+| Dystans od S | Progress | Faza | bid x | ask x | Co robi |
+|-------------|----------|------|-------|-------|---------|
+| 4.65% | 0% | SR_ACCUM start | 1.0 | 1.0 | Wchodzi w strefe, skew<15% |
+| 2.33% | 50% | SR_ACCUM | ~2.6 | ~0.50 | Buduje longi, mniej askow |
+| 0.93% | 80% | SR_ACCUM (has long) | ~3.8 | **x0.35** | ask reduced (nie 0!) — potrzebuje askow zeby zamknac longa z TP |
+| 0.47% | 90% | SR_ACCUM + BOUNCE_HOLD tracking | ~4.2 | **x0.35** | BH sledzi ale nie mnozy |
+| 0% | 100% | SR_ACCUM + BOUNCE_HOLD tracking | ~4.6 | **x0.35** | Na supportcie |
+
+**Kluczowa roznica:** Przy progress>80% z istniejacym LONG, system NIE zeruje askow. Zamiast tego:
+```typescript
+// LONG near support → keep reduced asks for closing
+sizeMultipliers.ask *= (1.0 - (progress / 100) * (1.0 - effectiveCounterReduce))
+// progress=0.89, effectiveCounterReduce=0.36:
+// ask * (1.0 - 0.89 * 0.64) = ask * 0.43
+```
+
+To byl wlasnie **bug #111** ktory naprawilismy 06.03 — wczesniej ask zerowalo sie bezwarunkowo, i bot z LONG 12% mial `sellLevels=0`. Nie mogl zamknac longow nawet gdyby chcial.
+
+**Analogia:** To jak siedziec na plazy z koszem pelnym ryb (longi). Blisko brzegu (supportu) nie rzucasz wiecej sieci do morza (nie shortujesz), ale MUSISZ moc sprzedac ryby ktore juz masz (aski na closing).
+
+### Scenariusz C: Bot ma LONG 20% skew → cena odbija w gore
+
+Tutaj skew>15% = Accumulation OFF, Reduction OFF (bo idzie w dobra strone). **BOUNCE_HOLD przejmuje**.
+
+```
+RESISTANCE ─────────────────────────────────────────────── R
+│
+│  Poza strefa — normalny MG
+│
+│ ─ ─ ─ ─ ─ ─ 2.0 ATR (~3.7%) od S ─ ─ ─ ─ ─ ─ ─ ─ ─  BOUNCE_HOLD RELEASED
+│
+│  BOUNCE_HOLD: progressive release 0%→100%
+│  closing-side: ask x0.15→1.00
+│
+│ ─ ─ ─ ─ ─ ─ 1.0 ATR (~1.86%) od S ─ ─ ─ ─ ─ ─ ─ ─   50% release
+│
+│  BOUNCE_HOLD: ask x0.15→0.58
+│  Troche wiecej askow ale nadal chroni longi
+│
+│ ─ ─ ─ ─ ─ ─ 0 ATR (AT support) ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+│
+│  BOUNCE_HOLD: ask x0.15 (min closing)
+│  Prawie zero zamykania — trzymaj pozycje!
+│
+SUPPORT ════════════════════════════════════════════════════ S
+```
+
+| Dystans od S (ATR) | BH Progress | Faza | ask x | Co robi |
+|--------------------|-------------|------|-------|---------|
+| 0.0 ATR (na S) | 0% | BOUNCE_HOLD | **0.15** | Min closing — trzymaj longi |
+| 0.5 ATR | 25% | BOUNCE_HOLD | 0.36 | Troche zamykania |
+| 1.0 ATR | 50% | BOUNCE_HOLD | 0.58 | Polowa normalnych askow |
+| 1.5 ATR | 75% | BOUNCE_HOLD | 0.79 | Prawie normalnie |
+| 2.0 ATR (threshold) | 100% | **RELEASED** | **1.00** | Bounce potwierdzone, pelne aski |
+| >2.0 ATR | — | Normalny MG | 1.00 | BH skasowane |
+
+**Jak to dziala w kodzie:**
+```typescript
+const holdProgressPct = Math.min(100, (distFromSr / srBounceHoldMinDistAtr) * 100)
+const askReduction = srBounceHoldAskReduction + (holdProgressPct / 100) * (1.0 - srBounceHoldAskReduction)
+// Na supportcie (dist=0): 0.15 + 0 * 0.85 = 0.15
+// W polowie (dist=1.0ATR): 0.15 + 0.5 * 0.85 = 0.575
+// Przy threshold (dist=2.0ATR): 0.15 + 1.0 * 0.85 = 1.00
+```
+
+**Dlaczego to jest wazne:** Bez Bounce Hold, MG boostowal aski jak cena szla w gore (bo pump = sprzedawaj). S/R Accum budowala longi za bid x5.4 przy supportcie... a potem Momentum Guard zamykal je za ask x1.30 po 0.5% wzroscie. Zysk z 2h budowania longow zjadany w 5 minut. Bounce Hold chroni te pozycje dopoki bounce sie nie rozwinie.
+
+**Analogia:** Bounce Hold to jak powiedzenie "nie sprzedawaj jabloni zaraz po posadzeniu — poczekaj az urosnie".
+
+### Scenariusz D: Bot ma SHORT 25% skew → cena spada do support (TP!)
+
+Skew>15%, SHORT, cena spada = profitable → **S/R Reduction aktywna**. To jest moment take-profit.
+
+```
+RESISTANCE ─────────────────────────────────────────────── R
+│
+│  Poza strefa — normalny MG
+│
+│ ─ ─ ─ ─ ─ ─ 4.65% od support ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─  SR_REDUCTION start
+│
+│  SR_REDUCTION: progress 0→60%
+│  ask progresywnie maleje (stop building shorts)
+│  bid progresywnie rosnie (close shorts = take profit)
+│
+│ ─ ─ ─ ─ ─ ─ ~1.86% od support (progress>60%) ─ ─ ─ ─  ask=0 prog
+│
+│  SR_REDUCTION: progress 60→100%
+│  ask=0 (ZERO nowych shortow!)
+│  bid x1.6→2.0 (agresywne zamykanie)
+│
+SUPPORT ════════════════════════════════════════════════════ S
+```
+
+| Dystans od S | Progress | Faza | ask x | bid x | Co robi |
+|-------------|----------|------|-------|-------|---------|
+| 4.65% (granica) | 0% | SR_REDUCTION start | x1.0 | x1.0 | Wchodzi w strefe |
+| 3.50% | 25% | SR_REDUCTION | x0.75 | x1.25 | Mniej shortow, wiecej close |
+| 2.33% | 50% | SR_REDUCTION | x0.50 | x1.50 | Polowa shortow, 1.5x close |
+| 1.86% | 60% | SR_REDUCTION (ask=0) | **0** | x1.60 | Zero nowych, boost close |
+| 0.93% | 80% | SR_REDUCTION (ask=0) | **0** | x1.80 | Agresywne zamykanie |
+| 0% | 100% | SR_REDUCTION (ask=0) | **0** | x2.00 | Maximum take profit |
+
+**Jak to dziala w kodzie:**
+```typescript
+if (progressPct > 60) {
+  sizeMultipliers.ask = 0  // ZERO new shorts — very close to support
+} else {
+  sizeMultipliers.ask *= (1.0 - progressPct / 100)  // Progressive: 50% → ask x0.50
+}
+sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (srClosingBoostMult - 1.0))
+// progress=80%: bid *= (1.0 + 0.80 * 1.0) = bid * 1.80
+```
+
+**Kluczowy warunek:** `srReductionMinSkew = 5%`. Reduction wlacza sie TYLKO gdy `|skew| > 5%`. Przy skew 3% = "za malo pozycji zeby redukowac" → normal MM. To chroni przed sytuacja gdzie bot probowalby "zamykac" pozycje ktorej prawie nie ma.
+
+### Scenariusz E: BREAKOUT TP (niezalezny od S/R distance)
+
+Breakout TP to niezalezny system ktory patrzy TYLKO na momentum score, nie na odleglosc od S/R. Wlacza sie przy silnym momentum w kierunku pozycji.
+
+| Warunek | Faza | bid x | ask x |
+|---------|------|-------|-------|
+| LONG + momentumScore > 0.40 | BREAKOUT_TP | / 1.5 (0.67) | x1.5 | Agresywne zamykanie longow |
+| SHORT + momentumScore < -0.40 | BREAKOUT_TP | x1.5 | / 1.5 (0.67) | Agresywne zamykanie shortow |
+
+**Jest MULTIPLICATIVE z reszta** — czyli mnozy sie z wartosciami z S/R Reduction/Accumulation. Jesli S/R Reduction daje bid x1.80, a Breakout TP daje bid x1.5, finalny wynik to bid x2.70. Oba systemy sie zgadzaja: "ZAMYKAJ!".
+
+**Dlaczego prog 0.40 a nie 0.50 (default)?** kPEPE jest volatile — momentum jest "prawdziwy" szybciej niz na BTC. Gdy momentum score kPEPE > 0.40, to juz powazny ruch.
+
+**Wazne:** Breakout TP NIE jest blokowany przez Bounce Hold. Bounce Hold chroni pozycje, ale Breakout TP to safety valve — jesli momentum jest naprawde silny (score > 0.40), pozycja powinna byc zamykana niezaleznie od odleglosci od S/R.
+
+### Scenariusz F: GRACE PERIOD po przebiciu S/R
+
+Grace Period to "zwiad" — gdy cena przebija support lub resistance, bot CZEKA zanim zacznie redukowac pozycje. Dlaczego? Bo wiele przebic to fakeouty.
+
+| Event | Prox | Faza | Efekt |
+|-------|------|------|-------|
+| Cena dotyka S | -1.0 | Normal | S/R systemy dzialaja |
+| Candle close < S | **-1.2** | GRACE START | 45min timer, **Reduction suppressed** |
+| Grace active (0-45min) | -1.2 | GRACE | Accumulation kontynuuje (fakeout?) |
+| Grace expired | -1.2 | REDUCTION | Breakdown potwierdzony, redukcja OK |
+| Cena wraca > S | > -1.2 | GRACE CLEARED | Accumulation kontynuuje |
+
+**Kluczowe rozroznienie: prox=-1.0 vs prox=-1.2**
+
+- **prox=-1.0** (AT_SUPPORT): Tick price dotknal supportu. Moze to byc wick — cena moze od razu sie odbic. Nie jest to wystarczajacy powod do paniki.
+- **prox=-1.2** (BROKEN_SUPPORT): **15-minutowa swieca ZAMKNELA SIE** ponizej supportu. To nie wick — to potwierdzone przelamanie. Dopiero TERAZ grace timer startuje.
+
+```typescript
+// BROKEN = candle close confirmed, nie tick price
+if (hasLongPos && mgProxSignal <= -1.2) {
+  // Start grace timer — czekaj 3 candles (45 min) na potwierdzenie
+}
+```
+
+**Analogia:** Wyobraz sobie ze pilnujesz mostu. Ktos przechodzi na druga strone (tick price przebija support). Ale moze zawroci! Czekasz 45 minut. Jesli nie wroci — most przejety, wycofuj sie (reduction). Jesli wroci — false alarm, kontynuuj obrone (accumulation).
+
+### Pelna mapa — co jest aktywne kiedy
+
+To jest "master chart" calego S/R pipeline. Os X to odleglosc od S/R, os Y to rozmiar pozycji (skew):
+
+```
+skew
+ ↑
+ │
+45%│ ............ INVENTORY_SL (panic jesli drawdown>2.5xATR) .........
+   │
+25%│ SR_REDUCTION  │  SR_REDUCTION  │  BOUNCE_HOLD    │  normalny MG
+   │ ask=0,bid x2  │  progresywna   │  ask x0.15→1.0  │
+   │               │                │                  │
+15%├───────────────┤────────────────┤──────────────────┤──────────────
+   │               │                │                  │
+   │ SR_ACCUM      │  SR_ACCUM      │  BOUNCE_HOLD     │  normalny MG
+   │ ask=0/reduced │  bid x5.4      │  tracking only   │
+   │ bid x5.4      │  ask x0.17-0.35│  (SR_ACCUM owns) │
+ 0%│               │                │                  │
+   └───────────────┴────────────────┴──────────────────┴──────────────→ dystans
+   AT support     progress>80%    1.0 ATR           2.0 ATR        daleko
+   (0%)           (~0.93%)        (~1.86%)          (~3.72%)       (>4.65%)
+```
+
+**Wzajemne wykluczanie — kto z kim moze:**
+
+| Faza A | Faza B | Relacja |
+|--------|--------|---------|
+| SR_ACCUM (skew<=15%) | SR_REDUCTION (skew>15%) | **Exclusive** — nigdy oba naraz (rozne warunki skew) |
+| SR_ACCUM | BOUNCE_HOLD | **Sekwencyjne** — BH tracking only gdy SA aktywne, BH przejmuje po SA |
+| SR_REDUCTION | BOUNCE_HOLD | BH cleared gdy Reduction aktywna (pozycja sie zmniejsza) |
+| BREAKOUT_TP | Wszystkie | **Additive** — multiplicative z reszta, nie blokowany przez BH |
+| GRACE | SR_REDUCTION | Grace **suppressuje** Reduction (czekaj na potwierdzenie breaku) |
+| INV_AWARE_MG | SR_ACCUM | INV_AWARE **suppressed** blisko S/R (prox<=-0.5), SA ma priorytet |
+
+Zauwaz ze `srMaxRetainPct=15%` to jedyna granica miedzy Accumulation a Reduction. Ponizej = buduj. Powyzej = zamykaj. Prosty przelacznik, ale efekty dramatyczne.
+
+### Pelny cykl zycia pozycji (mean-reversion)
+
+Oto jak wygladaja wszystkie fazy w pelnym cyklu — od flat przy supportcie do flat przy resistance. To jest "zloty scenariusz" bota, gdzie wszystko dziala idealnie:
+
+```
+[1] Cena przy SUPPORT, flat     → SR_ACCUM: buduj LONGI (bid x5.4, ask=0)
+[2] Skew rosnie do 15%          → SR_ACCUM off, BOUNCE_HOLD przejmuje (ask x0.15)
+[3] Cena odbija w gore          → BOUNCE_HOLD: progressive release (ask x0.15→1.0)
+[4] Bounce 2.0xATR              → BOUNCE_HOLD released, normalny MG
+[5] Silny pump (score>0.40)     → BREAKOUT_TP: agresywne zamykanie (ask x1.5)
+[6] Cena przy RESISTANCE        → SR_REDUCTION: zamykaj reszte (ask x2.0, bid=0)
+[7] Flat przy RESISTANCE        → SR_ACCUM: buduj SHORTY (mirror krokow 1-6)
+```
+
+**W prawdziwym swiecie** ten cykl rzadko jest tak czysty. Cena moze oscylowac wokol supportu przez godziny, fakeouty moga triggerowac Grace Period, a momentum score moze sie zmieniac z tick na tick. Ale FRAMEWORK jest ten sam — bot wie CO robic w KAZDYM punkcie tego cyklu.
+
+### Interakcje z innymi systemami
+
+S/R pipeline nie dziala w prozni. Oto jak wspolpracuje z reszta:
+
+| System | Interakcja z S/R |
+|--------|-----------------|
+| **Momentum Guard** | Bazowe multipliers (bid/ask) — S/R mnozy na wierzch. MG + SR_ACCUM: bid x1.30 * x5.4 = bid x7.0 (ultra agresywne) |
+| **Auto-Skew** | Przesuwa mid price — S/R pracuje na przesunietem gridzie. Komplementarne. |
+| **MIN_PROFIT** | Filtruje ordery < 10bps od entry. S/R reduction = profitable → MIN_PROFIT NIE filtruje (ordery daleko od entry) |
+| **Inventory SL** | Panic mode przy ekstremalnym skew+drawdown. Ma wyzszy priorytet niz S/R Reduction (overriduje bid/ask) |
+| **Dynamic Spread** | ATR-based layer scaling. Niezalezny od S/R — zmienia SPREAD, nie SIZE |
+| **Prediction Bias** | h4 prediction. Multiplicative z S/R. BEARISH prediction + SR_ACCUM at support = bid x5.4 * x0.92 = bid x4.97 |
+
+### Kluczowe pliki
+
+| Plik | Rola w S/R pipeline |
+|------|---------------------|
+| `src/mm_hl.ts` (~8411-8728) | Cala logika S/R: Reduction, Grace, Accumulation, Bounce Hold, Breakout TP |
+| `src/config/short_only_config.ts` | Config: `MomentumGuardConfig` interface, defaults, kPEPE overrides |
+| `src/signals/market_vision.ts` | S/R levels z 1h candle bodies (supportBody12h, resistanceBody12h) |
+
+### 5 lekcji z budowania S/R pipeline
+
+1. **Jedna granica, dwa swiaty.** `srMaxRetainPct=15%` to jedyny przelacznik miedzy "buduj pozycje" a "zamykaj pozycje". Gdy pierwszy raz go ustawialismy na 8%, akumulacja stopowala za wczesnie (bug #106). Podniesienie do 15% pozwolilo botowi budowac wieksza pozycje zanim zaczyna redukowac. Prosty parametr — ogromny efekt.
+
+2. **Nie zeruj askow gdy masz longi.** Bug #111 — najsubtelniejszy bug w calym pipeline. `ask=0` blisko supportu ma sens gdy bot jest flat (nie chcesz shortowac bounce). Ale gdy bot jest LONG, potrzebuje askow zeby ZAMKNAC longi z zyskiem. Rozwiazanie: sprawdzaj `hasAnyLong` przed zerowaniem.
+
+3. **Grace Period to cierpliwosc.** Wiele breakow to fakeouty — cena przelamuje support, wraca po 20 minutach, i bot stracilby pozycje gdyby od razu zaczal redukowac. 45 minut cierpliwosci (3 candles 15m) to mala cena za unikniecie falszywych sygnałow.
+
+4. **Progressive > Binary.** Kazda faza w pipeline jest PROGRESYWNA (0%→100%), nie binarna (ON/OFF). Bounce Hold nie robi "ask=0 → ask=1.0" — robi "ask x0.15 → x0.36 → x0.58 → x0.79 → x1.00". To daje gladkie przejscia i unika nagłych skokow w zachowaniu grida.
+
+5. **Multiplicative composition.** Kazdy system mnozy `sizeMultipliers.bid/ask` — wynik to iloczyn WSZYSTKICH modulow. Gdy 3 systemy sie zgadzaja (MG x1.30 * SR_REDUCTION x1.80 * BREAKOUT_TP x1.50 = bid x3.51), efekt jest potezny. Gdy sie nie zgadzaja — wzajemnie sie neutralizuja. To jest elegancja multiplicative composition: nie musisz pisac regul "co robic gdy A i B sie nie zgadzaja" — matematyka robi to za ciebie.

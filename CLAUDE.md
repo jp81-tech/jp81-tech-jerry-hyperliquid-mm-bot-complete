@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-05
+- Data: 2026-03-06
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -43,6 +43,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 6 marca 2026
+
+### 111. Fix: SR_ACCUM ask=0 when LONG near support — sellLevels=0 bug (06.03)
+
+**Problem:** kPEPE (mm-pure) miał **0 sell orderów** (`sellLevels=0`, `sellNotional=$0.00`). Bot był LONG (skew=12%) przy supportie, ale nie mógł zamknąć pozycji bo S/R Accumulation zerowała aski.
+
+**Root cause:** `progress > 0.80` w S/R Accumulation ustawiał `sizeMultipliers.ask = 0` bezwarunkowo — "blisko supportu = nie shortuj". Ma sens gdy bot jest FLAT (nie chcesz otwierać shortów), ale NIE gdy bot jest LONG (potrzebujesz asków żeby **zamknąć** longi z zyskiem).
+
+**Fix w `mm_hl.ts` (~8565):**
+```typescript
+// SUPPORT block: progress > 0.80 → ask=0 ONLY if not LONG
+} else if (progress > 0.80 && !hasAnyLong) {
+  sizeMultipliers.ask = 0  // FLAT/SHORT near support → zero asks (don't short the bounce)
+} else if (progress > 0.80 && hasAnyLong) {
+  // LONG near support → keep reduced asks for closing (same progressive formula)
+  sizeMultipliers.ask *= (1.0 - progress * (1.0 - effectiveCounterReduce))
+}
+
+// RESISTANCE block (mirror): progress > 0.80 → bid=0 ONLY if not SHORT
+} else if (progress > 0.80 && !hasAnyShort) {
+  sizeMultipliers.bid = 0  // FLAT/LONG near resistance → zero bids
+} else if (progress > 0.80 && hasAnyShort) {
+  sizeMultipliers.bid *= (1.0 - progress * (1.0 - effectiveCounterReduce))
+}
+```
+
+**Wartości po fix (kPEPE, progress=89%, effectiveCounterReduce=0.36):**
+- SR_ACCUM: `ask × (1.0 - 0.89 × 0.64) = ask × 0.43` (was: ask=0)
+- BOUNCE_HOLD: `ask × 0.27` (additional reduction)
+- Wynik: `sellLevels=6, sellNotional=$578` (was: 0)
+
+**Log:** `🔄 [SR_ACCUM] kPEPE: SUPPORT → accumulate LONGS — progress=89% ... HAS_LONG→ask_reduced ... ask×0.35`
+
+**Pliki:** `src/mm_hl.ts` (SUPPORT block ~8565, RESISTANCE block ~8604)
 
 ---
 
