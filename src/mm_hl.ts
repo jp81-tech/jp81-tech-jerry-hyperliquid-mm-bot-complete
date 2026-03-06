@@ -8415,6 +8415,60 @@ class HyperliquidMMBot {
             )
           }
 
+          // === 📊 L2 ORDER BOOK IMBALANCE (OBI) MODULATOR ===
+          // Reads top 5 levels of L2 book to detect directional pressure.
+          // Positive imbalance (more bids) = bullish pressure → slightly boost bids, reduce asks.
+          // Negative imbalance (more asks) = bearish pressure → slightly boost asks, reduce bids.
+          // Wall detection: large liquidity block (>$50K) on one side → reduce orders on that side
+          // (don't compete with a whale wall, place liquidity on the opposite side).
+          // Soft modulator: max ±10% adjustment. Dead zone ±0.15 to avoid noise.
+          const obStats = this.analyzeOrderBook(pair)
+          let obiApplied = false
+          if (obStats.imbalance !== 0 || obStats.wallDetected) {
+            const OBI_DEAD_ZONE = 0.15
+            const OBI_MAX_EFFECT = 0.10  // max ±10% size adjustment
+
+            // 1. Imbalance-based size adjustment
+            if (Math.abs(obStats.imbalance) > OBI_DEAD_ZONE) {
+              // Scale linearly from dead zone to ±1.0 → 0 to OBI_MAX_EFFECT
+              const rawEffect = (Math.abs(obStats.imbalance) - OBI_DEAD_ZONE) / (1.0 - OBI_DEAD_ZONE)
+              const effect = Math.min(rawEffect, 1.0) * OBI_MAX_EFFECT
+
+              if (obStats.imbalance > 0) {
+                // More bids in book = bullish pressure → lean into bids, pull back asks
+                sizeMultipliers.bid *= (1.0 + effect)
+                sizeMultipliers.ask *= (1.0 - effect)
+              } else {
+                // More asks in book = bearish pressure → lean into asks, pull back bids
+                sizeMultipliers.bid *= (1.0 - effect)
+                sizeMultipliers.ask *= (1.0 + effect)
+              }
+              obiApplied = true
+            }
+
+            // 2. Whale wall adjustment — reduce orders on the wall side (don't compete)
+            if (obStats.wallDetected) {
+              if (obStats.wallSide === 'bid') {
+                // Big bid wall = strong support → reduce our bids (wall provides liquidity), boost asks
+                sizeMultipliers.bid *= 0.85
+                sizeMultipliers.ask *= 1.05
+              } else if (obStats.wallSide === 'ask') {
+                // Big ask wall = strong resistance → reduce our asks (wall provides liquidity), boost bids
+                sizeMultipliers.ask *= 0.85
+                sizeMultipliers.bid *= 1.05
+              }
+              obiApplied = true
+            }
+
+            if (obiApplied && this.tickCount % 20 === 0) {
+              console.log(
+                `📊 [OBI] ${pair}: imbalance=${obStats.imbalance.toFixed(3)} ` +
+                `wall=${obStats.wallDetected ? obStats.wallSide.toUpperCase() : 'none'} ` +
+                `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)}`
+              )
+            }
+          }
+
           // === 📉 S/R PROGRESSIVE REDUCTION (Take Profit at S/R) ===
           // When approaching S/R with a profitable position → progressively close
           // SHORT approaching support (profitable) → reduce asks (stop building), boost bids (close shorts)
