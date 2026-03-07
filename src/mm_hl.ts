@@ -123,8 +123,9 @@ const IS_SM_FOLLOWER_BOT = BOT_MODE === 'SM_FOLLOWER'
 const MM_ONLY_PAIRS = (process.env.MM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
 const SM_ONLY_PAIRS = (process.env.SM_ONLY_PAIRS || '').split(',').map(s => s.trim()).filter(Boolean)
 
-const botModeSuffix = BOT_MODE !== 'UNIFIED' ? `_${BOT_MODE.toLowerCase()}` : ''
-console.log(`\n🤖 BOT_MODE=${BOT_MODE}`)
+const BOT_INSTANCE = process.env.BOT_INSTANCE || ''  // e.g. 'virtual' — disambiguates multiple PURE_MM bots
+const botModeSuffix = (BOT_MODE !== 'UNIFIED' ? `_${BOT_MODE.toLowerCase()}` : '') + (BOT_INSTANCE ? `_${BOT_INSTANCE}` : '')
+console.log(`\n🤖 BOT_MODE=${BOT_MODE}${BOT_INSTANCE ? ` | INSTANCE=${BOT_INSTANCE}` : ''}`)
 console.log(`💾 State file: data/bot_state${botModeSuffix}.json`)
 if (IS_PURE_MM_BOT) console.log(`📊 PURE_MM pairs: ${MM_ONLY_PAIRS.join(', ') || '(all)'} | PnL filter: ${MM_ONLY_PAIRS.join(', ') || 'none'}`)
 else if (IS_SM_FOLLOWER_BOT) console.log(`🐋 SM_FOLLOWER pairs: ${SM_ONLY_PAIRS.join(', ') || '(all)'} | PnL filter: ${SM_ONLY_PAIRS.join(', ') || 'none'}`)
@@ -3850,7 +3851,7 @@ class HyperliquidMMBot {
     })
     this.marketVision = new MarketVisionService(this.api)
     // Per-BOT_MODE state file: separate daily PnL tracking for each bot
-    const stateFileSuffix = BOT_MODE !== 'UNIFIED' ? `_${BOT_MODE.toLowerCase()}` : ''
+    const stateFileSuffix = botModeSuffix
     const stateFilePath = path.join(process.cwd(), `data/bot_state${stateFileSuffix}.json`)
     this.stateManager = new StateManager(stateFilePath)
     this.lastFillTimestamp =
@@ -4612,7 +4613,7 @@ class HyperliquidMMBot {
 
         // 🤖 BOT_MODE overlap prevention — write active pairs file + check other mode
         if (BOT_MODE !== 'UNIFIED') {
-          const activePairsFile = `/tmp/mm_active_pairs_${BOT_MODE.toLowerCase()}.json`
+          const activePairsFile = `/tmp/mm_active_pairs${botModeSuffix}.json`
           fs.writeFileSync(activePairsFile, JSON.stringify({
             mode: BOT_MODE, pairs: activePairs, pid: process.pid, updatedAt: new Date().toISOString()
           }))
