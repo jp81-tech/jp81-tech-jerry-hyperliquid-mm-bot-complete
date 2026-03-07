@@ -8605,6 +8605,39 @@ class HyperliquidMMBot {
             }
           }
 
+          // === 🛡️ BREAKEVEN HARD BLOCK (NEW: 07.03.2026) ===
+          // CRITICAL FIX: If we have LONG position AND we're underwater (mid < entry) AND near support
+          // → ZERO ASKS. Bot MUST NOT sell below average entry price at S/R levels.
+          // This prevents realizing losses when accumulating at support.
+          // Inverse for SHORT at resistance: ZERO BIDS when mid > entry (underwater on short)
+          if (position && mgAtr > 0 && accumZone > 0) {
+            const entryPrice = position.entryPrice || 0
+            const hasLongPos = actualSkew > 0.01
+            const hasShortPos = actualSkew < -0.01
+            const nearSupport = mgSupportBody > 0 && mgSupportDist < accumZone
+            const nearResistance = mgResistBody > 0 && mgResistDist < accumZone
+
+            // LONG + underwater + near support = BLOCK ASKS
+            if (hasLongPos && entryPrice > 0 && midPrice < entryPrice && nearSupport) {
+              const underwaterPct = ((entryPrice - midPrice) / entryPrice) * 100
+              sizeMultipliers.ask = 0
+              console.log(
+                `🛡️ [BREAKEVEN_BLOCK] ${pair}: LONG underwater ${underwaterPct.toFixed(2)}% at SUPPORT → BLOCKING ASKS ` +
+                `(entry=${entryPrice.toFixed(6)} mid=${midPrice.toFixed(6)})`
+              )
+            }
+
+            // SHORT + underwater (mid > entry) + near resistance = BLOCK BIDS
+            else if (hasShortPos && entryPrice > 0 && midPrice > entryPrice && nearResistance) {
+              const underwaterPct = ((midPrice - entryPrice) / entryPrice) * 100
+              sizeMultipliers.bid = 0
+              console.log(
+                `🛡️ [BREAKEVEN_BLOCK] ${pair}: SHORT underwater ${underwaterPct.toFixed(2)}% at RESISTANCE → BLOCKING BIDS ` +
+                `(entry=${entryPrice.toFixed(6)} mid=${midPrice.toFixed(6)})`
+              )
+            }
+          }
+
           // === 🔄 S/R ACCUMULATION (Build Position at S/R) ===
           // When at S/R with small/no position → actively build in bounce direction
           // At support: boost bids (buy), reduce asks (don't sell), widen bid spread (buy below support)
