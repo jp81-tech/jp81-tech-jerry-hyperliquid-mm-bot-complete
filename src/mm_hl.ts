@@ -8974,6 +8974,33 @@ class HyperliquidMMBot {
           }
         }
 
+        // === ⚓ VWAP-AWARE SKEW MODIFIER ===
+        // Price above VWAP (premium) → reduce bids, boost asks (lean short)
+        // Price below VWAP (discount) → boost bids, reduce asks (lean long)
+        const vwapDist = mvAnalysisMg?.vwapDistance ?? 0
+        if (mvAnalysisMg?.vwap && Math.abs(vwapDist) > 0.02) {
+          const vwapStrength = Math.min(1.0, (Math.abs(vwapDist) - 0.02) / 0.03) // 0→1 over 2-5%
+          const vwapMod = 1.0 - 0.20 * vwapStrength // 0.80 at max
+
+          if (vwapDist > 0) {
+            // Premium: reduce bids (less buying above fair value), boost asks
+            sizeMultipliers.bid *= vwapMod
+            sizeMultipliers.ask *= (2.0 - vwapMod) // 1.20 at max
+          } else {
+            // Discount: boost bids (buy below fair value), reduce asks
+            sizeMultipliers.bid *= (2.0 - vwapMod) // 1.20 at max
+            sizeMultipliers.ask *= vwapMod
+          }
+
+          if (this.tickCount % 20 === 0) {
+            console.log(
+              `⚓ [VWAP] ${pair}: vwap=$${mvAnalysisMg!.vwap.toFixed(7)} dist=${(vwapDist * 100).toFixed(2)}% ` +
+              `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
+              `(${vwapDist > 0 ? 'PREMIUM — lean short' : 'DISCOUNT — lean long'})`
+            )
+          }
+        }
+
         // === ⚖️ AUTO-SKEWING (Inventory-based Price Shifting) ===
         // Shift the entire grid center based on position — closing side becomes aggressive,
         // opening side becomes passive. "Bot oszukuje samego siebie" — modyfikuje mid price.

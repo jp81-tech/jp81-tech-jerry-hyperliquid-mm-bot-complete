@@ -294,6 +294,8 @@ export type PairAnalysis = {
   supportBody12h: number; // Short-term support from 1h candle bodies (last 24 = 24h) for MG proximity
   resistanceBody12h: number; // Short-term resistance from 1h candle bodies (last 24 = 24h) for MG proximity
   lastCandle15mClose: number; // Last CLOSED 15m candle close price (for confirmed S/R break detection)
+  vwap: number; // Rolling 24h VWAP from 1h candles — "fair value" gravity anchor
+  vwapDistance: number; // (price - vwap) / vwap — positive = premium, negative = discount
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
   isFlashCrash: boolean; // True if last candle > 3% move
   visualAnalysis?: VisualAnalysis; // AI Vision output
@@ -469,6 +471,27 @@ export class MarketVisionService {
             const recent1h = candles.slice(-stfLookback);
             supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
             resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
+          }
+        }
+
+        // Rolling 24h VWAP from 1h candles — "fair value" gravity anchor for grid
+        // VWAP = Sum(TypicalPrice × Volume) / Sum(Volume) over last 24 1h candles
+        let vwap = 0;
+        let vwapDistance = 0;
+        const vwapLookback = Math.min(24, candles.length);
+        if (vwapLookback >= 12) {
+          const vwapCandles = candles.slice(-vwapLookback);
+          let sumTpv = 0;
+          let sumVol = 0;
+          for (const c of vwapCandles) {
+            const tp = (c.h + c.l + c.c) / 3;
+            sumTpv += tp * c.v;
+            sumVol += c.v;
+          }
+          if (sumVol > 0) {
+            vwap = sumTpv / sumVol;
+            const currentPrice = candles[candles.length - 1].c;
+            vwapDistance = (currentPrice - vwap) / vwap;
           }
         }
 
@@ -725,6 +748,8 @@ export class MarketVisionService {
           supportBody12h,
           resistanceBody12h,
           lastCandle15mClose,
+          vwap,
+          vwapDistance,
           supportDist: distSup,
           resistanceDist: distRes,
           activeCandlePattern,
