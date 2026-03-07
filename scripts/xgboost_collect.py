@@ -9,7 +9,7 @@ Runs every 15 min via cron. Computes 62 features from:
 Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
 Backfills labels (1h, 4h, 12h price change) for older rows.
 
-Feature vector (65 features):
+Feature vector (76 features):
   [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
           tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
           volumeRatio/5, volatility/10, bbWidth/20, ATR_%
@@ -28,6 +28,9 @@ Feature vector (65 features):
   [59-61] Derived: volume_momentum, price_acceleration, volume_price_divergence
   [62-64] BTC prediction proxy: btc_pred_direction (-1/0/+1), btc_pred_change (tanh),
           btc_pred_confidence (0-1)
+  [65-72] 15m candle: rsi_15m, change_15m, change_1h_15m, ema9_ema21_cross_15m,
+          momentum_15m, volatility_15m, body_ratio_15m, consecutive_dir_15m
+  [73-75] Tier-2: gap_detection, range_expansion, rsi_4h
 """
 
 import json
@@ -427,137 +430,14 @@ def compute_extra_features(token: str, candles: list[dict], meta_ctx: list[dict]
     ]
 
 
-def compute_candle_features(candles: list[dict]) -> list[float]:
-    """Compute 15 candlestick pattern features from OHLC candles.
-
-    Features [30-44]:
-      [30] hammer          — long lower shadow, small upper (reversal bullish)
-      [31] shooting_star   — long upper shadow, small lower (reversal bearish)
-      [32] engulfing_bull  — green candle engulfs previous red candle
-      [33] engulfing_bear  — red candle engulfs previous green candle
-      [34] doji            — tiny body vs range (indecision)
-      [35] pin_bar_bull    — lower shadow > 60% of range (demand rejection)
-      [36] pin_bar_bear    — upper shadow > 60% of range (supply rejection)
-      [37] marubozu_bull   — green candle, body > 90% of range (strong buying)
-      [38] marubozu_bear   — red candle, body > 90% of range (strong selling)
-      [39] inside_bar      — current H/L within previous H/L (consolidation)
-      [40] three_crows     — 3 consecutive red candles with large bodies
-      [41] three_soldiers  — 3 consecutive green candles with large bodies
-      [42] spinning_top    — both shadows > body (uncertainty)
-      [43] body_ratio      — body / range [0-1] (1=marubozu, 0=doji)
-      [44] wick_skew       — (upper - lower shadow) / range [-1, 1]
-    """
-    zeros = [0.0] * 15
-    if len(candles) < 3:
-        return zeros
-
-    # Current and previous candles
-    c0 = candles[-1]  # current
-    c1 = candles[-2]  # previous
-    c2 = candles[-3]  # 2 candles ago
-
-    o0, h0, l0, cl0 = c0["o"], c0["h"], c0["l"], c0["c"]
-    o1, h1, l1, cl1 = c1["o"], c1["h"], c1["l"], c1["c"]
-    o2, h2, l2, cl2 = c2["o"], c2["h"], c2["l"], c2["c"]
-
-    # Derived values for current candle
-    rng0 = h0 - l0
-    if rng0 <= 0:
-        return zeros
-    body0 = abs(cl0 - o0)
-    upper0 = h0 - max(o0, cl0)
-    lower0 = min(o0, cl0) - l0
-    is_green0 = cl0 > o0
-
-    # Previous candle
-    rng1 = h1 - l1
-    body1 = abs(cl1 - o1) if rng1 > 0 else 0
-    is_green1 = cl1 > o1
-
-    # 2 candles ago
-    body2 = abs(cl2 - o2)
-    is_green2 = cl2 > o2
-
-    # [30] Hammer: long lower shadow (>2x body), small upper shadow (<20% body)
-    hammer = 1.0 if (lower0 > 2 * body0 and upper0 < 0.3 * body0 and body0 > 0) else 0.0
-
-    # [31] Shooting Star: long upper shadow (>2x body), small lower shadow
-    shooting_star = 1.0 if (upper0 > 2 * body0 and lower0 < 0.3 * body0 and body0 > 0) else 0.0
-
-    # [32] Bullish Engulfing: green candle fully engulfs previous red candle
-    engulfing_bull = 1.0 if (is_green0 and not is_green1 and cl0 > o1 and o0 < cl1 and body0 > body1) else 0.0
-
-    # [33] Bearish Engulfing: red candle fully engulfs previous green candle
-    engulfing_bear = 1.0 if (not is_green0 and is_green1 and cl0 < o1 and o0 > cl1 and body0 > body1) else 0.0
-
-    # [34] Doji: body <= 10% of range
-    doji = 1.0 if (body0 <= rng0 * 0.1) else 0.0
-
-    # [35] Pin Bar Bullish: lower shadow > 60% of range
-    pin_bar_bull = 1.0 if (lower0 > rng0 * 0.6) else 0.0
-
-    # [36] Pin Bar Bearish: upper shadow > 60% of range
-    pin_bar_bear = 1.0 if (upper0 > rng0 * 0.6) else 0.0
-
-    # [37] Marubozu Bullish: green, body > 90% of range
-    marubozu_bull = 1.0 if (is_green0 and body0 > rng0 * 0.9) else 0.0
-
-    # [38] Marubozu Bearish: red, body > 90% of range
-    marubozu_bear = 1.0 if (not is_green0 and body0 > rng0 * 0.9) else 0.0
-
-    # [39] Inside Bar: current H/L within previous H/L
-    inside_bar = 1.0 if (h0 < h1 and l0 > l1 and rng1 > 0) else 0.0
-
-    # [40] Three Black Crows: 3 consecutive red candles with decent body size
-    three_crows = 1.0 if (
-        not is_green0 and not is_green1 and not is_green2
-        and cl0 < cl1 < cl2
-        and body0 > rng0 * 0.5 and body1 > rng1 * 0.5 if rng1 > 0 else False
-    ) else 0.0
-
-    # [41] Three White Soldiers: 3 consecutive green candles
-    three_soldiers = 1.0 if (
-        is_green0 and is_green1 and is_green2
-        and cl0 > cl1 > cl2
-        and body0 > rng0 * 0.5 and body1 > rng1 * 0.5 if rng1 > 0 else False
-    ) else 0.0
-
-    # [42] Spinning Top: both shadows > body
-    spinning_top = 1.0 if (upper0 > body0 and lower0 > body0 and body0 > 0) else 0.0
-
-    # [43] Body Ratio: body / range [0-1] — 1=marubozu, 0=doji
-    body_ratio = min(body0 / rng0, 1.0)
-
-    # [44] Wick Skew: (upper - lower) / range [-1, 1] — positive = bearish pressure
-    wick_skew = (upper0 - lower0) / rng0
-
-    return [
-        hammer,          # [30]
-        shooting_star,   # [31]
-        engulfing_bull,  # [32]
-        engulfing_bear,  # [33]
-        doji,            # [34]
-        pin_bar_bull,    # [35]
-        pin_bar_bear,    # [36]
-        marubozu_bull,   # [37]
-        marubozu_bear,   # [38]
-        inside_bar,      # [39]
-        three_crows,     # [40]
-        three_soldiers,  # [41]
-        spinning_top,    # [42]
-        body_ratio,      # [43]
-        wick_skew,       # [44]
-    ]
-
-
 def compute_multiday_features(token: str, current_price: float) -> list[float]:
     """Compute 4 multi-day trend features from daily candles.
 
-    Features [45-48]:
-      [45] change_7d       — 7-day price change, tanh(change/30) [-1, 1]
-      [46] change_10d      — 10-day price change, tanh(change/50) [-1, 1]
-      [47] dist_from_7d_high — distance from 7d high [0, -1] (0=at high, -1=10%+ below)
-      [48] trend_slope_7d  — 7d linear regression slope, tanh(slope×100) [-1, 1]
+    Features [30-33]:
+      [30] change_7d       — 7-day price change, tanh(change/30) [-1, 1]
+      [31] change_10d      — 10-day price change, tanh(change/50) [-1, 1]
+      [32] dist_from_7d_high — distance from 7d high [0, -1] (0=at high, -1=10%+ below)
+      [33] trend_slope_7d  — 7d linear regression slope, tanh(slope×100) [-1, 1]
     """
     zeros = [0.0] * 4
 
@@ -1013,6 +893,55 @@ def compute_15m_features(token: str) -> list[float]:
     ]
 
 
+def compute_tier2_features(candles: list[dict]) -> list[float]:
+    """Compute 3 Tier-2 features from existing 1h candles (zero API calls).
+
+    Features [73-75]:
+      [73] gap_detection     — Gap between prev close and current open, tanh(gap%/2) → [-1, 1]
+                               Positive = gap up (bullish overnight), negative = gap down
+      [74] range_expansion   — Current candle range vs avg range of last 10 candles, tanh(ratio-1) → [-1, 1]
+                               Positive = expanding range (volatility breakout)
+      [75] rsi_4h            — RSI calculated on 4h synthetic bars (every 4th close), /100 → [0, 1]
+    """
+    zeros = [0.0] * 3
+
+    if len(candles) < 20:
+        return zeros
+
+    closes = [c["c"] for c in candles]
+
+    # [73] Gap detection — gap between previous candle close and current candle open
+    gap_norm = 0.0
+    last = candles[-1]
+    prev = candles[-2]
+    if prev["c"] > 0:
+        gap_pct = (last["o"] - prev["c"]) / prev["c"] * 100
+        gap_norm = math.tanh(gap_pct / 2.0)
+
+    # [74] Range expansion — current range vs average range of last 10 candles
+    range_exp = 0.0
+    current_range = last["h"] - last["l"]
+    ranges_10 = [c["h"] - c["l"] for c in candles[-11:-1]]
+    avg_range = sum(ranges_10) / len(ranges_10) if ranges_10 else 0
+    if avg_range > 0:
+        ratio = current_range / avg_range
+        range_exp = math.tanh(ratio - 1.0)
+
+    # [75] RSI 4h — RSI on synthetic 4h bars (every 4th hourly close)
+    rsi_4h_norm = 0.5
+    closes_4h = closes[::4]  # every 4th close = ~4h resolution
+    if len(closes_4h) >= 16:
+        rsi_vals_4h = calculate_rsi(closes_4h, 14)
+        if rsi_vals_4h:
+            rsi_4h_norm = rsi_vals_4h[-1] / 100.0
+
+    return [
+        round(gap_norm, 6),
+        round(range_exp, 6),
+        round(rsi_4h_norm, 6),
+    ]
+
+
 def backfill_labels(filepath: str, current_price: float) -> int:
     """Backfill labels for older rows. Returns number of rows updated."""
     if not os.path.exists(filepath):
@@ -1097,7 +1026,6 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     nansen = compute_nansen_features(token)
     extra = compute_extra_features(token, candles, meta_ctx)
 
-    candle = compute_candle_features(candles)
     multiday = compute_multiday_features(token, price)
     btc_cross = compute_btc_cross_features(token, btc_candles or [], candles)
     orderbook = compute_orderbook_features(token, meta_ctx)
@@ -1105,9 +1033,10 @@ def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | Non
     derived = compute_derived_features(candles)
     btc_pred_feat = compute_btc_pred_features(btc_pred, token)
     feat_15m = compute_15m_features(token)
+    tier2 = compute_tier2_features(candles)
 
-    features = tech + nansen + extra + candle + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m
-    assert len(features) == 73, f"Expected 73 features, got {len(features)}"
+    features = tech + nansen + extra + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m + tier2
+    assert len(features) == 61, f"Expected 61 features, got {len(features)}"
 
     # Build row
     row = {

@@ -89,12 +89,6 @@ export const FEATURE_NAMES = [
   'funding_rate', 'oi_change_1h', 'oi_change_4h',
   'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
   'volatility_24h',
-  // Candle patterns (15)
-  'hammer', 'shooting_star', 'engulfing_bull', 'engulfing_bear',
-  'doji', 'pin_bar_bull', 'pin_bar_bear',
-  'marubozu_bull', 'marubozu_bear', 'inside_bar',
-  'three_crows', 'three_soldiers', 'spinning_top',
-  'body_ratio', 'wick_skew',
   // Multi-day trend (4)
   'change_7d', 'change_10d', 'dist_from_7d_high', 'trend_slope_7d',
   // BTC cross-market (4)
@@ -110,9 +104,11 @@ export const FEATURE_NAMES = [
   // 15m candle features (8)
   'rsi_15m', 'change_15m', 'change_1h_15m', 'ema9_ema21_cross_15m',
   'momentum_15m', 'volatility_15m', 'body_ratio_15m', 'consecutive_dir_15m',
+  // Tier-2 features (3)
+  'gap_detection', 'range_expansion', 'rsi_4h',
 ];
 
-const NUM_FEATURES = 73;
+const NUM_FEATURES = 61;  // 11 tech + 11 nansen + 8 extra + 4 multiday + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m + 3 tier2
 const NUM_CLASSES = 3;  // SHORT=0, NEUTRAL=1, LONG=2
 const HORIZONS = ['h1', 'h4', 'h12'] as const;
 const MODEL_DIR = '/tmp';
@@ -328,20 +324,11 @@ export class XGBoostPredictor {
       return null;
     }
 
-    // Accept 30/45/49/53/62/65/73-feature vectors, pad old ones with zeros
+    // Accept any known feature vector size, pad to NUM_FEATURES with zeros
+    const ACCEPTED_SIZES = [30, 45, 49, 53, 62, 65, 73, 76, NUM_FEATURES];
     let paddedFeatures = features;
-    if (features.length === 30) {
-      paddedFeatures = [...features, ...new Array(43).fill(0)];
-    } else if (features.length === 45) {
-      paddedFeatures = [...features, ...new Array(28).fill(0)];
-    } else if (features.length === 49) {
-      paddedFeatures = [...features, ...new Array(24).fill(0)];
-    } else if (features.length === 53) {
-      paddedFeatures = [...features, ...new Array(20).fill(0)];
-    } else if (features.length === 62) {
-      paddedFeatures = [...features, ...new Array(11).fill(0)];
-    } else if (features.length === 65) {
-      paddedFeatures = [...features, ...new Array(8).fill(0)];
+    if (features.length < NUM_FEATURES && ACCEPTED_SIZES.includes(features.length)) {
+      paddedFeatures = [...features, ...new Array(NUM_FEATURES - features.length).fill(0)];
     } else if (features.length !== NUM_FEATURES) {
       console.warn(`[XGBoost] Expected ${NUM_FEATURES} features, got ${features.length}`);
       return null;

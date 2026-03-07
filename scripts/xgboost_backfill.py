@@ -6,19 +6,18 @@ Fetches historical hourly candles from Hyperliquid API,
 computes features at each timestamp with look-ahead labels,
 generates JSONL dataset, and optionally retrains XGBoost.
 
-Computable features (38/62 with real data):
+Computable features (23/61 with real data):
   [0-10]  Technical (RSI, MACD, BB, ATR, volatility)         11/11
   [25-29] Time cyclical + volatility_24h                       5/8
-  [30-44] Candle patterns                                     15/15
-  [45-48] Multi-day trends                                     4/4
-  [49-52] BTC cross-market                                     4/4 (non-BTC only)
-  [59-61] Derived (vol momentum, acceleration, divergence)     3/3
+  [30-33] Multi-day trends                                     4/4
+  [34-37] BTC cross-market                                     4/4 (non-BTC only)
+  [44-46] Derived (vol momentum, acceleration, divergence)     3/3
 
-Non-computable (24/62 = zeros):
+Non-computable (24/61 = zeros):
   [11-21] Nansen SM data           — no historical snapshots
   [22-24] Funding, OI changes      — not in candle data
-  [53-55] Orderbook L2             — no historical snapshots
-  [56-58] MetaCtx (mark/oracle)    — no historical snapshots
+  [38-40] Orderbook L2             — no historical snapshots
+  [41-43] MetaCtx (mark/oracle)    — no historical snapshots
 
 Usage:
   python3 scripts/xgboost_backfill.py              # backfill all tokens, 180 days
@@ -47,8 +46,8 @@ sys.path.insert(0, script_dir)
 
 from xgboost_collect import (
     hl_post,
+    calculate_rsi,
     compute_technical_features,
-    compute_candle_features,
     compute_derived_features,
     compute_btc_cross_features,
 )
@@ -56,7 +55,7 @@ from xgboost_collect import (
 # --- Configuration ---
 TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
 DATASET_DIR = "/tmp"
-NUM_FEATURES = 73
+NUM_FEATURES = 61
 MIN_CANDLES = 60  # Need 60+ hourly candles for RSI/MACD/BB
 API_CHUNK_DAYS = 180  # HL API returns max ~5000 hourly candles (~208 days)
 
@@ -361,10 +360,7 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
             # [22-29] Extra (partial: time cyclical + volatility)
             extra = compute_backfill_extra(candles, candle_ts_sec)
 
-            # [30-44] Candle patterns
-            candle_feat = compute_candle_features(candles)
-
-            # [45-48] Multi-day trends
+            # [30-33] Multi-day trends
             daily_window = find_daily_window(daily, candle_ts_ms, 14)
             multiday = compute_backfill_multiday(daily_window, price)
 
@@ -379,23 +375,42 @@ def backfill_token(token: str, btc_hourly: list[dict], days: int) -> int:
             else:
                 btc_cross = [0.0] * 4
 
-            # [53-55] Orderbook — not available historically
+            # [38-40] Orderbook — not available historically
             orderbook = [0.0] * 3
 
-            # [56-58] MetaCtx — not available historically
+            # [41-43] MetaCtx — not available historically
             meta_extra = [0.0] * 3
 
-            # [59-61] Derived
+            # [44-46] Derived
             derived = compute_derived_features(candles)
 
-            # [62-64] BTC prediction proxy — not available historically
+            # [47-49] BTC prediction proxy — not available historically
             btc_pred_feat = [0.0] * 3
 
-            # [65-72] 15m candle features — can't compute from 1h candles
+            # [50-57] 15m candle features — can't compute from 1h candles
             feat_15m = [0.0] * 8
 
+            # [58-60] Tier-2: gap_detection, range_expansion computable; rsi_4h computable
+            tier2 = [0.0] * 3
+            if i >= 1 and hourly[i - 1]["c"] > 0:
+                gap_pct = (candle["o"] - hourly[i - 1]["c"]) / hourly[i - 1]["c"] * 100
+                tier2[0] = round(math.tanh(gap_pct / 2.0), 6)
+            current_range = candle["h"] - candle["l"]
+            if i >= 11:
+                ranges_10 = [h["h"] - h["l"] for h in hourly[i - 10:i]]
+                avg_range = sum(ranges_10) / len(ranges_10) if ranges_10 else 0
+                if avg_range > 0:
+                    tier2[1] = round(math.tanh(current_range / avg_range - 1.0), 6)
+            # rsi_4h from hourly closes sampled every 4th
+            if i >= 60:
+                closes_4h = [hourly[j]["c"] for j in range(0, i + 1, 4)]
+                if len(closes_4h) >= 16:
+                    rsi_vals_4h = calculate_rsi(closes_4h, 14)
+                    if rsi_vals_4h:
+                        tier2[2] = round(rsi_vals_4h[-1] / 100.0, 6)
+
             # Assemble
-            features = tech + nansen + extra + candle_feat + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m
+            features = tech + nansen + extra + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m + tier2
             assert len(features) == NUM_FEATURES, f"Expected {NUM_FEATURES}, got {len(features)}"
 
             # Compute labels (look-ahead — we know the future price!)
@@ -466,7 +481,7 @@ def main():
     print(f"  Tokens: {tokens}")
     print(f"  Days: {args.days}")
     print(f"  Dataset dir: {DATASET_DIR}")
-    print(f"  Features: {NUM_FEATURES} total, ~38 computable from candles, ~27 zeros")
+    print(f"  Features: {NUM_FEATURES} total, ~23 computable from candles, ~24 zeros")
 
     if args.dry_run:
         print("\n  DRY RUN — estimating rows:")

@@ -187,7 +187,17 @@ TOKEN_XGB_PARAMS: dict[str, dict] = {
         "reg_lambda": 1.5,
     },
     # Volatile tokens — aggressive regularization
-    "kPEPE": dict(_REGULARIZED_PARAMS),
+    # kPEPE: best from hyperparam sweep (h4 rank#4: edge +2.6%, gap 13.8%)
+    "kPEPE": {
+        "max_depth": 2,
+        "n_estimators": 300,
+        "learning_rate": 0.05,
+        "colsample_bytree": 0.6,
+        "min_child_weight": 20,
+        "subsample": 0.6,
+        "reg_alpha": 0.1,
+        "reg_lambda": 2.0,
+    },
     "FARTCOIN": dict(_REGULARIZED_PARAMS),
     "LIT": dict(_REGULARIZED_PARAMS),
     "HYPE": dict(_REGULARIZED_PARAMS),
@@ -200,20 +210,20 @@ TOKEN_DEAD_FEATURES: dict[str, list[int]] = {
     "kPEPE": [
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen [11-21] — no SM tracking for kPEPE
         22, 23, 24,                                      # funding, OI [22-24] — zero in backfill
-        53, 54, 55,                                      # orderbook [53-55] — zero in backfill
-        56, 57, 58,                                      # meta ctx [56-58] — zero in backfill
+        38, 39, 40,                                      # orderbook [38-40] — zero in backfill
+        41, 42, 43,                                      # meta ctx [41-43] — zero in backfill
     ],
     "FARTCOIN": [
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen — limited SM data
         22, 23, 24,                                      # funding, OI
-        53, 54, 55,                                      # orderbook
-        56, 57, 58,                                      # meta ctx
+        38, 39, 40,                                      # orderbook
+        41, 42, 43,                                      # meta ctx
     ],
     "LIT": [
         11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,  # SM/Nansen — limited SM data
         22, 23, 24,                                      # funding, OI
-        53, 54, 55,                                      # orderbook
-        56, 57, 58,                                      # meta ctx
+        38, 39, 40,                                      # orderbook
+        41, 42, 43,                                      # meta ctx
     ],
 }
 
@@ -234,12 +244,6 @@ FEATURE_NAMES = [
     "funding_rate", "oi_change_1h", "oi_change_4h",
     "hour_sin", "hour_cos", "day_sin", "day_cos",
     "volatility_24h",
-    # Candle patterns (15)
-    "hammer", "shooting_star", "engulfing_bull", "engulfing_bear",
-    "doji", "pin_bar_bull", "pin_bar_bear",
-    "marubozu_bull", "marubozu_bear", "inside_bar",
-    "three_crows", "three_soldiers", "spinning_top",
-    "body_ratio", "wick_skew",
     # Multi-day trend (4)
     "change_7d", "change_10d", "dist_from_7d_high", "trend_slope_7d",
     # BTC cross-market (4)
@@ -255,9 +259,11 @@ FEATURE_NAMES = [
     # 15m candle features (8)
     "rsi_15m", "change_15m", "change_1h_15m", "ema9_ema21_cross_15m",
     "momentum_15m", "volatility_15m", "body_ratio_15m", "consecutive_dir_15m",
+    # Tier-2 features (3)
+    "gap_detection", "range_expansion", "rsi_4h",
 ]
 
-NUM_FEATURES = 73  # 65 base + 8 15m features
+NUM_FEATURES = 61  # 30 base + 4 multiday + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m + 3 tier2
 
 
 def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]:
@@ -288,22 +294,13 @@ def load_dataset(token: str) -> tuple[list[list[float]], dict[str, list[float]]]
                 continue
 
             feat = row.get("features")
-            if not feat or len(feat) not in (30, 45, 49, 53, 62, 65, NUM_FEATURES):
+            if not feat or len(feat) not in (30, 45, 49, 53, 62, 65, 73, 76, NUM_FEATURES):
                 continue
 
             # Backward compat: pad old rows with zeros
-            if len(feat) == 30:
-                feat = feat + [0.0] * 43  # 15 candle + 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
-            elif len(feat) == 45:
-                feat = feat + [0.0] * 28  # 4 multi-day + 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
-            elif len(feat) == 49:
-                feat = feat + [0.0] * 24  # 4 btc_cross + 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
-            elif len(feat) == 53:
-                feat = feat + [0.0] * 20  # 3 orderbook + 3 meta + 3 derived + 3 btc_pred + 8 15m
-            elif len(feat) == 62:
-                feat = feat + [0.0] * 11  # 3 btc_pred + 8 15m
-            elif len(feat) == 65:
-                feat = feat + [0.0] * 8   # 8 15m features
+            pad_len = NUM_FEATURES - len(feat)
+            if pad_len > 0:
+                feat = feat + [0.0] * pad_len
 
             features.append(feat)
 
