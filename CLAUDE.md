@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-06
+- Data: 2026-03-07
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -43,6 +43,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 7 marca 2026
+
+### 112. BREAKEVEN_BLOCK — prevent selling at loss near S/R levels (07.03)
+
+**Problem:** Bot składał zredukowane aski (ask × 0.15) blisko mid price nawet gdy był underwater na pozycji LONG przy support. Fill price < average entry = zrealizowana strata.
+
+**Root cause:** S/R Bounce Hold tylko skalował wielkość asków, ale nie sprawdzał czy fill będzie na stracie.
+
+**Fix w `mm_hl.ts` (~8607-8640):**
+```typescript
+// LONG + underwater + near support = BLOCK ASKS
+if (hasLongPos && entryPrice > 0 && midPrice < entryPrice && nearSupport) {
+  sizeMultipliers.ask = 0
+  console.log(`🛡️ [BREAKEVEN_BLOCK] ${pair}: LONG underwater ${underwaterPct}% at SUPPORT → BLOCKING ASKS`)
+}
+
+// SHORT + underwater + near resistance = BLOCK BIDS
+else if (hasShortPos && entryPrice > 0 && midPrice > entryPrice && nearResistance) {
+  sizeMultipliers.bid = 0
+}
+```
+
+**Logika:**
+| Warunek | Akcja |
+|---------|-------|
+| LONG + mid < entry + near support | `ask = 0` |
+| SHORT + mid > entry + near resistance | `bid = 0` |
+
+**Przykład:**
+- Entry: $0.004000, Mid: $0.003700 (7.5% underwater), Support: $0.003600
+- Bot jest 7.5% pod wodą NA SUPPORT → ZERO asks
+- Bot czeka aż cena wróci powyżej $0.004000 zanim zacznie sprzedawać
+
+**Pliki:** `src/mm_hl.ts` (+33 linie)
 
 ---
 
