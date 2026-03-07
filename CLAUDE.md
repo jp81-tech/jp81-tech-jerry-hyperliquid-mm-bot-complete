@@ -81,6 +81,8 @@ else if (hasShortPos && entryPrice > 0 && midPrice > entryPrice && nearResistanc
 
 **Pliki:** `src/mm_hl.ts` (+33 linie)
 
+**Bug fix (08.03):** `accumZone is not defined` — zmienna była zdefiniowana w S/R Accumulation block ale używana w BREAKEVEN_BLOCK przed definicją. Naprawiono inline'owaniem obliczenia: `const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr` bezpośrednio w bloku BREAKEVEN_BLOCK.
+
 ---
 
 ## Zmiany 6 marca 2026
