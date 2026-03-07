@@ -8610,10 +8610,11 @@ class HyperliquidMMBot {
           // → ZERO ASKS. Bot MUST NOT sell below average entry price at S/R levels.
           // This prevents realizing losses when accumulating at support.
           // Inverse for SHORT at resistance: ZERO BIDS when mid > entry (underwater on short)
-          if (position && mgAtr > 0 && accumZone > 0) {
+          if (position && mgAtr > 0) {
             const entryPrice = position.entryPrice || 0
             const hasLongPos = actualSkew > 0.01
             const hasShortPos = actualSkew < -0.01
+            const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr  // inline calculation
             const nearSupport = mgSupportBody > 0 && mgSupportDist < accumZone
             const nearResistance = mgResistBody > 0 && mgResistDist < accumZone
 
