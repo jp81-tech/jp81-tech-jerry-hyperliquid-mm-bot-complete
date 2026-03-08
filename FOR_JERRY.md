@@ -8187,6 +8187,201 @@ Dlaczego hardcode `false` zamiast ustawienia env var `NANSEN_CONFLICT_CHECK_ENAB
 
 4. **Logi mówią prawdę.** `🛑 [NANSEN CONFLICT SL] Closing LONG on kPEPE (PnL: $-27.03)` — te logi były w error log przez wiele ticków. Wystarczyło grep'nąć żeby zobaczyć problem.
 
+---
+
+## Chapter 51: Od Backtestingu do Produkcji — Jak SMA Crossover Trafił na VIRTUAL (08.03.2026)
+
+> "Teoria bez praktyki jest bezużyteczna. Praktyka bez teorii jest niebezpieczna." — Deming
+
+### Geneza: dlaczego SMA na VIRTUAL?
+
+Bot miał już SMA crossover signal dla kPEPE (SMA 20/60, tolerance 1.10) — ale VIRTUAL działał "na ślepo", bez żadnego sygnału trendu. Market making bez sensu kierunkowego to jak żeglowanie bez kompasu — może działa, ale mógłbyś płynąć szybciej gdybyś wiedział skąd wieje wiatr.
+
+Pytanie brzmiało: **jakie parametry SMA będą działać dla VIRTUAL?** Nie można po prostu skopiować kPEPE — to zupełnie inny token (inna zmienność, inny wolumen, inne zachowanie ceny). Trzeba było to sprawdzić empirycznie.
+
+### Krok 1: Zbierz dane
+
+Plik `fetch_virtual.py` pobrał 2000 godzin (83 dni) danych 1H z Hyperliquid API. Chunk po chunki (750h na raz), żeby nie przekroczyć limitów API. Deduplikacja po timestamp, sortowanie, zapis do CSV.
+
+**Lekcja:** Zawsze zbieraj więcej danych niż myślisz, że potrzebujesz. 2000 candle to minimum do sensownego backtestingu z SMA 50 (bo potrzebujesz 50 pierwszych candle na rozgrzanie wskaźnika, zostaje Ci 1950 na testowanie).
+
+### Krok 2: Backtest z grid search
+
+Plik `momentumSMA.py` użył biblioteki `backtesting.py` z grid search:
+
+```python
+stats = bt.optimize(
+    sma_fast=range(10, 30, 5),      # [10, 15, 20, 25]
+    sma_slow=range(30, 80, 10),     # [30, 40, 50, 60, 70]
+    sr_tolerance=[1.02, 1.05, 1.08, 1.10, 1.15],
+    maximize='Return [%]',
+    constraint=lambda param: param.sma_fast < param.sma_slow,
+)
+```
+
+To daje 4 × 5 × 5 = 100 kombinacji (minus te gdzie fast ≥ slow). System testuje każdą kombinację na tych samych danych i zwraca najlepszą.
+
+**Wynik:** SMA 20/30 z SR tolerance 1.08 wygrał dla VIRTUAL.
+
+**Dlaczego 20/30 a nie 20/50?** VIRTUAL jest bardziej zmiennym tokenem niż kPEPE — potrzebuje szybszych sygnałów. SMA 30 reaguje szybciej na zmiany trendu niż SMA 50 czy 60. To ma sens — tokeny meme-adjacent (VIRTUAL jest w kategorii AI agents) poruszają się szybko, a zbyt wolny wskaźnik daje sygnały gdy ruch już się skończył.
+
+### Krok 3: Implementacja w bocie — gdzie żyje konfiguracja
+
+Parametry trafiły do `src/config/short_only_config.ts` jako override per-token:
+
+```typescript
+'VIRTUAL': {
+  smaCrossoverEnabled: true,
+  smaFastPeriod: 20,
+  smaSlowPeriod: 30,
+  smaSrTolerance: 1.08,
+  smaCrossoverBidBoost: 1.8,
+  smaCrossoverAskBoost: 1.8,
+},
+```
+
+**Architektura:** `MomentumGuardConfig` to interfejs z defaultami + overridami per-token. Każdy token może mieć swoje parametry. Funkcja `getMomentumGuardConfig(pair)` merguje default z override. To elegancki wzorzec — nie trzeba if/else'ów w kodzie, wystarczy dodać wpis w słowniku.
+
+### Krok 4: MarketVision — skąd brać dane w real-time
+
+Tu zaczęły się problemy. Dodaliśmy config, dodaliśmy logikę w grid pipeline... i nic nie działało. Zero logów SMA. Cisza.
+
+**Root cause:** VIRTUAL nie był w `activePairs` w `market_vision.ts`. To tablica tokenów, dla których MarketVision pobiera 1H candle z Hyperliquid API. Bez wpisu w `activePairs` → brak candle data → `getPairAnalysis('VIRTUAL')` zwraca `undefined` → żaden SMA signal nie jest obliczany.
+
+**Analogia:** Wyobraź sobie, że budujesz system radarowy. Masz antenę (MarketVision), masz ekran (mm_hl.ts), masz instrukcje co robić gdy wykryjesz samolot (config). Ale nie podłączyłeś anteny do tego kanału częstotliwości. Antena nasłuchuje kPEPE, LIT, ETH... ale nie VIRTUAL. Dodanie jednego stringa do tablicy = "nastaw antenę na tę częstotliwość".
+
+```typescript
+// PRZED: VIRTUAL niewidoczny
+const activePairs = ['LIT', 'kPEPE', 'ETH', 'BTC', 'HYPE', 'SOL']
+
+// PO: VIRTUAL na radarze
+const activePairs = ['LIT', 'kPEPE', 'ETH', 'BTC', 'HYPE', 'SOL', 'VIRTUAL']
+```
+
+### Krok 5: Dynamiczne SMA per-token
+
+Wcześniej SMA w MarketVision było hardcoded: zawsze SMA 20 i SMA 60. Ale VIRTUAL potrzebuje SMA 20/30. Rozwiązanie — dynamiczne okresy z configu:
+
+```typescript
+const mgConfig = getMomentumGuardConfig(pair);
+const smaFast = mgConfig.smaFastPeriod;   // VIRTUAL: 20, kPEPE: 20
+const smaSlow = mgConfig.smaSlowPeriod;   // VIRTUAL: 30, kPEPE: 60
+```
+
+Teraz MarketVision oblicza SMA z **właściwymi okresami** dla każdego tokena. Dodanie nowego tokena wymaga tylko wpisu w configu — zero zmian w logice obliczania.
+
+### Krok 6: Grid pipeline — dwa oddzielne bloki
+
+Tu jest kluczowy punkt architektoniczny. `mm_hl.ts` ma DWA oddzielne bloki grid pipeline:
+
+1. **`if (pair === 'kPEPE')`** — pełny Momentum Guard z S/R Accumulation, Bounce Hold, itd.
+2. **`else`** — wszystkie inne tokeny (VIRTUAL, LIT, FARTCOIN...)
+
+SMA crossover signal dla kPEPE był w bloku 1. VIRTUAL idzie przez blok 2 — i tam nie było ŻADNEJ logiki SMA. Dodaliśmy ją:
+
+```typescript
+// W bloku else (non-kPEPE pairs):
+if (momGuardCfg.smaCrossoverEnabled) {
+  const mvA = this.marketVision?.getPairAnalysis(pair)
+  // Golden cross + near support → boost bids
+  // Death cross + near resistance → boost asks
+  // Trend mild → gentle bias
+}
+```
+
+**Lekcja:** Gdy masz dwa code paths, każda nowa feature musi być dodana do OBIE. Albo — jeszcze lepiej — refaktoryzuj do jednego code path z per-token config. Ale to jest historia na inny dzień.
+
+### Krok 7: Debug — dlaczego nie widzę logów?
+
+Po deployu na serwer — znowu cisza. `SMA_STATUS` log nie pojawił się. Dlaczego?
+
+Okazało się, że log był gated przez `this.tickCount % 20 === 0` — czyli logował co 20 ticków. A `tickCount` startuje od 1 (inkrementowany na POCZĄTKU mainLoop, przed body). Więc pierwszy tick to 1, nie 0. `1 % 20 === 0` → false. Trzeba czekać do tick 20 żeby zobaczyć pierwszy log.
+
+Fix: dodanie `|| this.tickCount <= 3` — loguj też na pierwszych 3 tickach, żeby od razu po deployu widzieć czy system działa.
+
+**Lekcja:** Zawsze loguj na starcie. "Działam, widzę dane, oto mój stan" — to jest bezcenne przy debugowaniu produkcji. Co 20 ticków to fine dla normalnych operacji, ale przy deployu chcesz feedback natychmiast.
+
+### Krok 8: S/R lookback — match backtestem
+
+Ostatni szczegół: S/R levels w MarketVision używały 24-candle lookback (`rolling(24)`), ale backtest używał 50-candle lookback (`rolling(50)`). Zmieniliśmy na 50 żeby parametry z backtestingu pasowały do produkcji.
+
+To jest subtleny ale ważny punkt: **jeśli backtestujesz z window=50, ale produkcja używa window=24, to testujesz inne S/R levels niż te które bot widzi w real-time**. Wyniki backtestingu są wtedy bezwartościowe — optymalizujesz parametry dla sytuacji która nie występuje w produkcji.
+
+### Jak działa crossover detection?
+
+Porównujemy SMAs z dwóch kolejnych barów:
+
+```
+Bar N-1:  SMA_fast=0.68  ≤  SMA_slow=0.69   (fast pod slow)
+Bar N:    SMA_fast=0.70  >  SMA_slow=0.69   (fast nad slow)
+→ GOLDEN CROSS (fast przebił slow od dołu)
+```
+
+```
+Bar N-1:  SMA_fast=0.70  ≥  SMA_slow=0.69   (fast nad slow)
+Bar N:    SMA_fast=0.68  <  SMA_slow=0.69   (fast pod slow)
+→ DEATH CROSS (fast przebił slow od góry)
+```
+
+Crossover to moment PRZEJŚCIA — trwa tylko jeden tick. Potem signal przechodzi w "trend mild" (SMA20 > SMA60 bez crossover = bullish trend, bez boostu).
+
+### Efekty na grid
+
+| Sygnał | Warunek S/R | Bid multiplier | Ask multiplier |
+|--------|-------------|----------------|----------------|
+| Golden cross | Near support | × 1.80 | × 0.56 |
+| Death cross | Near resistance | × 0.56 | × 1.80 |
+| Bullish trend (mild) | Near support | × 1.15 | × 0.90 |
+| Bearish trend (mild) | Near resistance | × 0.90 | × 1.15 |
+| No signal / no S/R | — | × 1.00 | × 1.00 |
+
+Zauważ, że crossover BEZ potwierdzenia S/R nie robi nic. To jest ten sam princyp z backtestu — tam też crossover musiał być near_support lub near_resistance żeby triggerować trade. Filtr S/R eliminuje fałszywe sygnały w środku range'u.
+
+### Pipeline per-token — podsumowanie
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  CONFIG (short_only_config.ts)                              │
+│  ├── kPEPE:   SMA 20/60, tolerance 1.10                    │
+│  ├── VIRTUAL: SMA 20/30, tolerance 1.08                    │
+│  └── default: SMA 20/60, tolerance 1.10 (not enabled)      │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  MARKET VISION (market_vision.ts)                           │
+│  activePairs: [LIT, kPEPE, ETH, BTC, HYPE, SOL, VIRTUAL]  │
+│  ├── Fetches 1H candles for each active pair                │
+│  ├── Computes SMA with dynamic periods per-token            │
+│  ├── Detects golden/death crossovers                        │
+│  └── Computes S/R levels (50-candle rolling window)         │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  GRID PIPELINE (mm_hl.ts)                                   │
+│  if (pair === 'kPEPE') {                                    │
+│    // Full Momentum Guard + S/R Accumulation pipeline       │
+│    // SMA crossover signal (existing)                       │
+│  } else {                                                   │
+│    // SMA crossover signal block (NEW — Chapter 51)         │
+│    // Moon Guard, other filters...                          │
+│  }                                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 5 lekcji z tego wdrożenia
+
+1. **Backtest → Production musi być 1:1.** Jeśli backtest używa SMA 20/30 i S/R window=50, produkcja MUSI używać identycznych parametrów. Nawet drobna różnica (window 24 vs 50) sprawia, że S/R levels są inne, a crossover signale triggerują w innych momentach. Wyniki backtestingu są wtedy bezwartościowe.
+
+2. **activePairs to brama.** Dodanie tokena do configu i logiki bez dodania do `activePairs` = martwy kod. Zawsze sprawdzaj, czy data pipeline jest podłączony. Najpierw dane, potem logika.
+
+3. **Per-token config > hardcoded values.** Wzorzec `default + overrides` jest potężny. Dodanie nowego tokena to 5 linii w słowniku, zero zmian w logice. Gdy masz 10 tokenów z różnymi parametrami, ten wzorzec skaluje się dużo lepiej niż if/else.
+
+4. **Loguj na starcie, nie tylko co N ticków.** W produkcji potrzebujesz natychmiastowego feedback po deployu. `tickCount <= 3` to prosty hack, ale oszczędza minuty (albo godziny) debugowania.
+
+5. **Dwa code paths to dług techniczny.** Każda nowa feature wymaga implementacji W OBIE GAŁĘZIE. To łatwo przeoczyć (i przeoczyliśmy — cały SMA signal istniał tylko w bloku kPEPE). Długoterminowe rozwiązanie to unifikacja pipeline'u z per-token config. Ale pragmatyzm > perfekcjonizm — lepiej mieć działający system z dwoma ścieżkami niż nie mieć go wcale.
+
 ### Kluczowe pliki
 
 | Plik | Zmiana |
