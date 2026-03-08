@@ -48,6 +48,31 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 8 marca 2026
 
+### 114. HARD BREAKEVEN GUARD — universal underwater churn protection (08.03)
+
+**Problem:** kPEPE bot tracił na "churning" — zamykał longi ze stratą gdy cena była w "no man's land" (underwater ale daleko od S/R). BREAKEVEN_BLOCK wymagał `nearSupport`, a PROFIT_FLOOR miał `pair !== 'kPEPE'`.
+
+**Root cause (3 warstwy obrony, wszystkie zawiodły):**
+1. `BREAKEVEN_BLOCK` (L8692): wymaga `nearSupport` → nie działa daleko od S/R
+2. `MIN_PROFIT` (L9218): 10bps buffer, ale AUTO_SKEW przesuwa mid w dół → aski poniżej entry
+3. `PROFIT_FLOOR` (L9429): `pair !== 'kPEPE'` → **całkowicie pominięty** dla kPEPE
+
+**Fix w `mm_hl.ts`:**
+- Zastąpiono `PROFIT_FLOOR` uniwersalnym `HARD BREAKEVEN GUARD`
+- Działa dla WSZYSTKICH par (nie wyklucza kPEPE)
+- LONG: filtruje aski < `entry × 1.001` (0.1% fee buffer)
+- SHORT: filtruje bidy > `entry × 0.999`
+- Bypass TYLKO przez `inventorySlPanic` (emergency exit przy ekstremalnym drawdown)
+- Hoisted `inventorySlPanic` powyżej if/else block (scope access)
+
+**Log:** `🛡️ [GUARD] VIRTUAL: Underwater protection active. Restricting all asks to Breakeven (>$0.660560)`
+
+**Zweryfikowano:**
+- mm-virtual: GUARD usunął 8 asków (entry=$0.6599, mid=$0.6481, 1.8% underwater)
+- mm-pure: BREAKEVEN_BLOCK + GUARD = layered defense
+
+**Pliki:** `src/mm_hl.ts` (+23/-11 linii)
+
 ### 113. SMA Crossover Signal — VIRTUAL integration + per-token dynamic SMA (08.03)
 
 **Kontekst:** Backtestowano strategię MomentumSMA+RSI na VIRTUAL 1H (2000 candles). Grid search: `sma_fast=[10-25], sma_slow=[30-70], sr_tolerance=[1.02-1.15]`. Wygrały parametry: **SMA 20/30, SR tolerance 1.08**.
