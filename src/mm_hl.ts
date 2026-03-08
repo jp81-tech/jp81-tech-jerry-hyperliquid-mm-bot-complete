@@ -8106,6 +8106,7 @@ class HyperliquidMMBot {
 
     // 🐸 kPEPE: Custom 4-layer grid + Toxicity Engine + enhanced time-of-day
     let gridOrders: GridOrder[]
+    let inventorySlPanic = false  // Hoisted: used by HARD BREAKEVEN GUARD after grid generation
     if (pair === 'kPEPE') {
       // ── Gather signals for toxicity engine ──
       const vpinInfo = liveTrading?.vpinAnalyzers?.get(pair)?.getToxicityLevel()
@@ -8179,7 +8180,7 @@ class HyperliquidMMBot {
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
         const momGuardConfig = getMomentumGuardConfig(pair)
-        let inventorySlPanic = false  // Set by INVENTORY_SL, bypasses MIN_PROFIT
+        // inventorySlPanic hoisted above if/else block (used by HARD BREAKEVEN GUARD)
         // ATR% computed outside MG scope — also used by Dynamic Spread below
         const mvAnalysisMg = this.marketVision?.getPairAnalysis(pair)
         const mgAtr = mvAnalysisMg?.atr ?? 0
@@ -9423,26 +9424,37 @@ class HyperliquidMMBot {
       )
     }
 
-    // 🛡️ PURE_MM PROFIT FLOOR: Don't close positions at a loss
-    // SHORT → don't buy above entry price; LONG → don't sell below entry price
-    // kPEPE excluded — need full grid on both sides for fill volume
-    if (pair !== 'kPEPE' && (isSignalEnginePureMmInv || isForcedMmPair(pair)) && position && Math.abs(position.size) > 0 && position.entryPrice && Array.isArray(gridOrders)) {
+    // 🛡️ HARD BREAKEVEN GUARD: Universal protection against underwater churn
+    // Prevents closing positions at a loss regardless of S/R proximity.
+    // LONG → filter asks below (entry + fee buffer); SHORT → filter bids above (entry - fee buffer)
+    // 0.1% buffer covers round-trip fees (~4bps maker × 2 = 8bps, +2bps safety margin)
+    // BYPASSED ONLY by INVENTORY_SL panic (extreme drawdown + high skew = emergency exit)
+    const BREAKEVEN_FEE_BUFFER = 0.001  // 0.1% = 10bps
+    if (position && Math.abs(position.size) > 0 && position.entryPrice && Array.isArray(gridOrders) && !inventorySlPanic) {
       const entryPx = position.entryPrice
       if (position.size < 0) {
-        // SHORT position: filter out bids priced above entry (would close at a loss)
+        // SHORT: filter bids priced above entry-buffer (would close at a loss)
+        const maxBidPx = entryPx * (1 - BREAKEVEN_FEE_BUFFER)
         const before = gridOrders.length
-        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid' || o.price <= entryPx)
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'bid' || o.price <= maxBidPx)
         const removed = before - gridOrders.length
         if (removed > 0) {
-          console.log(`🛡️ [PROFIT_FLOOR] ${pair}: SHORT entry $${entryPx.toFixed(6)} → removed ${removed} bids above entry (mid: $${midPrice.toFixed(6)})`)
+          console.log(
+            `🛡️ [GUARD] ${pair}: Underwater protection active. Restricting all bids to Breakeven (<$${maxBidPx.toFixed(6)}) ` +
+            `| entry=$${entryPx.toFixed(6)} mid=$${midPrice.toFixed(6)} removed=${removed}`
+          )
         }
       } else if (position.size > 0) {
-        // LONG position: filter out asks priced below entry (would close at a loss)
+        // LONG: filter asks priced below entry+buffer (would close at a loss)
+        const minAskPx = entryPx * (1 + BREAKEVEN_FEE_BUFFER)
         const before = gridOrders.length
-        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask' || o.price >= entryPx)
+        gridOrders = gridOrders.filter((o: GridOrder) => o.side !== 'ask' || o.price >= minAskPx)
         const removed = before - gridOrders.length
         if (removed > 0) {
-          console.log(`🛡️ [PROFIT_FLOOR] ${pair}: LONG entry $${entryPx.toFixed(6)} → removed ${removed} asks below entry (mid: $${midPrice.toFixed(6)})`)
+          console.log(
+            `🛡️ [GUARD] ${pair}: Underwater protection active. Restricting all asks to Breakeven (>$${minAskPx.toFixed(6)}) ` +
+            `| entry=$${entryPx.toFixed(6)} mid=$${midPrice.toFixed(6)} removed=${removed}`
+          )
         }
       }
     }
