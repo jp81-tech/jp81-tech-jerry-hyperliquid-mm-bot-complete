@@ -306,6 +306,13 @@ export interface MomentumGuardConfig {
   srBounceHoldMinDistAtr: number         // Min distance in ATR multiples before full closing allowed (default 1.5)
   srBounceHoldAskReduction: number       // Closing-side multiplier at S/R level (default 0.20 = 20% of normal)
   srBounceHoldMaxMinutes: number         // Max hold time in minutes (default 30)
+  // SMA Crossover Signal: SMA fast/slow crossover + S/R tolerance zone for entry confirmation
+  smaCrossoverEnabled: boolean           // Enable SMA crossover signal (default false — opt-in per token)
+  smaFastPeriod: number                  // Fast SMA period in 1h candles (default 20)
+  smaSlowPeriod: number                  // Slow SMA period in 1h candles (default 50)
+  smaSrTolerance: number                 // S/R tolerance multiplier — price <= support × tol or >= resistance / tol (default 1.05)
+  smaCrossoverBidBoost: number           // Bid boost on golden cross near support (default 1.5)
+  smaCrossoverAskBoost: number           // Ask boost on death cross near resistance (default 1.5)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -355,6 +362,12 @@ export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
   srBounceHoldMinDistAtr: 1.5,         // 1.5×ATR from S/R before full closing allowed
   srBounceHoldAskReduction: 0.20,      // 20% of normal closing-side at S/R level
   srBounceHoldMaxMinutes: 30,          // 30 min timeout
+  smaCrossoverEnabled: false,          // Opt-in per token (kPEPE uses SMA 20/60)
+  smaFastPeriod: 20,
+  smaSlowPeriod: 50,
+  smaSrTolerance: 1.05,               // Default: price within 5% of S/R level
+  smaCrossoverBidBoost: 1.5,          // 50% bid boost on golden cross near support
+  smaCrossoverAskBoost: 1.5,          // 50% ask boost on death cross near resistance
 }
 
 export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfig>> = {
@@ -377,6 +390,25 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     inventoryAwareMgClosingBoost: 1.5,  // kPEPE: more aggressive closing when stuck against momentum
     srBounceHoldMinDistAtr: 2.0,         // kPEPE: volatile → give more room for bounce to develop (2×ATR)
     srBounceHoldAskReduction: 0.15,      // kPEPE: 15% closing at S/R (tighter hold)
+    // SMA Crossover: backtest-optimized SMA 20/60 + S/R tolerance 1.10
+    // Backtest: +3.73% return, 2.07 Sharpe, 52.6% win rate, -1.18% max DD (vs 2.49%/1.38/47.6%/-1.66% without S/R)
+    smaCrossoverEnabled: true,
+    smaFastPeriod: 20,                   // SMA 20 (1h candles)
+    smaSlowPeriod: 60,                   // SMA 60 (1h candles)
+    smaSrTolerance: 1.10,               // Wider tolerance — kPEPE volatile, 10% zone around S/R
+    smaCrossoverBidBoost: 1.8,          // Aggressive bid boost on golden cross near support
+    smaCrossoverAskBoost: 1.8,          // Aggressive ask boost on death cross near resistance
+  },
+  'VIRTUAL': {
+    // SMA Crossover: backtest-optimized SMA 20/30 + S/R tolerance 1.08
+    // Backtest: +2.18% return, 1.28 Sharpe, 47.4% win rate, -1.92% max DD (81 days, 19 trades)
+    // VIRTUAL reacts to faster trend changes (SMA 30 vs kPEPE's 60)
+    smaCrossoverEnabled: true,
+    smaFastPeriod: 20,                   // SMA 20 (1h candles)
+    smaSlowPeriod: 30,                   // SMA 30 (1h candles) — faster than kPEPE's 60
+    smaSrTolerance: 1.08,               // Tighter tolerance — 8% zone around S/R (vs kPEPE's 10%)
+    smaCrossoverBidBoost: 1.8,
+    smaCrossoverAskBoost: 1.8,
   },
 }
 

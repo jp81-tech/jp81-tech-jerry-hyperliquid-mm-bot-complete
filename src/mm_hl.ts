@@ -86,6 +86,7 @@ import {
 } from './utils/chase.js'
 import { GridManager, GridOrder, GridLayer } from './utils/grid_manager.js'
 import { KpepeToxicityEngine, getKpepeTimeZoneProfile } from './mm/kpepe_toxicity.js'
+import { MoonStreamGuard } from './signals/moon_stream_guard.js'
 import { killSwitchActive } from './utils/kill_switch.js'
 import { fetchAllFillsByTime } from './utils/paginated_fills.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder } from './utils/legacy_unwinder.js'
@@ -371,6 +372,10 @@ function getKpepeGridLayers(atrPct: number): GridLayer[] {
 
 // kPEPE Toxicity Engine instance (pattern-based toxic flow detection)
 const kpepeToxicity = new KpepeToxicityEngine()
+
+// Moon Stream Guard — liquidation & order flow imbalance sniper (Moon Dev API)
+const moonGuard = new MoonStreamGuard()
+moonGuard.start()
 
 // kPEPE per-layer refresh rate tracking
 const kpepeLayerRefresh = { lastL1: 0, lastL23: 0, lastL4: 0 }
@@ -8142,6 +8147,35 @@ class HyperliquidMMBot {
           console.log(`👁️ [VISION_RATIO] ${pair}: bid×${visionBias.bidMult.toFixed(2)} ask×${visionBias.askMult.toFixed(2)} | ${visionBias.reason}`)
         }
 
+        // === MOON GUARD: liquidation spike & order flow imbalance detection ===
+        const moonOut = moonGuard.getOutput()
+        if (pair === 'kPEPE' && moonOut.kpepeSqueezeWarning) {
+          sizeMultipliers.bid = 0
+          sizeMultipliers.ask *= 2.0
+          if (this.tickCount % 5 === 0) {
+            console.warn(`[MOON_GUARD] kPEPE SQUEEZE ACTIVE — bid=0 ask×2.0 | liq=$${moonOut.kpepeLiqUsd.toFixed(0)} imb=${moonOut.kpepeImbalanceRatio.toFixed(2)} | ${moonOut.reason}`)
+          }
+        }
+
+        // === ORDER FLOW FILTER: throttle side facing heavy pressure ===
+        if (moonOut.lastUpdate > 0 && !moonOut.kpepeSqueezeWarning) {
+          const imb = moonOut.kpepeImbalanceRatio
+          if (imb < -0.75) {
+            // Heavy sell pressure — don't catch falling knife
+            sizeMultipliers.bid *= 0.50
+            gridBidMult *= 1.20  // widen bid spread 20%
+            if (this.tickCount % 10 === 0) {
+              console.log(`[ORDER_FLOW] kPEPE Imbalance: ${imb.toFixed(2)}. Throttling Bids (bid×0.50 spread×1.20) for safety.`)
+            }
+          } else if (imb > 0.75) {
+            // Heavy buy pressure — let price run up before selling
+            sizeMultipliers.ask *= 0.50
+            if (this.tickCount % 10 === 0) {
+              console.log(`[ORDER_FLOW] kPEPE Imbalance: +${imb.toFixed(2)}. Throttling Asks (ask×0.50) — let it run.`)
+            }
+          }
+        }
+
         // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
         // Reduces bids when price pumping (don't buy tops), reduces asks when dumping (don't short bottoms)
         const momGuardConfig = getMomentumGuardConfig(pair)
@@ -8285,6 +8319,55 @@ class HyperliquidMMBot {
           // Momentum lags in choppy markets → reduced weight
           const momentumScore = momentumNorm * 0.35 + mgRsiSignal * 0.30 + mgProxSignal * 0.35
 
+          // === SMA CROSSOVER SIGNAL: SMA fast/slow + S/R tolerance zone ===
+          // Backtest-optimized: kPEPE SMA 20/60 + SR tolerance 1.10 → +3.73% return, 2.07 Sharpe
+          let smaCrossoverApplied = false
+          if (momGuardConfig.smaCrossoverEnabled && mvAnalysis) {
+            const sma20Val = mvAnalysis.sma20
+            const sma60Val = mvAnalysis.sma60
+            const crossover = mvAnalysis.smaCrossover
+            const srTol = momGuardConfig.smaSrTolerance
+
+            if (sma20Val > 0 && sma60Val > 0) {
+              const nearSupport = mgSupportBody > 0 && midPrice <= mgSupportBody * srTol
+              const nearResistance = mgResistBody > 0 && midPrice >= mgResistBody / srTol
+
+              // Golden cross (SMA20 crossed above SMA60) near support → bullish, boost bids
+              if (crossover === 'golden' && nearSupport) {
+                sizeMultipliers.bid *= momGuardConfig.smaCrossoverBidBoost
+                sizeMultipliers.ask *= (1.0 / momGuardConfig.smaCrossoverBidBoost)
+                smaCrossoverApplied = true
+                console.log(`📊 [SMA_CROSSOVER] ${pair}: GOLDEN CROSS near SUPPORT — SMA20=$${sma20Val.toFixed(6)} > SMA60=$${sma60Val.toFixed(6)} | support=$${mgSupportBody.toFixed(6)} tol=${srTol} → bid×${momGuardConfig.smaCrossoverBidBoost} ask×${(1.0 / momGuardConfig.smaCrossoverBidBoost).toFixed(2)}`)
+              }
+              // Death cross (SMA20 crossed below SMA60) near resistance → bearish, boost asks
+              else if (crossover === 'death' && nearResistance) {
+                sizeMultipliers.ask *= momGuardConfig.smaCrossoverAskBoost
+                sizeMultipliers.bid *= (1.0 / momGuardConfig.smaCrossoverAskBoost)
+                smaCrossoverApplied = true
+                console.log(`📊 [SMA_CROSSOVER] ${pair}: DEATH CROSS near RESISTANCE — SMA20=$${sma20Val.toFixed(6)} < SMA60=$${sma60Val.toFixed(6)} | resistance=$${mgResistBody.toFixed(6)} tol=${srTol} → ask×${momGuardConfig.smaCrossoverAskBoost} bid×${(1.0 / momGuardConfig.smaCrossoverAskBoost).toFixed(2)}`)
+              }
+              // Persistent SMA trend (not just crossover moment): SMA20 > SMA60 = bullish bias
+              else if (sma20Val > sma60Val && nearSupport) {
+                // SMA20 already above SMA60 near support — mild bullish bias
+                sizeMultipliers.bid *= 1.15
+                sizeMultipliers.ask *= 0.90
+                smaCrossoverApplied = true
+                if (this.tickCount % 20 === 0) {
+                  console.log(`📊 [SMA_TREND] ${pair}: BULLISH (SMA20>SMA60) near SUPPORT — bid×1.15 ask×0.90`)
+                }
+              }
+              else if (sma20Val < sma60Val && nearResistance) {
+                // SMA20 below SMA60 near resistance — mild bearish bias
+                sizeMultipliers.ask *= 1.15
+                sizeMultipliers.bid *= 0.90
+                smaCrossoverApplied = true
+                if (this.tickCount % 20 === 0) {
+                  console.log(`📊 [SMA_TREND] ${pair}: BEARISH (SMA20<SMA60) near RESISTANCE — ask×1.15 bid×0.90`)
+                }
+              }
+            }
+          }
+
           // Pipeline status for Discord S/R alerts (collected across phases, sent after BREAKOUT_TP)
           const srPipelineStatus = {
             phase: '' as string,
@@ -8412,7 +8495,8 @@ class HyperliquidMMBot {
               `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
               `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
               `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}` +
-              ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`
+              ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}` +
+              (smaCrossoverApplied ? ` | SMA${momGuardConfig.smaFastPeriod}/${momGuardConfig.smaSlowPeriod}:${mvAnalysis?.smaCrossover ?? 'none'}` : '')
             )
           }
 
@@ -8618,7 +8702,7 @@ class HyperliquidMMBot {
             const nearSupport = mgSupportBody > 0 && mgSupportDist < accumZone
             const nearResistance = mgResistBody > 0 && mgResistDist < accumZone
 
-            // LONG + underwater + near support = BLOCK ASKS
+            // LONG + underwater (mid < entry) + near support = BLOCK ASKS
             if (hasLongPos && entryPrice > 0 && midPrice < entryPrice && nearSupport) {
               const underwaterPct = ((entryPrice - midPrice) / entryPrice) * 100
               sizeMultipliers.ask = 0
@@ -9240,6 +9324,91 @@ class HyperliquidMMBot {
       }
     } else {
       // PREDICTION BIAS disabled — prediction-api and war-room removed
+
+      // === SMA CROSSOVER SIGNAL for non-kPEPE pairs (VIRTUAL etc.) ===
+      const momGuardCfg = getMomentumGuardConfig(pair)
+      let smaCrossoverAppliedOther = false
+      if (momGuardCfg.smaCrossoverEnabled) {
+        const mvA = this.marketVision?.getPairAnalysis(pair)
+        if (mvA) {
+          const sma20V = mvA.sma20
+          const sma60V = mvA.sma60
+          const crossoverSignal = mvA.smaCrossover
+          const srTolOther = momGuardCfg.smaSrTolerance
+
+          // S/R from 1h candle bodies (same as kPEPE MG)
+          const resistBody12h = mvA.resistanceBody12h ?? 0
+          const supportBody12h = mvA.supportBody12h ?? 0
+          const resistBody = resistBody12h > 0 ? resistBody12h : (mvA.resistanceBody4h ?? 0)
+          const supportBody = supportBody12h > 0 ? supportBody12h : (mvA.supportBody4h ?? 0)
+
+          if (sma20V > 0 && sma60V > 0) {
+            const nearSup = supportBody > 0 && midPrice <= supportBody * srTolOther
+            const nearRes = resistBody > 0 && midPrice >= resistBody / srTolOther
+
+            if (crossoverSignal === 'golden' && nearSup) {
+              sizeMultipliers.bid *= momGuardCfg.smaCrossoverBidBoost
+              sizeMultipliers.ask *= (1.0 / momGuardCfg.smaCrossoverBidBoost)
+              smaCrossoverAppliedOther = true
+              console.log(`📊 [SMA_CROSSOVER] ${pair}: GOLDEN CROSS near SUPPORT — SMA${momGuardCfg.smaFastPeriod}=$${sma20V.toFixed(6)} > SMA${momGuardCfg.smaSlowPeriod}=$${sma60V.toFixed(6)} | support=$${supportBody.toFixed(6)} tol=${srTolOther} → bid×${momGuardCfg.smaCrossoverBidBoost} ask×${(1.0 / momGuardCfg.smaCrossoverBidBoost).toFixed(2)}`)
+            } else if (crossoverSignal === 'death' && nearRes) {
+              sizeMultipliers.ask *= momGuardCfg.smaCrossoverAskBoost
+              sizeMultipliers.bid *= (1.0 / momGuardCfg.smaCrossoverAskBoost)
+              smaCrossoverAppliedOther = true
+              console.log(`📊 [SMA_CROSSOVER] ${pair}: DEATH CROSS near RESISTANCE — SMA${momGuardCfg.smaFastPeriod}=$${sma20V.toFixed(6)} < SMA${momGuardCfg.smaSlowPeriod}=$${sma60V.toFixed(6)} | resistance=$${resistBody.toFixed(6)} tol=${srTolOther} → ask×${momGuardCfg.smaCrossoverAskBoost} bid×${(1.0 / momGuardCfg.smaCrossoverAskBoost).toFixed(2)}`)
+            } else if (sma20V > sma60V && nearSup) {
+              sizeMultipliers.bid *= 1.15
+              sizeMultipliers.ask *= 0.90
+              smaCrossoverAppliedOther = true
+              if (this.tickCount % 20 === 0) {
+                console.log(`📊 [SMA_TREND] ${pair}: BULLISH (SMA${momGuardCfg.smaFastPeriod}>SMA${momGuardCfg.smaSlowPeriod}) near SUPPORT — bid×1.15 ask×0.90`)
+              }
+            } else if (sma20V < sma60V && nearRes) {
+              sizeMultipliers.ask *= 1.15
+              sizeMultipliers.bid *= 0.90
+              smaCrossoverAppliedOther = true
+              if (this.tickCount % 20 === 0) {
+                console.log(`📊 [SMA_TREND] ${pair}: BEARISH (SMA${momGuardCfg.smaFastPeriod}<SMA${momGuardCfg.smaSlowPeriod}) near RESISTANCE — ask×1.15 bid×0.90`)
+              }
+            }
+          }
+
+          // Periodic SMA status log (every 20 ticks, + first 3 ticks for verification)
+          if (this.tickCount % 20 === 0 || this.tickCount <= 3) {
+            const smaStatus = sma20V > 0 && sma60V > 0
+              ? `SMA${momGuardCfg.smaFastPeriod}/$${sma20V.toFixed(4)} SMA${momGuardCfg.smaSlowPeriod}/$${sma60V.toFixed(4)} cross:${crossoverSignal ?? 'none'}`
+              : 'SMA:no_data'
+            console.log(`📊 [SMA_STATUS] ${pair}: ${smaStatus}${smaCrossoverAppliedOther ? ' APPLIED' : ''}`)
+          }
+        }
+      }
+
+      // === MOON GUARD: liquidation spike detection for non-kPEPE pairs ===
+      const moonOutOther = moonGuard.getOutput()
+      if (pair === 'VIRTUAL' && moonOutOther.virtualSqueezeWarning) {
+        sizeMultipliers.bid = 0
+        sizeMultipliers.ask *= 2.0
+        if (this.tickCount % 5 === 0) {
+          console.warn(`[MOON_GUARD] VIRTUAL SQUEEZE ACTIVE — bid=0 ask×2.0 | liq=$${moonOutOther.virtualLiqUsd.toFixed(0)} imb=${moonOutOther.virtualImbalanceRatio.toFixed(2)} | ${moonOutOther.reason}`)
+        }
+      }
+
+      // === ORDER FLOW FILTER for VIRTUAL ===
+      if (pair === 'VIRTUAL' && moonOutOther.lastUpdate > 0 && !moonOutOther.virtualSqueezeWarning) {
+        const imb = moonOutOther.virtualImbalanceRatio
+        if (imb < -0.75) {
+          sizeMultipliers.bid *= 0.50
+          gridBidMult *= 1.20
+          if (this.tickCount % 10 === 0) {
+            console.log(`[ORDER_FLOW] VIRTUAL Imbalance: ${imb.toFixed(2)}. Throttling Bids (bid×0.50 spread×1.20) for safety.`)
+          }
+        } else if (imb > 0.75) {
+          sizeMultipliers.ask *= 0.50
+          if (this.tickCount % 10 === 0) {
+            console.log(`[ORDER_FLOW] VIRTUAL Imbalance: +${imb.toFixed(2)}. Throttling Asks (ask×0.50) — let it run.`)
+          }
+        }
+      }
 
       gridOrders = this.gridManager!.generateGridOrders(
         pair,
@@ -11265,12 +11434,14 @@ async function main() {
   // Handle graceful shutdown
   process.on('SIGINT', () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...')
+    moonGuard.stop()
     getNansenProAPI().cleanup()
     process.exit(0)
   })
 
   process.on('SIGTERM', () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...')
+    moonGuard.stop()
     getNansenProAPI().cleanup()
     process.exit(0)
   })

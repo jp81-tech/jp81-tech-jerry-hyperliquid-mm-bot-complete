@@ -3,6 +3,7 @@ import { getNansenProAPI, NansenProAPI } from '../integrations/nansen_pro.js';
 import { getNansenHyperliquidAPI, NansenHyperliquidAPI } from '../integrations/nansen_scoring.js';
 import { AIArtist, VisualAnalysis } from '../vision/ai_artist.js';
 import { Technicals } from './technicals.js';
+import { getMomentumGuardConfig } from '../config/short_only_config.js';
 
 export type CoinTuning = {
   enabled: boolean;
@@ -291,9 +292,12 @@ export type PairAnalysis = {
   resistance4h: number; // HTF Resistance Price — 1h candles, last 72 (3 days)
   supportBody4h: number; // HTF Support from candle bodies (min of O/C) — 1h×72, wick-filtered
   resistanceBody4h: number; // HTF Resistance from candle bodies (max of O/C) — 1h×72, wick-filtered
-  supportBody12h: number; // Short-term support from 1h candle bodies (last 24 = 24h) for MG proximity
-  resistanceBody12h: number; // Short-term resistance from 1h candle bodies (last 24 = 24h) for MG proximity
+  supportBody12h: number; // Short-term support from 1h candle bodies (last 50 = 50h) for MG proximity + SMA S/R
+  resistanceBody12h: number; // Short-term resistance from 1h candle bodies (last 50 = 50h) for MG proximity + SMA S/R
   lastCandle15mClose: number; // Last CLOSED 15m candle close price (for confirmed S/R break detection)
+  sma20: number; // SMA 20 from 1h candles (fast SMA for crossover)
+  sma60: number; // SMA 60 from 1h candles (slow SMA for crossover)
+  smaCrossover: 'golden' | 'death' | 'none'; // Golden cross = SMA20 > SMA60, Death cross = SMA20 < SMA60
   vwap: number; // Rolling 24h VWAP from 1h candles — "fair value" gravity anchor
   vwapDistance: number; // (price - vwap) / vwap — positive = premium, negative = discount
   activeCandlePattern: 'none' | 'bullish_pinbar' | 'bearish_pinbar' | 'bullish_engulfing' | 'bearish_engulfing';
@@ -322,7 +326,7 @@ export class MarketVisionService {
   private isRunning: boolean = false;
   private updateIntervalMs: number = 2 * 60 * 1000; // Update every 2 minutes (faster for reversal detection)
   // We will dynamically update this list based on what the bot is trading
-  private activePairs: string[] = ['LIT', 'kPEPE', 'ETH', 'BTC', 'HYPE', 'SOL'];
+  private activePairs: string[] = ['LIT', 'kPEPE', 'ETH', 'BTC', 'HYPE', 'SOL', 'VIRTUAL'];
 
   constructor(api: HyperliquidAPI) {
     this.api = api;
@@ -448,6 +452,9 @@ export class MarketVisionService {
         // Using 1h candles for stable S/R levels, MM operates on 15m candles for execution
         let supportBody12h = 0;
         let resistanceBody12h = 0;
+        let sma20 = 0;
+        let sma60 = 0;
+        let smaCrossover: 'golden' | 'death' | 'none' = 'none';
 
         // C. STF Context: 15m Candles for "Golden Ticket" Entry
         // We fetch last 2 days (48h) of 15m candles
@@ -464,13 +471,41 @@ export class MarketVisionService {
             trend15m = ema9_15m > ema21_15m ? 'bull' : 'bear';
           }
 
-          // STF S/R from 1h candle bodies (last 24 = 24h) — stable levels from hourly candles
+          // STF S/R from 1h candle bodies (last 50 = 50h) — matches backtest rolling(50) S/R
           // MM still operates on 15m candles for execution timing
-          const stfLookback = Math.min(24, candles.length);
+          const stfLookback = Math.min(50, candles.length);
           if (stfLookback >= 12) {
             const recent1h = candles.slice(-stfLookback);
             supportBody12h = Math.min(...recent1h.map(c => Math.min(c.o, c.c)));
             resistanceBody12h = Math.max(...recent1h.map(c => Math.max(c.o, c.c)));
+          }
+
+          // SMA fast/slow from 1h candles — crossover signal for momentum strategy
+          // Periods are per-token from MomentumGuardConfig (kPEPE: 20/60, VIRTUAL: 20/30, etc.)
+          const mgConfig = getMomentumGuardConfig(pair);
+          const smaFast = mgConfig.smaFastPeriod;   // e.g. 20
+          const smaSlow = mgConfig.smaSlowPeriod;    // e.g. 60 (kPEPE) or 30 (VIRTUAL)
+          const closes1h = candles.map((c: any) => c.c);
+          if (closes1h.length >= smaSlow) {
+            const sumFast = closes1h.slice(-smaFast).reduce((a: number, b: number) => a + b, 0);
+            sma20 = sumFast / smaFast;
+            const sumSlow = closes1h.slice(-smaSlow).reduce((a: number, b: number) => a + b, 0);
+            sma60 = sumSlow / smaSlow;
+            // Check previous bar's SMAs for crossover detection
+            const prevClosesFast = closes1h.slice(-(smaFast + 1), -1);
+            const prevClosesSlow = closes1h.slice(-(smaSlow + 1), -1);
+            if (prevClosesFast.length === smaFast && prevClosesSlow.length === smaSlow) {
+              const prevSmaFast = prevClosesFast.reduce((a: number, b: number) => a + b, 0) / smaFast;
+              const prevSmaSlow = prevClosesSlow.reduce((a: number, b: number) => a + b, 0) / smaSlow;
+              if (sma20 > sma60 && prevSmaFast <= prevSmaSlow) {
+                smaCrossover = 'golden';  // Fast SMA just crossed above slow SMA
+              } else if (sma20 < sma60 && prevSmaFast >= prevSmaSlow) {
+                smaCrossover = 'death';   // Fast SMA just crossed below slow SMA
+              }
+            }
+          } else if (closes1h.length >= smaFast) {
+            const sumFast = closes1h.slice(-smaFast).reduce((a: number, b: number) => a + b, 0);
+            sma20 = sumFast / smaFast;
           }
         }
 
@@ -748,6 +783,9 @@ export class MarketVisionService {
           supportBody12h,
           resistanceBody12h,
           lastCandle15mClose,
+          sma20,
+          sma60,
+          smaCrossover,
           vwap,
           vwapDistance,
           supportDist: distSup,
