@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-07
+- Data: 2026-03-08
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -43,6 +43,42 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 8 marca 2026
+
+### 113. SMA Crossover Signal — VIRTUAL integration + per-token dynamic SMA (08.03)
+
+**Kontekst:** Backtestowano strategię MomentumSMA+RSI na VIRTUAL 1H (2000 candles). Grid search: `sma_fast=[10-25], sma_slow=[30-70], sr_tolerance=[1.02-1.15]`. Wygrały parametry: **SMA 20/30, SR tolerance 1.08**.
+
+**Problem:** SMA crossover sygnał działał tylko dla kPEPE (blok `if (pair === 'kPEPE')`). VIRTUAL nie miał żadnego SMA pipeline'u + nie był w `activePairs` MarketVision (zero candle data).
+
+**Zmiany:**
+
+1. **`src/signals/market_vision.ts`:**
+   - Dodano `'VIRTUAL'` do `activePairs` (bez tego `getPairAnalysis('VIRTUAL')` zwracało undefined)
+   - Dodano `sma20`, `sma60`, `smaCrossover` do `PairAnalysis` interface
+   - S/R lookback: 24 → **50 candles** (match backtest `rolling(window=50)`)
+   - Dynamiczne SMA per-token via `getMomentumGuardConfig(pair)` — VIRTUAL: 20/30, kPEPE: 20/60
+   - Crossover detection: porównanie current vs previous bar's SMA (golden/death cross)
+
+2. **`src/config/short_only_config.ts`:**
+   - 7 nowych pól w `MomentumGuardConfig`: `smaCrossoverEnabled`, `smaFastPeriod`, `smaSlowPeriod`, `smaSrTolerance`, `smaCrossoverBidBoost`, `smaCrossoverAskBoost`, `smaCrossoverTrendMild`
+   - Override VIRTUAL: `{smaCrossoverEnabled: true, smaFastPeriod: 20, smaSlowPeriod: 30, smaSrTolerance: 1.08, bidBoost: 1.8, askBoost: 1.8}`
+
+3. **`src/mm_hl.ts` (else branch, non-kPEPE pairs):**
+   - Nowy blok SMA crossover signal PRZED Moon Guard section
+   - Golden cross + near support → `bid × 1.8, ask × 0.56`
+   - Death cross + near resistance → `ask × 1.8, bid × 0.56`
+   - Trend mild (SMA20 > SMA60 + near sup) → `bid × 1.15, ask × 0.90`
+   - `SMA_STATUS` log co 20 ticków + pierwsze 3 ticki
+
+**Zweryfikowano w produkcji:**
+- mm-virtual: `📊 [SMA_STATUS] VIRTUAL: SMA20/$0.6830 SMA30/$0.6863 cross:none`
+- mm-pure (kPEPE): nadal działa z SMA 20/60
+
+**Pliki:** `src/config/short_only_config.ts`, `src/signals/market_vision.ts`, `src/mm_hl.ts`
 
 ---
 
