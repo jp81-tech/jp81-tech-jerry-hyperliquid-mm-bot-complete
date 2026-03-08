@@ -9126,3 +9126,186 @@ S/R pipeline nie dziala w prozni. Oto jak wspolpracuje z reszta:
 4. **Progressive > Binary.** Kazda faza w pipeline jest PROGRESYWNA (0%→100%), nie binarna (ON/OFF). Bounce Hold nie robi "ask=0 → ask=1.0" — robi "ask x0.15 → x0.36 → x0.58 → x0.79 → x1.00". To daje gladkie przejscia i unika nagłych skokow w zachowaniu grida.
 
 5. **Multiplicative composition.** Kazdy system mnozy `sizeMultipliers.bid/ask` — wynik to iloczyn WSZYSTKICH modulow. Gdy 3 systemy sie zgadzaja (MG x1.30 * SR_REDUCTION x1.80 * BREAKOUT_TP x1.50 = bid x3.51), efekt jest potezny. Gdy sie nie zgadzaja — wzajemnie sie neutralizuja. To jest elegancja multiplicative composition: nie musisz pisac regul "co robic gdy A i B sie nie zgadzaja" — matematyka robi to za ciebie.
+
+---
+
+## Chapter 52: Trzy Zamki, Żaden Nie Zamknięty — Jak kPEPE Krwawił Przez Luki w Obronie (08.03.2026)
+
+> "Nie wystarczy mieć trzy zamki na drzwiach, jeśli złodziej wchodzi przez okno."
+
+### Objawy: śmierć od tysiąca cięć
+
+Ranek 8 marca. kPEPE bot jest LONG (entry $0.003280), cena spada do $0.003216-$0.003267. Bot zaczyna zamykać longi — 17 transakcji "Close Long", prawie wszystkie ze stratą. Łączny wynik: **-$19.76**.
+
+Każda strata jest mała — $0.08 tu, $1.29 tam, $5.66 tam. Ale one się kumulują. To jest klasyczny "death by a thousand cuts" — bot nie eksploduje, on powoli się wykrwawia.
+
+```
+08:32  Close Long @ $0.003221  →  -$5.66   (1.8% pod entry)
+08:48  Close Long @ $0.003216  →  -$6.14   (2.0% pod entry)
+10:29  Close Long @ $0.003267  →  -$0.98   (0.4% pod entry)
+11:13  Close Long @ $0.003259  →  -$1.89   (0.6% pod entry)
+11:22  Close Long @ $0.003264  →  -$0.95   (0.5% pod entry)
+11:22  Close Long @ $0.003269  →  -$0.71   (0.3% pod entry)
+...itd, łącznie 15 close'ów na minusie
+```
+
+### Diagnoza: trzy zamki, trzy luki
+
+Bot miał TRZY systemy obronne, które powinny zapobiec sprzedaży poniżej entry. Żaden nie zadziałał.
+
+#### Zamek 1: BREAKEVEN_BLOCK (linia ~8692)
+
+```typescript
+if (hasLongPos && entryPrice > 0 && midPrice < entryPrice && nearSupport) {
+  sizeMultipliers.ask = 0  // ZERO asków
+}
+```
+
+**Luka:** `nearSupport` — wymaga, żeby cena była blisko supportu. Gdy cena jest w "no man's land" (underwater, ale daleko od S/R), ten zamek się nie zamyka. Support był na $0.003180, a cena chodziła po $0.003220-0.003270 — za daleko od supportu, żeby BREAKEVEN_BLOCK się aktywował.
+
+#### Zamek 2: MIN_PROFIT (linia ~9218)
+
+```typescript
+const minAskPrice = entryPx * (1 + minProfitFraction)  // entry + 10bps
+gridOrders = gridOrders.filter(o => o.side !== 'ask' || o.price >= minAskPrice)
+```
+
+**Luka:** AUTO_SKEW. Gdy bot jest LONG (skew=11%), AUTO_SKEW przesuwa mid price W DÓŁ ("aggressive asks"). Grid generuje ordery wokół przesuniętego mid. Efekt: aski są umieszczane niżej niż powinny. Plus, przy `|skew| > 30%`, MIN_PROFIT zaczyna POZWALAĆ na straty (graduated bypass).
+
+#### Zamek 3: PROFIT_FLOOR (linia ~9429)
+
+```typescript
+if (pair !== 'kPEPE' && ...) {
+  gridOrders = gridOrders.filter(o => o.side !== 'ask' || o.price >= entryPx)
+}
+```
+
+**Luka:** `pair !== 'kPEPE'`! Dosłownie: kPEPE jest WYKLUCZONE z tego filtra. Komentarz mówił "kPEPE excluded — need full grid on both sides for fill volume". To miało sens kiedyś — kPEPE jako market maker potrzebuje orderów po obu stronach żeby łapać spread. Ale to było napisane ZANIM dodaliśmy S/R Accumulation i Momentum Guard. W nowym modelu bot świadomie buduje pozycję i NIE powinien jej zamykać ze stratą.
+
+### Analogia: system alarmowy w domu
+
+Wyobraź sobie, że masz dom z trzema systemami alarmowymi:
+
+1. **Czujnik ruchu** — ale tylko w salonie (BREAKEVEN_BLOCK: tylko near S/R)
+2. **Zamek na drzwiach** — ale ktoś podłożył klucz pod wycieraczkę (MIN_PROFIT: AUTO_SKEW obniża aski)
+3. **Alarm na oknach** — ale wyłączony w kuchni (PROFIT_FLOOR: `pair !== 'kPEPE'`)
+
+Złodziej (rynek) wchodzi przez okno w kuchni. Czujnik ruchu go nie widzi (nie jest w salonie). Zamek na drzwiach jest nieistotny (wchodzi oknem). Alarm na oknach jest wyłączony właśnie w tym pokoju.
+
+Trzy systemy, zero ochrony.
+
+### Fix: HARD BREAKEVEN GUARD
+
+Zamiast łatać trzy dziury, dodaliśmy jeden UNIWERSALNY guard — działa ZAWSZE, dla KAŻDEGO tokena, NIEZALEŻNIE od S/R proximity:
+
+```typescript
+const BREAKEVEN_FEE_BUFFER = 0.001  // 0.1% = 10bps na feesy
+
+if (position && Math.abs(position.size) > 0 && position.entryPrice
+    && Array.isArray(gridOrders) && !inventorySlPanic) {
+  const entryPx = position.entryPrice
+
+  if (position.size > 0) {
+    // LONG: żaden ask nie może być poniżej entry + fee buffer
+    const minAskPx = entryPx * (1 + BREAKEVEN_FEE_BUFFER)
+    gridOrders = gridOrders.filter(o =>
+      o.side !== 'ask' || o.price >= minAskPx
+    )
+  } else if (position.size < 0) {
+    // SHORT: żaden bid nie może być powyżej entry - fee buffer
+    const maxBidPx = entryPx * (1 - BREAKEVEN_FEE_BUFFER)
+    gridOrders = gridOrders.filter(o =>
+      o.side !== 'bid' || o.price <= maxBidPx
+    )
+  }
+}
+```
+
+**Kluczowe decyzje projektowe:**
+
+1. **Fee buffer 0.1% (10bps):** Round-trip fee na Hyperliquid to ~8bps (4bps maker × 2). Dodajemy 2bps marginesu. Bez tego bufora, ask na cenie entry pozornie wychodzi na zero, ale po odliczeniu fee to strata.
+
+2. **`!inventorySlPanic`:** Jedyny bypass. Gdy bot jest w ekstremalnym drawdown (INVENTORY_SL), MUSI zamknąć pozycję nawet ze stratą. To jest "zbij szybę w razie pożaru" — emergency exit ma priorytet nad profit protection.
+
+3. **Brak `pair !== 'kPEPE'`:** Guard jest UNIWERSALNY. Żaden token nie jest wykluczony. To eliminuje całą klasę bugów typu "zapomniano dodać token X do listy wyjątków".
+
+4. **Filtrowanie orderów, nie zerowanie multiplierów:** BREAKEVEN_BLOCK ustawia `sizeMultipliers.ask = 0` — to blokuje WSZYSTKIE aski. HARD BREAKEVEN GUARD filtruje KONKRETNE ordery poniżej breakeven, ale przepuszcza te powyżej. Efekt: bot nadal może sprzedawać Z ZYSKIEM, nawet gdy jest underwater.
+
+### Layered Defense: jak to teraz działa razem
+
+```
+Cena blisko SUPPORT + underwater:
+  ├── BREAKEVEN_BLOCK: ask=0 (zero asków — pełna blokada)
+  └── GUARD: backup, nic do filtrowania (zero asków i tak)
+
+Cena w "no man's land" + underwater:
+  ├── BREAKEVEN_BLOCK: NIE aktywny (nie near support)
+  ├── Grid generuje 9 asków poniżej entry
+  └── GUARD: filtruje wszystkie 9 → sellLevels=0  ← NOWY!
+
+Cena blisko ENTRY (np. 0.2% pod):
+  ├── BREAKEVEN_BLOCK: może nie aktywować (nie near S/R)
+  ├── Grid generuje 9 asków, 7 powyżej breakeven, 2 poniżej
+  └── GUARD: filtruje 2 → sellLevels=7 (bot może zamknąć z zyskiem)
+
+INVENTORY_SL PANIC (ekstremalny drawdown):
+  ├── inventorySlPanic = true
+  ├── GUARD: BYPASSED (emergency exit)
+  └── Bot zamyka ze stratą (lepsze -5% niż -20%)
+```
+
+### Weryfikacja w produkcji
+
+Natychmiast po deployu zobaczyliśmy:
+
+```
+mm-virtual:
+🛡️ [GUARD] VIRTUAL: Underwater protection active.
+  Restricting all asks to Breakeven (>$0.660560)
+  | entry=$0.659900 mid=$0.648050 removed=8
+
+mm-pure:
+🛡️ [BREAKEVEN_BLOCK] kPEPE: LONG underwater 1.04% at SUPPORT → BLOCKING ASKS
+  (entry=0.003280 mid=0.003246)
+[ML-GRID] kPEPE: buyLevels=15 sellLevels=0  ← zero asków, bot czeka
+```
+
+VIRTUAL: entry $0.6599, cena $0.6481 (1.8% pod). GUARD usunął **wszystkie 8 asków**. Bez GUARD, te aski byłyby fillowane po $0.649-0.654, każdy fill = strata ~$0.50-1.00.
+
+### Scope hoisting — subtelny bug w zasięgu zmiennych
+
+`inventorySlPanic` był zadeklarowany WEWNĄTRZ bloku `if (pair === 'kPEPE')`:
+
+```typescript
+if (pair === 'kPEPE') {
+  let inventorySlPanic = false  // ← tu
+  // ... 1200 linii kodu ...
+}
+// GUARD jest TU — poza blokiem → inventorySlPanic nie istnieje!
+```
+
+HARD BREAKEVEN GUARD jest PO zamknięciu obu bloków (kPEPE i else). `inventorySlPanic` zadeklarowany wewnątrz bloku nie jest widoczny na zewnątrz (`let` ma block scope w JavaScript/TypeScript).
+
+**Fix:** Hoist deklaracji PRZED `if/else`:
+
+```typescript
+let inventorySlPanic = false  // ← HOISTED: widoczny w GUARD
+if (pair === 'kPEPE') {
+  // ... inventorySlPanic = true gdy INVENTORY_SL fires ...
+}
+// GUARD: !inventorySlPanic → działa poprawnie
+```
+
+To jest klasyczny "scope hoisting" — przeniesienie deklaracji na wyższy poziom żeby zmienna była dostępna tam, gdzie jest potrzebna. W dużych plikach (mm_hl.ts ma 10k+ linii) łatwo przeoczyć, że zmienna jest zadeklarowana głęboko w bloku if/else.
+
+### 5 lekcji
+
+1. **Exclusion lists to bomby zegarowe.** `pair !== 'kPEPE'` w PROFIT_FLOOR to klasyczny "negative filter" — lista rzeczy które NIE są chronione. Dodajesz nowy token → zapominasz dodać go do listy → token jest niezabezpieczony. Positive filter (`if position && ...`) jest bezpieczniejszy — domyślnie chroni wszystko.
+
+2. **Testuj ochronę, nie tylko logikę.** Każdy z trzech zamków działał poprawnie w izolacji. Bug był w ich KOMPOZYCJI — luki w jednym nie były pokryte przez drugi. Gdybyśmy napisali test "co się dzieje gdy bot jest LONG, underwater, i NIE near support?", znaleźlibyśmy lukę od razu.
+
+3. **Fee buffer > zero buffer.** Breakeven to nie "sprzedaj po cenie wejścia". To "sprzedaj po cenie wejścia + feesy". Bez bufora, every fill at entry is a net loss. 10bps bufora to $0.10 na $100 — grosze, ale zapobiega systematycznym micro-losses.
+
+4. **Emergency exit musi mieć bypass.** GUARD chroni przed churnem, ale nie może blokować emergency exit. `!inventorySlPanic` to "zbij szybę w razie pożaru". Bez tego, bot w ekstremalnym drawdown nie mógłby zamknąć pozycji → katastrofalna strata. Każdy safety system musi mieć override dla sytuacji gorszej niż ta, przed którą chroni.
+
+5. **Block scope w dużych plikach to pułapka.** `let` w bloku `if` nie jest widoczny poza nim. W pliku z 10k linii, blok `if` może mieć 1200 linii kodu — łatwo zapomnieć, że jesteś "wewnątrz" i zmienna nie będzie widoczna za `}`. Hoist krytyczne zmienne na wyższy poziom, albo — jeszcze lepiej — rozbij plik na mniejsze moduły.
