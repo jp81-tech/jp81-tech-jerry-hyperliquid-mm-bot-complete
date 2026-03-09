@@ -665,10 +665,26 @@ export function analyzeTokenSm(
     } else if (whaleTrackerMode.includes('LONG')) {
       dominantSide = 'LONG'
     } else {
-      dominantSide = 'NEUTRAL'
+      // whale_tracker says NEUTRAL — but for small-cap tokens with TOKEN_SM_EXPOSURE_OVERRIDES,
+      // the ratio-based dominantSide may be more accurate (whale_tracker has its own higher thresholds)
+      const hasLowerThreshold = TOKEN_SM_EXPOSURE_OVERRIDES[token] !== undefined
+      const ratioBasedSide = ratio >= THRESHOLDS.moderateDominanceRatio ? 'SHORT'
+        : ratio <= 1 / THRESHOLDS.moderateDominanceRatio ? 'LONG'
+        : 'NEUTRAL'
+
+      if (hasLowerThreshold && ratioBasedSide !== 'NEUTRAL' && totalExposure >= (TOKEN_SM_EXPOSURE_OVERRIDES[token] ?? THRESHOLDS.minSmExposureUsd)) {
+        // Keep ratio-based dominantSide — whale_tracker NEUTRAL is due to its own higher thresholds
+        dominantSide = ratioBasedSide
+        // Calculate conviction from ratio since whale_tracker gave 0
+        const ratioStrength = Math.min(ratio >= 1 ? ratio / THRESHOLDS.strongDominanceRatio : (1/ratio) / THRESHOLDS.strongDominanceRatio, 1.0)
+        convictionScore = Math.max(convictionScore, THRESHOLDS.moderateConviction + ratioStrength * (THRESHOLDS.highConviction - THRESHOLDS.moderateConviction))
+        console.log(`🎯 [${token}] whale_tracker NEUTRAL overridden → ratio ${ratio.toFixed(1)}x (${ratioBasedSide}) conviction=${(convictionScore*100).toFixed(0)}% (small-cap ratio override)`)
+      } else {
+        dominantSide = 'NEUTRAL'
+      }
     }
 
-    console.log(`🎯 [${token}] Using whale_tracker confidence: ${whaleTrackerConfidence}% (${whaleTrackerMode})`)
+    console.log(`🎯 [${token}] Using whale_tracker confidence: ${whaleTrackerConfidence}% (${whaleTrackerMode})${dominantSide !== 'NEUTRAL' && !whaleTrackerMode.includes(dominantSide) ? ` → ratio override: ${dominantSide}` : ''}`)
 
     // Capital Dominance v3: Attenuate on-chain flows when perps dominate
     let flowAttenuation = 1.0
@@ -715,6 +731,8 @@ export function analyzeTokenSm(
 
     if (engineSignal.action === 'WAIT') {
       // Engine not confident — but whale_tracker may have PnL-based analysis that Engine doesn't see
+      // Also check if we did a ratio override for small-cap tokens (dominantSide != NEUTRAL despite whale_tracker NEUTRAL)
+      const hasRatioOverride = TOKEN_SM_EXPOSURE_OVERRIDES[token] !== undefined && dominantSide !== 'NEUTRAL' && convictionScore >= THRESHOLDS.moderateConviction
       if (whaleTrackerConfidence >= 50 && whaleTrackerMode && !whaleTrackerMode.includes('NEUTRAL')) {
         // whale_tracker has high conviction from PnL analysis (shorts winning, longs underwater etc.)
         // SignalEngine only sees ratio which may look "not extreme enough" — trust whale_tracker
@@ -722,6 +740,13 @@ export function analyzeTokenSm(
         engineOverrideConfidence = whaleTrackerConfidence;
         // Keep dominantSide from whale_tracker (already set at line 649-655)
         console.log(`🧠 [${token}] Engine WAIT but whale_tracker confident (${whaleTrackerConfidence}%) → KEEP ${whaleTrackerMode} (allowLongs=${signalEngineAllowLongs}, allowShorts=${signalEngineAllowShorts})`);
+      } else if (hasRatioOverride) {
+        // Small-cap token: whale_tracker said NEUTRAL but ratio override gave us a direction
+        // Engine WAIT is expected (low flow data) — trust our ratio-based analysis
+        engineOverrideMode = dominantSide === 'SHORT' ? MmMode.FOLLOW_SM_SHORT : MmMode.FOLLOW_SM_LONG;
+        engineOverrideConfidence = convictionScore * 100;
+        // Keep dominantSide from ratio override (already set at line 677)
+        console.log(`🧠 [${token}] Engine WAIT but ratio override active (${dominantSide} ${(convictionScore*100).toFixed(0)}%) → KEEP ${engineOverrideMode} (small-cap ratio override)`);
       } else {
         // Low whale_tracker confidence or NEUTRAL — fall back to PURE_MM
         engineOverrideMode = 'PURE_MM';
@@ -1404,8 +1429,18 @@ export function getTokenRiskParams(token: string): {
 /**
  * Get SM direction for a token: 'SHORT', 'LONG', or null.
  */
+/**
+ * Returns true if token has per-token SM awareness (TOKEN_SM_EXPOSURE_OVERRIDES).
+ * Used to bypass IS_PURE_MM_BOT guards for shouldHoldForTp on small-cap tokens.
+ */
+export function hasSmAwareness(token: string): boolean {
+  return TOKEN_SM_EXPOSURE_OVERRIDES[token] !== undefined
+}
+
 export function getSmDirection(token: string): 'SHORT' | 'LONG' | null {
-  if (isForcedMmPair(token)) return null  // PURE_MM → no SM direction
+  // For PURE_MM tokens with TOKEN_SM_EXPOSURE_OVERRIDES, still return SM direction
+  // (needed for shouldHoldForTp, anti-churn, BREAKEVEN_BLOCK awareness)
+  if (isForcedMmPair(token) && !TOKEN_SM_EXPOSURE_OVERRIDES[token]) return null
   const analysis = cachedAnalysis.get(token)
   if (!analysis) return null
   if (analysis.mode === MmMode.FOLLOW_SM_SHORT) return 'SHORT'

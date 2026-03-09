@@ -50,7 +50,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 9 marca 2026 (kontynuacja)
 
-### 120. Fix kPEPE Buy-High-Sell-Low Churning — 3-layer anti-churn protection (09.03)
+### 120. Fix kPEPE Buy-High-Sell-Low Churning — 5-layer anti-churn protection (09.03)
 
 **Problem:** kPEPE tracił pieniądze przez pattern buy-high-sell-low. Analiza fills 03-01 do 03-09:
 - 03-01/02: NET SELL @ $0.003435-3454 (dobrze — shortowanie blisko szczytu)
@@ -58,40 +58,62 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - 03-07: NET BUY @ $0.003335 (źle)
 - 03-08/09: NET SELL @ $0.003199-3247 (źle — re-shortowanie na dnie)
 
-**3 root causes + 3 fixy:**
+**5-layer blocking chain** — każda warstwa blokowała SM protection dla kPEPE:
 
-**Fix 1 — Per-token SM exposure thresholds (`SmAutoDetector.ts`):**
+**Layer 1 — Per-token SM exposure thresholds (`SmAutoDetector.ts`):**
 
 | Problem | `getSmDirection()` wymaga `minSmExposureUsd: $100K` — kPEPE SM exposure tylko $34K → zawsze null → `shouldHoldForTp()` zawsze false |
 |---------|------|
 | Fix | `TOKEN_SM_EXPOSURE_OVERRIDES`: kPEPE $10K, LIT $20K (default $100K) |
 | Efekt | kPEPE z $34K exposure > $10K threshold → valid SM direction → bid blocking działa |
 
-**Fix 2 — Per-token whale override thresholds (`SignalEngine.ts`):**
+**Layer 2 — whale_tracker NEUTRAL override (`SmAutoDetector.ts`):**
+
+| Problem | whale_tracker.py zwraca `NEUTRAL` pomimo 5.3x LS ratio (SHORT $180K vs LONG $34K) |
+|---------|------|
+| Fix | Ratio-based override w `analyzeTokenSm()`: gdy ratio >= 1.5 i token ma `TOKEN_SM_EXPOSURE_OVERRIDES`, oblicz `convictionScore` i ustaw `dominantSide` = SHORT/LONG |
+| Efekt | kPEPE 5.3x ratio → SHORT z 70% conviction, nawet gdy whale_tracker mówi NEUTRAL |
+
+**Layer 3 — FORCE_MM_PAIRS bypass (`SmAutoDetector.ts`):**
+
+| Problem | `getSmDirection()` early-return null dla tokenów w `FORCE_MM_PAIRS` (kPEPE jest forced MM) |
+|---------|------|
+| Fix | `if (isForcedMmPair(token) && !TOKEN_SM_EXPOSURE_OVERRIDES[token]) return null` — bypass dla SM-aware tokens |
+| Efekt | kPEPE może mieć SM direction mimo bycia w FORCE_MM_PAIRS |
+
+**Layer 4 — IS_PURE_MM_BOT guards (`mm_hl.ts`):**
+
+| Problem | 4 miejsca gdzie `IS_PURE_MM_BOT` blokuje `shouldHoldForTp()` i `loadAndAnalyzeAllTokens()` |
+|---------|------|
+| Fix | `hasSmAwareness(token)` helper — bypasuje `IS_PURE_MM_BOT` guard gdy token ma `TOKEN_SM_EXPOSURE_OVERRIDES`. 4 lokacje: linia ~4420 (loadAndAnalyze), ~6803, ~7000, ~7816, ~10458 (shouldHoldForTp) |
+| Efekt | kPEPE na PURE_MM bocie dostaje pełną SM protection |
+
+**Layer 5 — Engine WAIT overwriting ratio override (`SmAutoDetector.ts`):**
+
+| Problem | SignalEngine score -14 (WAIT zone) → `dominantSide = 'NEUTRAL'`, niszcząc ratio override z Layer 2. Guard sprawdzał `whaleTrackerConfidence >= 50` ale whale_tracker daje 0 (NEUTRAL), nie computed `convictionScore` 70% |
+|---------|------|
+| Fix | `hasRatioOverride` condition: gdy `TOKEN_SM_EXPOSURE_OVERRIDES[token]` + `dominantSide !== 'NEUTRAL'` + `convictionScore >= moderateConviction` → zachowaj kierunek zamiast fallback do PURE_MM |
+| Efekt | Engine WAIT nie kasuje ratio override → kPEPE zostaje FOLLOW_SM_SHORT |
+
+**Per-token whale override thresholds (`SignalEngine.ts`):**
 
 | Problem | `checkWhaleTrackerOverride()` wymaga `minPositionValue: $500K` — niemożliwe dla kPEPE → fallback PURE_MM |
 |---------|------|
 | Fix | `WHALE_POSITION_OVERRIDES`: kPEPE $5K, LIT $10K (default $500K) + "strong ratio bypass" gdy LS ratio >= 5.0 |
 | Efekt | kPEPE z 7.54x ratio i $34K exposure → FOLLOW_SM_SHORT zamiast PURE_MM |
 
-**Fix 3 — Anti-churn cooldown (`mm_hl.ts`):**
-
-| Problem | Signal zmienia SHORT→NEUTRAL→LONG→NEUTRAL→SHORT przez kilka dni → bot churnuje |
-|---------|------|
-| Fix | `lastDirectionChange` Map + 30-min cooldown. Gdy SM direction flip → trzymaj poprzedni kierunek 30 min |
-| Efekt | Oracle flip SHORT→LONG → bot czeka 30 min. Jeśli wróci do SHORT → zero churnu |
-
-**Logi:**
-- Fix 1: `⚪ [kPEPE] Low SM exposure ($34k < $10k)` → teraz NIE wyświetli (bo $34K > $10K)
-- Fix 2: `🐋 WHALE OVERRIDE (strong ratio): Ratio 7.5x (≥5.0x) + $34k exposure → FORCE SHORT`
-- Fix 3: `🔄 [ANTI-CHURN] kPEPE: direction flip SHORT→LONG blocked, cooldown 25min remaining`
+**Weryfikacja produkcyjna (potwierdzona):**
+- `🔴 [kPEPE] HIGH conviction SHORT (0.70) → FOLLOW_SM_SHORT`
+- `🧠 [kPEPE] Engine WAIT but ratio override active (SHORT 70%) → KEEP FOLLOW_SM_SHORT`
+- `💎 [HOLD_FOR_TP SKEW] kPEPE: Override inventorySkew from -50% to +30%`
+- `bidMult=0 holdForTp=true` — bidy zablokowane, SHORT chroniony
 
 **Profil ryzyka:**
-- Fix 1 (lower threshold): Konserwatywny — tylko włącza istniejącą ochronę. Risk: SM direction może być błędny dla small-cap. Mitigated: `moderateDominanceRatio: 1.5` nadal wymagany.
-- Fix 2 (whale override): Umiarkowany — pozwala FOLLOW_SM z niższym conviction. Risk: fałszywe sygnały. Mitigated: wymaga ratio >= 5.0 (bardzo silny sygnał kierunkowy).
-- Fix 3 (anti-churn): Konserwatywny — tylko opóźnia akcję, nigdy jej nie blokuje. 30 min wystarczająco krótkie na prawdziwe zmiany trendu.
+- Layer 1-3 (SmAutoDetector): Konserwatywny — ratio >= 1.5 nadal wymagany, tylko włącza istniejącą ochronę
+- Layer 4 (IS_PURE_MM_BOT bypass): Konserwatywny — selektywny via `hasSmAwareness()`, nie dotyczy tokenów bez overrides
+- Layer 5 (Engine WAIT bypass): Umiarkowany — pozwala ratio override przetrwać Engine WAIT. Mitigated: wymaga convictionScore >= moderateConviction
 
-**Pliki:** `src/mm/SmAutoDetector.ts` (+9), `src/core/strategy/SignalEngine.ts` (+22), `src/mm_hl.ts` (+31)
+**Pliki:** `src/mm/SmAutoDetector.ts` (+41/-3), `src/core/strategy/SignalEngine.ts` (+22), `src/mm_hl.ts` (+15/-7)
 
 ---
 

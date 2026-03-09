@@ -19,7 +19,7 @@ import { CopyTradingSignal, getNansenProAPI } from './integrations/nansen_pro.js
 import { isPairBlockedByLiquidity, loadLiquidityFlags } from './liquidityFlags.js'
 import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
-import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
+import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair, hasSmAwareness } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
 import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig, getSniperModeConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
@@ -4416,8 +4416,9 @@ class HyperliquidMMBot {
         this.checkFillWatchdog()
 
         // 🐋 Load whale tracker data into SmAutoDetector cache (refreshes every 30s)
-        // 🤖 BOT_MODE: Only analyze tokens relevant to this bot process
-        if (!IS_PURE_MM_BOT) {
+        // 🤖 BOT_MODE: All bots load SM data (needed for getSmDirection, shouldHoldForTp, anti-churn)
+        // PURE_MM uses SM data for direction awareness but NOT for bid/ask locking (that's handled downstream)
+        {
           const smFilter = IS_SM_FOLLOWER_BOT && SM_ONLY_PAIRS.length > 0 ? SM_ONLY_PAIRS : undefined
           await loadAndAnalyzeAllTokens(false, smFilter)
         }
@@ -6799,7 +6800,7 @@ class HyperliquidMMBot {
       if (sizeMultipliers.bid === 0 && position && position.size < 0) {
         const posVal = Math.abs(position.size) * midPrice
         // 💎 HOLD_FOR_TP: Skip position reduction when SM direction aligns with position
-        if (!IS_PURE_MM_BOT && shouldHoldForTp(symbol, 'short')) {
+        if ((!IS_PURE_MM_BOT || hasSmAwareness(symbol)) && shouldHoldForTp(symbol, 'short')) {
           console.log(`💎 [HOLD_FOR_TP] ${symbol}: Keeping SHORT position for TP (no bid restore)`);
         } else if (posVal > 50) { // Only if position > $50
           sizeMultipliers.bid = 1.0  // Restore bid for position reduction
@@ -6996,7 +6997,7 @@ class HyperliquidMMBot {
         const SM_ALIGNED_TP_THRESHOLD = 0.005  // 0.5% profit to trigger TP
 
         // 💎 Skip SM-ALIGNED TP when SM direction aligns with position (hold for bigger TP)
-        const skipSmAlignedTp = IS_PURE_MM_BOT ? false : shouldHoldForTp(symbol, positionSide as 'short' | 'long')
+        const skipSmAlignedTp = (IS_PURE_MM_BOT && !hasSmAwareness(symbol)) ? false : shouldHoldForTp(symbol, positionSide as 'short' | 'long')
 
         if (sizeMultipliers.bid === 0 && positionSide === 'short' && !skipSmAlignedTp) {
           const entryPx = position.entryPrice || midPrice
@@ -7812,7 +7813,7 @@ class HyperliquidMMBot {
         // 🛡️ BUT protect existing aligned positions
         const positionSideCheck: 'short' | 'long' | 'none' =
           actualSkew < -0.05 ? 'short' : actualSkew > 0.05 ? 'long' : 'none';
-        const holdTp = IS_PURE_MM_BOT ? false : shouldHoldForTp(pair, positionSideCheck);
+        const holdTp = (IS_PURE_MM_BOT && !hasSmAwareness(pair)) ? false : shouldHoldForTp(pair, positionSideCheck);
 
         if (holdTp) {
           // Protect aligned position - don't enable counter side
@@ -10454,7 +10455,7 @@ class HyperliquidMMBot {
     // 💎 HOLD_FOR_TP: Detect SM-aligned positions dynamically
     const positionSideGrid: 'short' | 'long' | 'none' =
       actualSkew < -0.05 ? 'short' : actualSkew > 0.05 ? 'long' : 'none';
-    const isHoldForTpGrid = IS_PURE_MM_BOT ? false : shouldHoldForTp(pair, positionSideGrid)
+    const isHoldForTpGrid = (IS_PURE_MM_BOT && !hasSmAwareness(pair)) ? false : shouldHoldForTp(pair, positionSideGrid)
 
     if (isFollowSmToken(pair) && sizeMultipliers.bid === 0) {
       console.log(`[DEBUG-POS] ${pair}: actualSkew=${(actualSkew * 100).toFixed(1)}% hasShort=${hasShortPosition} bidMult=${sizeMultipliers.bid} holdForTp=${isHoldForTpGrid}`)
