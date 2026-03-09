@@ -400,6 +400,13 @@ const KNOWN_TRADERS: Record<string, KnownTrader> = {
 // THRESHOLDS
 // ============================================================
 
+// Per-token overrides for minSmExposureUsd
+// Small-cap memecoins have less SM exposure but it's still significant
+const TOKEN_SM_EXPOSURE_OVERRIDES: Record<string, number> = {
+  'kPEPE': 10_000,      // Small-cap memecoin, $10K SM exposure is significant
+  'LIT': 20_000,        // Small-cap
+}
+
 const THRESHOLDS = {
   // Minimum SM exposure to trust signal
   minSmExposureUsd: 100_000,        // $100k min total exposure
@@ -879,8 +886,9 @@ function determineMode(
 ): { mode: MmMode; multipliers: MultiplierConfig } {
 
   // Low SM exposure → Pure MM
-  if (totalExposure < THRESHOLDS.minSmExposureUsd) {
-    console.log(`⚪ [${token}] Low SM exposure ($${(totalExposure/1000).toFixed(0)}k) → PURE_MM`)
+  const minExposure = TOKEN_SM_EXPOSURE_OVERRIDES[token] ?? THRESHOLDS.minSmExposureUsd
+  if (totalExposure < minExposure) {
+    console.log(`⚪ [${token}] Low SM exposure ($${(totalExposure/1000).toFixed(0)}k < $${(minExposure/1000).toFixed(0)}k) → PURE_MM`)
     return {
       mode: MmMode.PURE_MM,
       multipliers: {
@@ -891,7 +899,7 @@ function determineMode(
         maxInventoryUsd: THRESHOLDS.defaultMaxInventoryUsd,
         priority: StrategyPriority.DEFAULT,
         source: 'AUTO_PURE_MM_LOW_SM',
-        reason: `Low SM exposure ($${(totalExposure/1000).toFixed(0)}k < $100k threshold)`
+        reason: `Low SM exposure ($${(totalExposure/1000).toFixed(0)}k < $${(minExposure/1000).toFixed(0)}k threshold)`
       }
     }
   }

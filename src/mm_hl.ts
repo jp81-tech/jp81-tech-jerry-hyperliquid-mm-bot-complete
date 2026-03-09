@@ -3703,6 +3703,10 @@ class HyperliquidMMBot {
   private srPrevPhases: Map<string, Set<string>> = new Map()  // S/R Phase tracking: pair → active phases last tick
   private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
 
+  // 🔄 ANTI-CHURN — cooldown after direction change to prevent whipsaw losses
+  private lastDirectionChange: Map<string, { direction: string; timestamp: number }> = new Map()
+  private static readonly DIRECTION_CHANGE_COOLDOWN_MS = 30 * 60 * 1000  // 30 minutes
+
   // 📊 PREDICTION BIAS — h4 prediction from prediction-api for grid bias
   private predictionCache: Map<string, { direction: string; change: number; confidence: number; fetchedAt: number }> = new Map()
   private predictionFetchInterval = 5 * 60 * 1000  // fetch every 5 minutes
@@ -7736,7 +7740,34 @@ class HyperliquidMMBot {
     }
 
     // SM direction (used by Pump Shield and other downstream blocks)
-    const smDir = getSmDirection(pair);
+    let smDir = getSmDirection(pair);
+
+    // 🔄 ANTI-CHURN GUARD: cooldown after SM direction flip to prevent whipsaw losses
+    // When SM direction changes (e.g., SHORT→LONG), wait 30 minutes before acting
+    // on the new direction. If it flips back within the window, no churn occurs.
+    {
+      const lastChange = this.lastDirectionChange.get(pair)
+      const currentDir = smDir ?? 'NEUTRAL'
+
+      if (!lastChange) {
+        // First time seeing a direction — record it (no cooldown on first observation)
+        this.lastDirectionChange.set(pair, { direction: currentDir, timestamp: Date.now() })
+      } else if (currentDir !== lastChange.direction) {
+        // Direction changed — check if cooldown from LAST change has expired
+        const elapsed = Date.now() - lastChange.timestamp
+        if (elapsed < HyperliquidMMBot.DIRECTION_CHANGE_COOLDOWN_MS) {
+          // Still in cooldown — revert to previous direction for downstream consumers
+          if (this.tickCount % 10 === 0) {
+            console.log(`🔄 [ANTI-CHURN] ${pair}: direction flip ${lastChange.direction}→${currentDir} blocked, cooldown ${Math.round((HyperliquidMMBot.DIRECTION_CHANGE_COOLDOWN_MS - elapsed)/60000)}min remaining`)
+          }
+          smDir = lastChange.direction === 'SHORT' ? 'SHORT' : lastChange.direction === 'LONG' ? 'LONG' : null
+        } else {
+          // Cooldown expired — accept new direction, start new cooldown window
+          this.lastDirectionChange.set(pair, { direction: currentDir, timestamp: Date.now() })
+        }
+      }
+      // If direction unchanged, do nothing (keep existing timestamp)
+    }
 
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
     // This is EMERGENCY priority and should bypass all other regime restrictions
