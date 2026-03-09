@@ -9309,3 +9309,94 @@ To jest klasyczny "scope hoisting" — przeniesienie deklaracji na wyższy pozio
 4. **Emergency exit musi mieć bypass.** GUARD chroni przed churnem, ale nie może blokować emergency exit. `!inventorySlPanic` to "zbij szybę w razie pożaru". Bez tego, bot w ekstremalnym drawdown nie mógłby zamknąć pozycji → katastrofalna strata. Każdy safety system musi mieć override dla sytuacji gorszej niż ta, przed którą chroni.
 
 5. **Block scope w dużych plikach to pułapka.** `let` w bloku `if` nie jest widoczny poza nim. W pliku z 10k linii, blok `if` może mieć 1200 linii kodu — łatwo zapomnieć, że jesteś "wewnątrz" i zmienna nie będzie widoczna za `}`. Hoist krytyczne zmienne na wyższy poziom, albo — jeszcze lepiej — rozbij plik na mniejsze moduły.
+
+---
+
+## Chapter 53: Mierz, Żeby Wiedzieć — Dzienny Raport na Discord (09.03.2026)
+
+> "Nie możesz poprawić tego, czego nie mierzysz." — Peter Drucker
+
+### Po co raport?
+
+Mamy bota który handluje 24/7. Wiemy że GUARD działa. Wiemy że PnL jest na plusie. Ale skąd wiemy, czy to jest **dobry** plus? Czy fee nie zjadają zysku? Czy bot nie trzyma pozycji za długo? Czy nie jest za bardzo wychylony w jedną stronę?
+
+Bez danych podejmujesz decyzje na czuja. Z danymi — podejmujesz decyzje na podstawie faktów.
+
+### Nowe metryki i dlaczego każda ma znaczenie
+
+#### 1. Skew Exposure (Ekspozycja Kierunkowa)
+
+```
+kPEPE:   -19.8% (SHORT)
+VIRTUAL: +0.6%  (LONG)
+```
+
+Skew = `position_notional / equity`. Mówi Ci: "jaka część Twojego konta jest wystawiona na ruch w jednym kierunku?"
+
+**Dlaczego ważne:** kPEPE ma 19.8% equity na shorcie. Jeśli kPEPE pompnie 10%, tracisz ~2% equity. Przy 50% skew i 10% ruch, tracisz 5%. Skew to Twój termometr ryzyka — im wyższy, tym większe ryzyko (ale też większy potencjał zysku).
+
+Market maker powinien mieć niski skew (< 10% = idealnie). 19.8% to akceptowalne dla memcoina z silnym sygnałem kierunkowym, ale warto obserwować.
+
+#### 2. Fee Efficiency (Efektywność Opłat)
+
+```
+Fee/Profit: 11.3%  ✅ Healthy
+```
+
+Stosunek zapłaconych fee do realized PnL. Progi:
+- **< 15%**: Healthy — feesy to koszt prowadzenia biznesu
+- **15-30%**: Warning — za dużo obrotu w stosunku do zysku
+- **> 30%**: Churning — bot miele pozycje i traci na fee
+
+**Przed GUARD** fee efficiency kPEPE dochodziło do 40%+ — bot zamykał i otwierał pozycje non-stop, każdy round-trip to ~8bps fee. Po GUARD: 11.3%. Różnica jak dzień i noc.
+
+**Analogia:** Fee efficiency to jak "koszt paliwa na kilometr". Samochód który spala 5L/100km to healthy. 15L/100km to SUV — drogo ale akceptowalnie. 50L/100km to czołg — coś jest nie tak z silnikiem.
+
+#### 3. Inventory Aging (Wiek Pozycji)
+
+```
+kPEPE:   15.7h
+VIRTUAL: 22.5h
+```
+
+Czas między pierwszym otwarciem a ostatnim zamknięciem pozycji w oknie 24h. Mówi: "jak długo bot trzyma towar?"
+
+**Dlaczego ważne:** Market maker chce szybko obracać — kupić tanio, sprzedać drogo, powtórzyć. Jeśli inventory aging rośnie (np. z 4h na 24h), to znaczy że bot utknął z pozycją i nie może jej zamknąć z zyskiem. To early warning signal.
+
+kPEPE 15.7h jest wysoki — bot trzymał longi underwater przez noc (dzięki GUARD nie zamknął ze stratą). VIRTUAL 22.5h — podobnie, ale zamknął prawie całą pozycję z zyskiem.
+
+#### 4. Guard Blocks
+
+```
+kPEPE:   25 (25 BREAKEVEN_BLOCK + 0 HARD BREAKEVEN GUARD)
+VIRTUAL: 2  (0 BREAKEVEN_BLOCK + 2 HARD BREAKEVEN GUARD)
+```
+
+Ile razy safety systemy zablokowały potencjalnie stratne ordery. Każdy block = uniknięta strata.
+
+**Interpretacja:** kPEPE miał 25 blocków — wszystkie przez BREAKEVEN_BLOCK (cena była near support). VIRTUAL miał 2 blocki przez HARD BREAKEVEN GUARD (cena w "no man's land"). Gdyby GUARD nie istniał, te 2 blocki byłyby 2 stratne fille.
+
+### Architektura raportu
+
+```python
+# Dane z 3 źródeł:
+# 1. Hyperliquid API — pozycje, fille, equity
+# 2. PM2 logi — guard blocks, VPIN, exec stats
+# 3. Obliczenia lokalne — skew, fee efficiency, aging
+
+fills_24h = get_fills_24h()        # API: userFills + userFillsByTime
+state = get_account_state()         # API: clearinghouseState
+logs = get_pm2_logs("mm-pure")     # PM2: grep GUARD, VPIN, Exec
+```
+
+Skrypt jest w czystym Pythonie (bez TS/node dependencies) — łatwiejszy do debugowania i szybszy do odpalenia z crona.
+
+**Cron:** `5 0 * * *` — codziennie 00:05 UTC. Pięć minut po północy żeby dać czas na ostatnie fille z poprzedniego dnia.
+
+### Lekcje
+
+1. **Mierz wszystko, co Cię kosztuje.** Fee efficiency ujawniła, że GUARD obniżył koszty z 40% do 11%. Bez tej metryki wiedzielibyśmy tylko "PnL jest lepsze" — ale nie wiedzielibyśmy DLACZEGO.
+
+2. **Automatyzuj obserwację.** Ręczne sprawdzanie logów (`pm2 logs | grep ...`) działa do debugowania, ale nie do codziennego monitoringu. Cron + Discord = dostajesz raport na telefon każdego ranka.
+
+3. **Progi > wartości absolutne.** "Fee: $4.22" nic nie mówi. "Fee/Profit: 11.3% ✅ Healthy" mówi wszystko. Progi (< 15% / 15-30% / > 30%) zamieniają dane w decyzje.

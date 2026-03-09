@@ -34,6 +34,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/utils/discord_notifier.ts` - Discord webhook notifier (S/R alerts, embeds)
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała"), ALL COINS dla Generała
 - `scripts/general_copytrade.ts` - copy-trading bot: kopiuje pozycje Generała (dry-run/live)
+- `scripts/daily_discord_report.py` - dzienny raport 24h na Discord (PnL, skew, fee efficiency, aging, guard blocks)
 
 **Kluczowe pliki danych:**
 - `/tmp/smart_money_data.json` - dane z whale_tracker.py (na serwerze)
@@ -43,6 +44,31 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 9 marca 2026
+
+### 115. Daily Discord Performance Report (09.03)
+
+**Plik:** `scripts/daily_discord_report.py`
+**Cron:** `5 0 * * *` (codziennie 00:05 UTC)
+**Webhook:** Discord channel via `DISCORD_REPORT_WEBHOOK` env var
+
+**Metryki:**
+- Executive Summary: Net PnL (realized - fees), unrealized, equity, total fills
+- Per-pair breakdown: position, entry, uPnL, realized, fees, leverage, liq price
+- **Skew Exposure** (NEW): kierunkowe ryzyko per pair (`position_notional / equity`)
+- **Fee Efficiency** (NEW): `fee/profit ratio` — <15% healthy, 15-30% warning, >30% churning
+- **Inventory Aging** (NEW): czas trzymania pozycji (first open → last close w 24h window)
+- Orders/Fills: buy/sell count + volume per pair
+- Guard Blocks: BREAKEVEN_BLOCK + HARD BREAKEVEN GUARD counts
+- VPIN toxicity levels
+- Risk Assessment: account leverage, margin used, free margin, liq distance
+
+**Dane z:** Hyperliquid API (`clearinghouseState`, `userFills`, `userFillsByTime`), PM2 logs
+
+**Pierwszy raport (09.03):** Net PnL +$33.25, Fee Efficiency 11.3% (healthy), kPEPE skew -19.8%, VIRTUAL skew +0.6%
 
 ---
 
