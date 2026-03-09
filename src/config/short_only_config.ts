@@ -481,6 +481,7 @@ export const DYNAMIC_SPREAD_OVERRIDES: Record<string, Partial<DynamicSpreadConfi
     lowVolL1Bps: 22,              // kPEPE even in low vol = wider than majors
     highVolL1Bps: 32,             // In high vol WIDEN (not tighten!) for memecoins
     highVolAtrPctThreshold: 1.20, // kPEPE "high vol" threshold is higher (normally more volatile)
+    minProfitBps: 20,             // 20bps min profit — reduce micro-scalping, ensure each fill covers accumulation fees
   },
 }
 

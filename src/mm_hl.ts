@@ -9207,6 +9207,27 @@ class HyperliquidMMBot {
           sizeMultipliers
         )
 
+        // === 📐 TIGHTNESS FLOOR: ensure L1 offset never below 18bps after all adjustments ===
+        // After skew adjustments, spread multipliers, and toxicity modifiers, the effective L1
+        // offset can compress below profitable levels. This floor removes orders too close to mid.
+        const TIGHTNESS_FLOOR_BPS = 18
+        const tightnessFloorFraction = TIGHTNESS_FLOOR_BPS / 10000
+        const minBidPx = skewedMidPrice * (1 - tightnessFloorFraction)  // max bid = mid - 18bps
+        const maxAskPx = skewedMidPrice * (1 + tightnessFloorFraction)  // min ask = mid + 18bps
+        const beforeTightness = gridOrders.length
+        gridOrders = gridOrders.filter((o: GridOrder) => {
+          if (o.side === 'bid' && o.price > minBidPx) return false  // bid too close to mid
+          if (o.side === 'ask' && o.price < maxAskPx) return false  // ask too close to mid
+          return true
+        })
+        const removedTightness = beforeTightness - gridOrders.length
+        if (removedTightness > 0 && this.tickCount % 20 === 0) {
+          console.log(
+            `📐 [LIQUIDITY] ${pair}: spread floor active (min ${TIGHTNESS_FLOOR_BPS}bps) — removed ${removedTightness} orders too close to mid ` +
+            `| mid=${skewedMidPrice.toFixed(7)} minBid=${minBidPx.toFixed(7)} maxAsk=${maxAskPx.toFixed(7)}`
+          )
+        }
+
         // === 📐 MIN PROFIT BUFFER: remove close orders that would lose money to fees ===
         // Close order = order that REDUCES position (bid when SHORT, ask when LONG)
         // If close order price is < minProfitBps from entry → fee eats the spread → guaranteed loss
