@@ -224,8 +224,8 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
   // memki / tańsze
   VIRTUAL: {
     minUsd: 15,
-    targetUsd: 40,
-    maxUsd: 100
+    targetUsd: 100,
+    maxUsd: 250
   },
   HYPE: {
     minUsd: 15,
@@ -9345,67 +9345,22 @@ class HyperliquidMMBot {
         console.log(`🐸 [kPEPE GRID] 4-layer custom: bids=${bids} asks=${asks} tz=${timeZone.spreadMult.toFixed(2)}/${timeZone.sizeMult.toFixed(2)} bidMult=${(gridBidMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)} askMult=${(gridAskMult * toxOut.spreadMult * timeZone.spreadMult).toFixed(2)}`)
       }
     } else {
-      // PREDICTION BIAS disabled — prediction-api and war-room removed
+      // === FULL S/R-AWARE PIPELINE for non-kPEPE pairs (VIRTUAL etc.) ===
+      // Ported from kPEPE pipeline, using standard generateGridOrders (not 4-layer custom).
+      // Skips kPEPE-specific: Toxicity Engine, OBI Modulator, VWAP Modifier, Dynamic Spread, custom grid.
 
-      // === SMA CROSSOVER SIGNAL for non-kPEPE pairs (VIRTUAL etc.) ===
-      const momGuardCfg = getMomentumGuardConfig(pair)
-      let smaCrossoverAppliedOther = false
-      if (momGuardCfg.smaCrossoverEnabled) {
-        const mvA = this.marketVision?.getPairAnalysis(pair)
-        if (mvA) {
-          const sma20V = mvA.sma20
-          const sma60V = mvA.sma60
-          const crossoverSignal = mvA.smaCrossover
-          const srTolOther = momGuardCfg.smaSrTolerance
+      const momGuardConfig = getMomentumGuardConfig(pair)
 
-          // S/R from 1h candle bodies (same as kPEPE MG)
-          const resistBody12h = mvA.resistanceBody12h ?? 0
-          const supportBody12h = mvA.supportBody12h ?? 0
-          const resistBody = resistBody12h > 0 ? resistBody12h : (mvA.resistanceBody4h ?? 0)
-          const supportBody = supportBody12h > 0 ? supportBody12h : (mvA.supportBody4h ?? 0)
+      // Fetch momentum independently (kPEPE gets it from toxicity engine scope)
+      const snapshotOther = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+      const momentum1hOther = snapshotOther?.momentum?.change1h ?? 0
 
-          if (sma20V > 0 && sma60V > 0) {
-            const nearSup = supportBody > 0 && midPrice <= supportBody * srTolOther
-            const nearRes = resistBody > 0 && midPrice >= resistBody / srTolOther
+      // ATR% — used by MG, S/R pipeline, Dynamic TP, Inventory SL
+      const mvAnalysisMg = this.marketVision?.getPairAnalysis(pair)
+      const mgAtr = mvAnalysisMg?.atr ?? 0
+      const atrPct = mgAtr > 0 && midPrice > 0 ? (mgAtr / midPrice) * 100 : 0
 
-            if (crossoverSignal === 'golden' && nearSup) {
-              sizeMultipliers.bid *= momGuardCfg.smaCrossoverBidBoost
-              sizeMultipliers.ask *= (1.0 / momGuardCfg.smaCrossoverBidBoost)
-              smaCrossoverAppliedOther = true
-              console.log(`📊 [SMA_CROSSOVER] ${pair}: GOLDEN CROSS near SUPPORT — SMA${momGuardCfg.smaFastPeriod}=$${sma20V.toFixed(6)} > SMA${momGuardCfg.smaSlowPeriod}=$${sma60V.toFixed(6)} | support=$${supportBody.toFixed(6)} tol=${srTolOther} → bid×${momGuardCfg.smaCrossoverBidBoost} ask×${(1.0 / momGuardCfg.smaCrossoverBidBoost).toFixed(2)}`)
-            } else if (crossoverSignal === 'death' && nearRes) {
-              sizeMultipliers.ask *= momGuardCfg.smaCrossoverAskBoost
-              sizeMultipliers.bid *= (1.0 / momGuardCfg.smaCrossoverAskBoost)
-              smaCrossoverAppliedOther = true
-              console.log(`📊 [SMA_CROSSOVER] ${pair}: DEATH CROSS near RESISTANCE — SMA${momGuardCfg.smaFastPeriod}=$${sma20V.toFixed(6)} < SMA${momGuardCfg.smaSlowPeriod}=$${sma60V.toFixed(6)} | resistance=$${resistBody.toFixed(6)} tol=${srTolOther} → ask×${momGuardCfg.smaCrossoverAskBoost} bid×${(1.0 / momGuardCfg.smaCrossoverAskBoost).toFixed(2)}`)
-            } else if (sma20V > sma60V && nearSup) {
-              sizeMultipliers.bid *= 1.15
-              sizeMultipliers.ask *= 0.90
-              smaCrossoverAppliedOther = true
-              if (this.tickCount % 20 === 0) {
-                console.log(`📊 [SMA_TREND] ${pair}: BULLISH (SMA${momGuardCfg.smaFastPeriod}>SMA${momGuardCfg.smaSlowPeriod}) near SUPPORT — bid×1.15 ask×0.90`)
-              }
-            } else if (sma20V < sma60V && nearRes) {
-              sizeMultipliers.ask *= 1.15
-              sizeMultipliers.bid *= 0.90
-              smaCrossoverAppliedOther = true
-              if (this.tickCount % 20 === 0) {
-                console.log(`📊 [SMA_TREND] ${pair}: BEARISH (SMA${momGuardCfg.smaFastPeriod}<SMA${momGuardCfg.smaSlowPeriod}) near RESISTANCE — ask×1.15 bid×0.90`)
-              }
-            }
-          }
-
-          // Periodic SMA status log (every 20 ticks, + first 3 ticks for verification)
-          if (this.tickCount % 20 === 0 || this.tickCount <= 3) {
-            const smaStatus = sma20V > 0 && sma60V > 0
-              ? `SMA${momGuardCfg.smaFastPeriod}/$${sma20V.toFixed(4)} SMA${momGuardCfg.smaSlowPeriod}/$${sma60V.toFixed(4)} cross:${crossoverSignal ?? 'none'}`
-              : 'SMA:no_data'
-            console.log(`📊 [SMA_STATUS] ${pair}: ${smaStatus}${smaCrossoverAppliedOther ? ' APPLIED' : ''}`)
-          }
-        }
-      }
-
-      // === MOON GUARD: liquidation spike detection for non-kPEPE pairs ===
+      // === MOON GUARD: liquidation spike detection ===
       const moonOutOther = moonGuard.getOutput()
       if (pair === 'VIRTUAL' && moonOutOther.virtualSqueezeWarning) {
         sizeMultipliers.bid = 0
@@ -9415,7 +9370,7 @@ class HyperliquidMMBot {
         }
       }
 
-      // === ORDER FLOW FILTER for VIRTUAL ===
+      // === ORDER FLOW FILTER ===
       if (pair === 'VIRTUAL' && moonOutOther.lastUpdate > 0 && !moonOutOther.virtualSqueezeWarning) {
         const imb = moonOutOther.virtualImbalanceRatio
         if (imb < -0.75) {
@@ -9432,9 +9387,703 @@ class HyperliquidMMBot {
         }
       }
 
+      // === 📈 MOMENTUM GUARD: asymmetric grid based on trend ===
+      if (momGuardConfig.enabled) {
+        const change1h = momentum1hOther
+        const mvAnalysis = mvAnalysisMg
+        const mgRsi = mvAnalysis?.rsi ?? 50
+
+        // 1. Momentum signal: change1h normalized to [-1, +1]
+        const pumpThreshold = momGuardConfig.useAtrThreshold && atrPct > 0
+          ? atrPct * momGuardConfig.atrThresholdMult
+          : momGuardConfig.pumpThresholdPct
+        const dumpThreshold = pumpThreshold * momGuardConfig.dumpSensitivityMult
+        const momentumNorm = change1h >= 0
+          ? Math.min(1, change1h / pumpThreshold)
+          : Math.max(-1, change1h / dumpThreshold)
+
+        // 2. RSI signal
+        const mgRsiSignal = mgRsi > momGuardConfig.rsiOverboughtThreshold
+          ? (mgRsi - momGuardConfig.rsiOverboughtThreshold) / (100 - momGuardConfig.rsiOverboughtThreshold)
+          : mgRsi < momGuardConfig.rsiOversoldThreshold
+            ? (mgRsi - momGuardConfig.rsiOversoldThreshold) / momGuardConfig.rsiOversoldThreshold
+            : 0
+
+        // 3. Proximity to S/R (1h candle bodies, fallback HTF)
+        const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
+        const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
+        const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+        const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+        const mgStrongZone = mgAtr > 0 && midPrice > 0 ? mgAtr / midPrice : 0.01
+        const mgModerateZone = mgStrongZone * 2
+
+        const mgResistDist = mgResistBody > 0 ? (mgResistBody - midPrice) / midPrice : 1
+        const mgSupportDist = mgSupportBody > 0 ? (midPrice - mgSupportBody) / midPrice : 1
+
+        // Proximity signal with touch vs confirmed break distinction
+        const lastCandle15mClose = mvAnalysis?.lastCandle15mClose ?? 0
+        let mgProxSignal = 0
+        if (mgResistBody > 0 && mgResistDist <= 0) {
+          if (lastCandle15mClose > 0 && lastCandle15mClose > mgResistBody) {
+            mgProxSignal = 1.2  // BROKEN RESISTANCE
+          } else {
+            mgProxSignal = 1.0  // AT resistance
+          }
+        } else if (mgResistDist < mgStrongZone) {
+          mgProxSignal = 0.8
+        } else if (mgResistDist < mgModerateZone) {
+          mgProxSignal = 0.4
+        } else if (mgSupportBody > 0 && mgSupportDist <= 0) {
+          if (lastCandle15mClose > 0 && lastCandle15mClose < mgSupportBody) {
+            mgProxSignal = -1.2  // BROKEN SUPPORT
+          } else {
+            mgProxSignal = -1.0  // AT support
+          }
+        } else if (mgSupportDist < mgStrongZone) {
+          mgProxSignal = -0.8
+        } else if (mgSupportDist < mgModerateZone) {
+          mgProxSignal = -0.4
+        }
+
+        // === 📍 S/R DISCORD ALERTS ===
+        let srAlertPending = false
+        let srAlertData: { type: string; level: number; dist: number; emoji: string; levelLabel: string; color: number } | null = null
+        if (mgProxSignal !== 0) {
+          const now = Date.now()
+          let srAlertType: string | null = null
+          let srLevel = 0
+          let srDist = 0
+
+          if (mgProxSignal >= 1.2) { srAlertType = 'BROKEN_RESISTANCE'; srLevel = mgResistBody; srDist = mgResistDist }
+          else if (mgResistDist <= 0) { srAlertType = 'AT_RESISTANCE'; srLevel = mgResistBody; srDist = mgResistDist }
+          else if (mgResistDist < mgStrongZone) { srAlertType = 'NEAR_RESISTANCE'; srLevel = mgResistBody; srDist = mgResistDist }
+          else if (mgProxSignal <= -1.2) { srAlertType = 'BROKEN_SUPPORT'; srLevel = mgSupportBody; srDist = mgSupportDist }
+          else if (mgSupportDist <= 0) { srAlertType = 'AT_SUPPORT'; srLevel = mgSupportBody; srDist = mgSupportDist }
+          else if (mgSupportDist < mgStrongZone) { srAlertType = 'NEAR_SUPPORT'; srLevel = mgSupportBody; srDist = mgSupportDist }
+
+          if (srAlertType) {
+            const cooldownKey = `${pair}:${srAlertType}`
+            const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
+            if (now - lastAlert > HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) {
+              this.srAlertCooldowns.set(cooldownKey, now)
+              const isBroken = srAlertType.startsWith('BROKEN')
+              const isResistance = srAlertType.includes('RESISTANCE')
+              const emoji = isBroken ? '💥' : (isResistance ? '🔴' : '🟢')
+              const levelLabel = isResistance ? 'RESISTANCE' : 'SUPPORT'
+              console.log(`📍 [SR_ALERT] ${pair}: ${srAlertType} — price=$${midPrice.toFixed(6)} ${levelLabel}=$${srLevel.toFixed(6)} dist=${(srDist * 100).toFixed(2)}% zone=${(mgStrongZone * 100).toFixed(2)}% candle15mClose=$${lastCandle15mClose.toFixed(6)}`)
+              const color = isBroken ? 0xff8800 : (isResistance ? 0xff4444 : 0x44ff44)
+              srAlertPending = true
+              srAlertData = { type: srAlertType, level: srLevel, dist: srDist, emoji, levelLabel, color }
+            }
+          }
+        }
+
+        // MG Score: momentum + RSI + proximity
+        const momentumScore = momentumNorm * 0.35 + mgRsiSignal * 0.30 + mgProxSignal * 0.35
+
+        // === SMA CROSSOVER integrated into MG flow ===
+        let smaCrossoverApplied = false
+        if (momGuardConfig.smaCrossoverEnabled && mvAnalysis) {
+          const sma20Val = mvAnalysis.sma20
+          const sma60Val = mvAnalysis.sma60
+          const crossover = mvAnalysis.smaCrossover
+          const srTol = momGuardConfig.smaSrTolerance
+
+          if (sma20Val > 0 && sma60Val > 0) {
+            const nearSupport = mgSupportBody > 0 && midPrice <= mgSupportBody * srTol
+            const nearResistance = mgResistBody > 0 && midPrice >= mgResistBody / srTol
+
+            if (crossover === 'golden' && nearSupport) {
+              sizeMultipliers.bid *= momGuardConfig.smaCrossoverBidBoost
+              sizeMultipliers.ask *= (1.0 / momGuardConfig.smaCrossoverBidBoost)
+              smaCrossoverApplied = true
+              console.log(`📊 [SMA_CROSSOVER] ${pair}: GOLDEN CROSS near SUPPORT — SMA${momGuardConfig.smaFastPeriod}=$${sma20Val.toFixed(6)} > SMA${momGuardConfig.smaSlowPeriod}=$${sma60Val.toFixed(6)} | support=$${mgSupportBody.toFixed(6)} tol=${srTol} → bid×${momGuardConfig.smaCrossoverBidBoost} ask×${(1.0 / momGuardConfig.smaCrossoverBidBoost).toFixed(2)}`)
+            } else if (crossover === 'death' && nearResistance) {
+              sizeMultipliers.ask *= momGuardConfig.smaCrossoverAskBoost
+              sizeMultipliers.bid *= (1.0 / momGuardConfig.smaCrossoverAskBoost)
+              smaCrossoverApplied = true
+              console.log(`📊 [SMA_CROSSOVER] ${pair}: DEATH CROSS near RESISTANCE — SMA${momGuardConfig.smaFastPeriod}=$${sma20Val.toFixed(6)} < SMA${momGuardConfig.smaSlowPeriod}=$${sma60Val.toFixed(6)} | resistance=$${mgResistBody.toFixed(6)} tol=${srTol} → ask×${momGuardConfig.smaCrossoverAskBoost} bid×${(1.0 / momGuardConfig.smaCrossoverAskBoost).toFixed(2)}`)
+            } else if (sma20Val > sma60Val && nearSupport) {
+              sizeMultipliers.bid *= 1.15
+              sizeMultipliers.ask *= 0.90
+              smaCrossoverApplied = true
+              if (this.tickCount % 20 === 0) {
+                console.log(`📊 [SMA_TREND] ${pair}: BULLISH (SMA${momGuardConfig.smaFastPeriod}>SMA${momGuardConfig.smaSlowPeriod}) near SUPPORT — bid×1.15 ask×0.90`)
+              }
+            } else if (sma20Val < sma60Val && nearResistance) {
+              sizeMultipliers.ask *= 1.15
+              sizeMultipliers.bid *= 0.90
+              smaCrossoverApplied = true
+              if (this.tickCount % 20 === 0) {
+                console.log(`📊 [SMA_TREND] ${pair}: BEARISH (SMA${momGuardConfig.smaFastPeriod}<SMA${momGuardConfig.smaSlowPeriod}) near RESISTANCE — ask×1.15 bid×0.90`)
+              }
+            }
+          }
+        }
+
+        // Pipeline status for Discord S/R alerts
+        const srPipelineStatus = {
+          phase: '' as string,
+          detail: '' as string,
+          progress: 0,
+          bidMult: sizeMultipliers.bid,
+          askMult: sizeMultipliers.ask,
+        }
+
+        // Position-aware guard flags
+        const hasShortPos = actualSkew < -0.10
+        const hasLongPos = actualSkew > 0.10
+        const pumpAgainstShort = momentumScore > 0 && hasShortPos
+        const dumpAgainstLong = momentumScore < 0 && hasLongPos
+
+        // Micro-reversal detection
+        const mgPsHistory = this.pumpShieldHistory.get(pair) || []
+        let microReversal = false
+        if (mgPsHistory.length >= 3) {
+          const recentPeak = Math.max(...mgPsHistory.map(p => p.price))
+          const recentTrough = Math.min(...mgPsHistory.map(p => p.price))
+          const dropFromPeak = recentPeak > 0 ? (recentPeak - midPrice) / recentPeak : 0
+          const riseFromTrough = recentTrough > 0 ? (midPrice - recentTrough) / recentTrough : 0
+          if (momentumScore > 0 && dropFromPeak > 0.003) microReversal = true
+          if (momentumScore < 0 && riseFromTrough > 0.003) microReversal = true
+        }
+
+        // Asymmetric multipliers based on MG score
+        const skipBidReduce = microReversal && momentumScore > 0
+        const skipAskReduce = microReversal && momentumScore < 0
+
+        if (momentumScore >= momGuardConfig.strongThreshold) {
+          if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.strongBidMult
+          sizeMultipliers.ask *= momGuardConfig.strongAskMult
+        } else if (momentumScore >= momGuardConfig.moderateThreshold) {
+          if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.moderateBidMult
+          sizeMultipliers.ask *= momGuardConfig.moderateAskMult
+        } else if (momentumScore >= momGuardConfig.lightThreshold) {
+          if (!skipBidReduce) sizeMultipliers.bid *= momGuardConfig.lightBidMult
+          sizeMultipliers.ask *= momGuardConfig.lightAskMult
+        } else if (momentumScore <= -momGuardConfig.strongThreshold) {
+          sizeMultipliers.bid *= momGuardConfig.strongAskMult
+          if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.strongBidMult
+        } else if (momentumScore <= -momGuardConfig.moderateThreshold) {
+          sizeMultipliers.bid *= momGuardConfig.moderateAskMult
+          if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.moderateBidMult
+        } else if (momentumScore <= -momGuardConfig.lightThreshold) {
+          sizeMultipliers.bid *= momGuardConfig.lightAskMult
+          if (!skipAskReduce) sizeMultipliers.ask *= momGuardConfig.lightBidMult
+        }
+
+        // === ⚡ INVENTORY-AWARE MG OVERRIDE ===
+        let invOverrideApplied = false
+        if (momGuardConfig.inventoryAwareMgEnabled) {
+          const absSkewInv = Math.abs(actualSkew)
+          if (absSkewInv > momGuardConfig.inventoryAwareMgThreshold) {
+            const longNearSupport = hasLongPos && mgProxSignal <= -0.5
+            const shortNearResistance = hasShortPos && mgProxSignal >= 0.5
+            const srSuppressed = (dumpAgainstLong && longNearSupport) || (pumpAgainstShort && shortNearResistance)
+
+            if (srSuppressed) {
+              if (this.tickCount % 20 === 0) {
+                console.log(
+                  `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% prox=${mgProxSignal.toFixed(2)} → ` +
+                  `SUPPRESSED (position near ${longNearSupport ? 'SUPPORT' : 'RESISTANCE'}, S/R Accumulation has priority)`)
+              }
+            } else {
+              const urgency = Math.min(1.0, absSkewInv / 0.50)
+              const minClosing = 1.0 + urgency * (momGuardConfig.inventoryAwareMgClosingBoost - 1.0)
+
+              if (pumpAgainstShort && sizeMultipliers.bid < minClosing) {
+                sizeMultipliers.bid = minClosing
+                sizeMultipliers.ask = Math.min(sizeMultipliers.ask, 1.0 / minClosing)
+                invOverrideApplied = true
+              } else if (dumpAgainstLong && sizeMultipliers.ask < minClosing) {
+                sizeMultipliers.ask = minClosing
+                sizeMultipliers.bid = Math.min(sizeMultipliers.bid, 1.0 / minClosing)
+                invOverrideApplied = true
+              }
+
+              if (invOverrideApplied) {
+                console.log(
+                  `⚡ [INV_AWARE_MG] ${pair}: ${pumpAgainstShort ? 'SHORT+PUMP' : 'LONG+DUMP'} — ` +
+                  `skew=${(actualSkew*100).toFixed(0)}% score=${momentumScore.toFixed(2)} ` +
+                  `urgency=${(urgency*100).toFixed(0)}% minClosing=${minClosing.toFixed(2)} → ` +
+                  `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING OVERRIDE)`)
+              }
+            }
+          }
+        }
+
+        // MG Log
+        if (this.tickCount % 20 === 0 || Math.abs(momentumScore) >= momGuardConfig.moderateThreshold) {
+          const posFlag = invOverrideApplied ? ` ⚡INV_AWARE→closing_boosted`
+            : pumpAgainstShort ? ' 💎SHORT+PUMP→holding(bids×reduced,asks×up)'
+            : dumpAgainstLong ? ' 💎LONG+DUMP→holding(asks×reduced,bids×up)'
+            : microReversal ? ' 🔄MICRO_REVERSAL→closing_allowed'
+            : ''
+          console.log(
+            `📈 [MOMENTUM_GUARD] ${pair}: score=${momentumScore.toFixed(2)} ` +
+            `(mom=${momentumNorm.toFixed(2)} rsi=${mgRsiSignal.toFixed(2)} prox=${mgProxSignal.toFixed(2)}) ` +
+            `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} ` +
+            `| 1h=${change1h.toFixed(1)}% RSI=${mgRsi.toFixed(0)} skew=${(actualSkew*100).toFixed(0)}%${posFlag}` +
+            ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}` +
+            (smaCrossoverApplied ? ` | SMA${momGuardConfig.smaFastPeriod}/${momGuardConfig.smaSlowPeriod}:${mvAnalysis?.smaCrossover ?? 'none'}` : ''))
+        }
+
+        // === 📉 S/R PROGRESSIVE REDUCTION ===
+        let srReductionApplied = false
+        let srGraceActive = false
+        let srAccumApplied = false
+        if (momGuardConfig.srReductionEnabled && position && mgAtr > 0) {
+          const absSkewSr = Math.abs(actualSkew)
+          const reductionZone = mgStrongZone * momGuardConfig.srReductionStartAtr
+
+          // Grace Period: delay reduction after confirmed S/R break
+          const graceMs = momGuardConfig.srReductionGraceCandles * 15 * 60 * 1000
+          const graceLongKey = `${pair}:LONG_BREAK_SUPPORT`
+          const graceShortKey = `${pair}:SHORT_BREAK_RESIST`
+
+          // LONG + BROKEN SUPPORT → grace
+          if (hasLongPos && mgSupportBody > 0 && mgProxSignal <= -1.2) {
+            if (!this.srBreakGraceStart.has(graceLongKey)) {
+              this.srBreakGraceStart.set(graceLongKey, Date.now())
+              console.log(`⏳ [SR_GRACE] ${pair}: LONG + BROKEN SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
+            }
+            const elapsed = Date.now() - this.srBreakGraceStart.get(graceLongKey)!
+            if (elapsed < graceMs) {
+              srGraceActive = true
+              srPipelineStatus.phase = 'GRACE'
+              srPipelineStatus.detail = `grace LONG ${((graceMs - elapsed)/60000).toFixed(0)}min left`
+              if (this.tickCount % 10 === 0) {
+                console.log(`⏳ [SR_GRACE] ${pair}: LONG grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
+              }
+            } else {
+              if (this.tickCount % 20 === 0) {
+                console.log(`⏳ [SR_GRACE] ${pair}: LONG grace EXPIRED — breakdown confirmed, allowing reduction`)
+              }
+            }
+          } else if (hasLongPos && mgProxSignal > -1.2 && this.srBreakGraceStart.has(graceLongKey)) {
+            console.log(`✅ [SR_GRACE] ${pair}: Price recovered above SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
+            this.srBreakGraceStart.delete(graceLongKey)
+          }
+
+          // SHORT + BROKEN RESISTANCE → grace
+          if (hasShortPos && mgResistBody > 0 && mgProxSignal >= 1.2) {
+            if (!this.srBreakGraceStart.has(graceShortKey)) {
+              this.srBreakGraceStart.set(graceShortKey, Date.now())
+              console.log(`⏳ [SR_GRACE] ${pair}: SHORT + BROKEN RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
+            }
+            const elapsed = Date.now() - this.srBreakGraceStart.get(graceShortKey)!
+            if (elapsed < graceMs) {
+              srGraceActive = true
+              srPipelineStatus.phase = 'GRACE'
+              srPipelineStatus.detail = `grace SHORT ${((graceMs - elapsed)/60000).toFixed(0)}min left`
+              if (this.tickCount % 10 === 0) {
+                console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
+              }
+            } else {
+              if (this.tickCount % 20 === 0) {
+                console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace EXPIRED — breakout confirmed, allowing reduction`)
+              }
+            }
+          } else if (hasShortPos && mgProxSignal < 1.2 && this.srBreakGraceStart.has(graceShortKey)) {
+            console.log(`✅ [SR_GRACE] ${pair}: Price recovered below RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
+            this.srBreakGraceStart.delete(graceShortKey)
+          }
+
+          // SHORT near SUPPORT → progressive reduction
+          if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone && !srGraceActive) {
+            const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / reductionZone) * 100))
+            const srReductionMinSkewShort = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
+            if (absSkewSr > srReductionMinSkewShort) {
+              if (progressPct > 60) {
+                sizeMultipliers.ask = 0
+              } else {
+                sizeMultipliers.ask *= (1.0 - progressPct / 100)
+              }
+              sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+              srReductionApplied = true
+              srPipelineStatus.phase = 'REDUCTION'
+              srPipelineStatus.progress = progressPct
+              srPipelineStatus.detail = `SHORT→SUPPORT TP ${progressPct.toFixed(0)}%`
+            }
+            if (this.tickCount % 20 === 0 || srReductionApplied) {
+              console.log(
+                `📉 [SR_REDUCTION] ${pair}: SHORT near SUPPORT — progress=${progressPct.toFixed(0)}% ` +
+                `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
+                `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                (srReductionApplied
+                  ? `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} (REDUCING)`
+                  : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(srReductionMinSkewShort*100).toFixed(0)}% → normal MM)`))
+            }
+          }
+
+          // LONG near RESISTANCE → progressive reduction
+          if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone && !srGraceActive) {
+            const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / reductionZone) * 100))
+            const srReductionMinSkewLong = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
+            if (absSkewSr > srReductionMinSkewLong) {
+              if (progressPct > 60) {
+                sizeMultipliers.bid = 0
+              } else {
+                sizeMultipliers.bid *= (1.0 - progressPct / 100)
+              }
+              sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+              srReductionApplied = true
+              srPipelineStatus.phase = 'REDUCTION'
+              srPipelineStatus.progress = progressPct
+              srPipelineStatus.detail = `LONG→RESISTANCE TP ${progressPct.toFixed(0)}%`
+            }
+            if (this.tickCount % 20 === 0 || srReductionApplied) {
+              console.log(
+                `📈 [SR_REDUCTION] ${pair}: LONG near RESISTANCE — progress=${progressPct.toFixed(0)}% ` +
+                `dist=${(mgResistDist*100).toFixed(2)}% zone=${(reductionZone*100).toFixed(2)}% ` +
+                `skew=${(actualSkew*100).toFixed(0)}% → ` +
+                (srReductionApplied
+                  ? `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (REDUCING)`
+                  : `DISENGAGED (skew ${(absSkewSr*100).toFixed(0)}% <= ${(srReductionMinSkewLong*100).toFixed(0)}% → normal MM)`))
+            }
+          }
+        }
+
+        // === 🛡️ BREAKEVEN_BLOCK (S/R-specific) ===
+        if (position && mgAtr > 0) {
+          const entryPrice = position.entryPrice || 0
+          const hasLongPosBe = actualSkew > 0.01
+          const hasShortPosBe = actualSkew < -0.01
+          const accumZoneBe = mgStrongZone * momGuardConfig.srReductionStartAtr
+          const nearSupportBe = mgSupportBody > 0 && mgSupportDist < accumZoneBe
+          const nearResistanceBe = mgResistBody > 0 && mgResistDist < accumZoneBe
+
+          if (hasLongPosBe && entryPrice > 0 && midPrice < entryPrice && nearSupportBe) {
+            const underwaterPct = ((entryPrice - midPrice) / entryPrice) * 100
+            sizeMultipliers.ask = 0
+            console.log(
+              `🛡️ [BREAKEVEN_BLOCK] ${pair}: LONG underwater ${underwaterPct.toFixed(2)}% at SUPPORT → BLOCKING ASKS ` +
+              `(entry=${entryPrice.toFixed(6)} mid=${midPrice.toFixed(6)})`)
+          } else if (hasShortPosBe && entryPrice > 0 && midPrice > entryPrice && nearResistanceBe) {
+            const underwaterPct = ((midPrice - entryPrice) / entryPrice) * 100
+            sizeMultipliers.bid = 0
+            console.log(
+              `🛡️ [BREAKEVEN_BLOCK] ${pair}: SHORT underwater ${underwaterPct.toFixed(2)}% at RESISTANCE → BLOCKING BIDS ` +
+              `(entry=${entryPrice.toFixed(6)} mid=${midPrice.toFixed(6)})`)
+          }
+        }
+
+        // === 🔄 S/R ACCUMULATION with Fresh Touch Boost ===
+        srAccumApplied = false
+        if (momGuardConfig.srAccumulationEnabled && mgAtr > 0) {
+          const absSkewAccum = Math.abs(actualSkew)
+          const accumZone = mgStrongZone * momGuardConfig.srReductionStartAtr
+          const hasAnyShort = actualSkew < -0.01
+          const hasAnyLong = actualSkew > 0.01
+
+          // SUPPORT → accumulate LONGS
+          if (!hasShortPos && mgSupportBody > 0 && mgSupportDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
+            const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / accumZone) * 100))
+            const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
+            const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
+            const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
+            const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
+            sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (effectiveBounceBoost - 1.0))
+            if (hasAnyShort) {
+              if (progressPct > 60) { sizeMultipliers.ask = 0 } else { sizeMultipliers.ask *= (1.0 - progressPct / 100) }
+            } else if (progressPct > 80 && !hasAnyLong) {
+              sizeMultipliers.ask = 0
+            } else if (progressPct > 80 && hasAnyLong) {
+              sizeMultipliers.ask *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
+            } else {
+              sizeMultipliers.ask *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
+            }
+            gridBidMult *= (1.0 + (progressPct / 100) * (momGuardConfig.srAccumSpreadWiden - 1.0))
+            srAccumApplied = true
+            srPipelineStatus.phase = 'ACCUM'
+            srPipelineStatus.progress = progressPct
+            srPipelineStatus.detail = `accumulate LONGS fresh×${freshBoost.toFixed(1)}`
+            if (this.tickCount % 20 === 0 || srAccumApplied) {
+              console.log(
+                `🔄 [SR_ACCUM] ${pair}: SUPPORT → accumulate LONGS — progress=${progressPct.toFixed(0)}% ` +
+                `dist=${(mgSupportDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
+                `skew=${(actualSkew*100).toFixed(0)}%${hasAnyShort ? ' HAS_SHORT→ask=0' : ''}${hasAnyLong && progressPct > 80 ? ' HAS_LONG→ask_reduced' : ''} fresh×${freshBoost.toFixed(1)} → ` +
+                `bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} bidSpread×${gridBidMult.toFixed(2)}`)
+            }
+          }
+
+          // RESISTANCE → accumulate SHORTS
+          else if (!hasLongPos && mgResistBody > 0 && mgResistDist < accumZone && absSkewAccum <= momGuardConfig.srMaxRetainPct) {
+            const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / accumZone) * 100))
+            const freshRatio = Math.max(0, (momGuardConfig.srMaxRetainPct - absSkewAccum)) / momGuardConfig.srMaxRetainPct
+            const freshBoost = 1.0 + freshRatio * (momGuardConfig.srAccumFreshMultiplier - 1.0)
+            const effectiveBounceBoost = momGuardConfig.srAccumBounceBoost * freshBoost
+            const effectiveCounterReduce = Math.max(0.05, momGuardConfig.srAccumCounterReduce / freshBoost)
+            sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (effectiveBounceBoost - 1.0))
+            if (hasAnyLong) {
+              if (progressPct > 60) { sizeMultipliers.bid = 0 } else { sizeMultipliers.bid *= (1.0 - progressPct / 100) }
+            } else if (progressPct > 80 && !hasAnyShort) {
+              sizeMultipliers.bid = 0
+            } else if (progressPct > 80 && hasAnyShort) {
+              sizeMultipliers.bid *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
+            } else {
+              sizeMultipliers.bid *= (1.0 - (progressPct / 100) * (1.0 - effectiveCounterReduce))
+            }
+            gridAskMult *= (1.0 + (progressPct / 100) * (momGuardConfig.srAccumSpreadWiden - 1.0))
+            srAccumApplied = true
+            srPipelineStatus.phase = 'ACCUM'
+            srPipelineStatus.progress = progressPct
+            srPipelineStatus.detail = `accumulate SHORTS fresh×${freshBoost.toFixed(1)}`
+            if (this.tickCount % 20 === 0 || srAccumApplied) {
+              console.log(
+                `🔄 [SR_ACCUM] ${pair}: RESISTANCE → accumulate SHORTS — progress=${progressPct.toFixed(0)}% ` +
+                `dist=${(mgResistDist*100).toFixed(2)}% zone=${(accumZone*100).toFixed(2)}% ` +
+                `skew=${(actualSkew*100).toFixed(0)}%${hasAnyLong ? ' HAS_LONG→bid=0' : ''}${hasAnyShort && progressPct > 80 ? ' HAS_SHORT→bid_reduced' : ''} fresh×${freshBoost.toFixed(1)} → ` +
+                `ask×${sizeMultipliers.ask.toFixed(2)} bid×${sizeMultipliers.bid.toFixed(2)} askSpread×${gridAskMult.toFixed(2)}`)
+            }
+          }
+        }
+
+        // === 🔒 S/R BOUNCE HOLD ===
+        if (momGuardConfig.srBounceHoldEnabled && mgAtr > 0) {
+          const holdKey = pair
+          const atrPrice = mgAtr
+
+          if (srAccumApplied) {
+            const srLevel = (mgSupportBody > 0 && mgSupportDist < mgResistDist) ? mgSupportBody : mgResistBody
+            const side: 'long' | 'short' = (mgSupportBody > 0 && mgSupportDist < mgResistDist) ? 'long' : 'short'
+            this.srBounceHoldState.set(holdKey, { timestamp: Date.now(), srLevel, side })
+          }
+
+          const holdState = this.srBounceHoldState.get(holdKey)
+          if (holdState) {
+            const elapsedMin = (Date.now() - holdState.timestamp) / 60000
+            const absSkewHold = Math.abs(actualSkew)
+
+            const timedOut = elapsedMin >= momGuardConfig.srBounceHoldMaxMinutes
+            const positionClosed = absSkewHold < 0.02
+            const srLevelChanged = (holdState.side === 'long' && mgSupportBody > 0 && Math.abs(mgSupportBody - holdState.srLevel) / holdState.srLevel > 0.005)
+              || (holdState.side === 'short' && mgResistBody > 0 && Math.abs(mgResistBody - holdState.srLevel) / holdState.srLevel > 0.005)
+
+            const distFromSr = holdState.side === 'long'
+              ? (midPrice - holdState.srLevel) / atrPrice
+              : (holdState.srLevel - midPrice) / atrPrice
+            const pastThreshold = distFromSr >= momGuardConfig.srBounceHoldMinDistAtr
+
+            if (timedOut || positionClosed || srLevelChanged || pastThreshold) {
+              this.srBounceHoldState.delete(holdKey)
+              if (timedOut) {
+                console.log(`⏰ [BOUNCE_HOLD] ${pair}: TIMEOUT — ${elapsedMin.toFixed(0)}min elapsed, resuming normal closing`)
+              } else if (pastThreshold) {
+                console.log(`🔓 [BOUNCE_HOLD] ${pair}: RELEASED — dist=${distFromSr.toFixed(2)}ATR >= ${momGuardConfig.srBounceHoldMinDistAtr}ATR threshold (bounce confirmed)`)
+              }
+            } else if (distFromSr >= 0 && !srAccumApplied) {
+              const holdProgressPct = Math.min(100, (distFromSr / momGuardConfig.srBounceHoldMinDistAtr) * 100)
+              const askReduction = momGuardConfig.srBounceHoldAskReduction + (holdProgressPct / 100) * (1.0 - momGuardConfig.srBounceHoldAskReduction)
+
+              if (holdState.side === 'long') {
+                sizeMultipliers.ask *= askReduction
+              } else {
+                sizeMultipliers.bid *= askReduction
+              }
+              srPipelineStatus.phase = 'BOUNCE_HOLD'
+              srPipelineStatus.progress = holdProgressPct
+              srPipelineStatus.detail = `${holdState.side.toUpperCase()} dist=${distFromSr.toFixed(2)}ATR`
+
+              if (this.tickCount % 20 === 0 || holdProgressPct < 30) {
+                console.log(
+                  `🔒 [BOUNCE_HOLD] ${pair}: ${holdState.side.toUpperCase()} near ${holdState.side === 'long' ? 'SUPPORT' : 'RESISTANCE'} — ` +
+                  `dist=${distFromSr.toFixed(2)}ATR progress=${holdProgressPct.toFixed(0)}% → ` +
+                  `${holdState.side === 'long' ? 'ask' : 'bid'}×${askReduction.toFixed(2)} (holding for bounce)`)
+              }
+            } else if (distFromSr >= 0 && srAccumApplied) {
+              if (this.tickCount % 20 === 0) {
+                console.log(`🔒 [BOUNCE_HOLD] ${pair}: tracking (SR_ACCUM active) — dist=${distFromSr.toFixed(2)}ATR`)
+              }
+            }
+          }
+        }
+
+        // === 🚀 BREAKOUT TP ===
+        let breakoutApplied = false
+        if (momGuardConfig.srBreakoutTpEnabled && Math.abs(momentumScore) > momGuardConfig.srBreakoutTpScoreThreshold) {
+          if (hasLongPos && momentumScore > momGuardConfig.srBreakoutTpScoreThreshold) {
+            sizeMultipliers.ask *= momGuardConfig.srBreakoutTpClosingBoost
+            sizeMultipliers.bid *= (1.0 / momGuardConfig.srBreakoutTpClosingBoost)
+            breakoutApplied = true
+          } else if (hasShortPos && momentumScore < -momGuardConfig.srBreakoutTpScoreThreshold) {
+            sizeMultipliers.bid *= momGuardConfig.srBreakoutTpClosingBoost
+            sizeMultipliers.ask *= (1.0 / momGuardConfig.srBreakoutTpClosingBoost)
+            breakoutApplied = true
+          }
+          if (breakoutApplied) {
+            srPipelineStatus.phase = 'BREAKOUT_TP'
+            srPipelineStatus.detail = `${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} score=${momentumScore.toFixed(2)}`
+            if (this.tickCount % 20 === 0 || Math.abs(momentumScore) > 0.6) {
+              console.log(
+                `🚀 [BREAKOUT_TP] ${pair}: ${hasLongPos ? 'LONG+PUMP' : 'SHORT+DUMP'} — ` +
+                `score=${momentumScore.toFixed(2)} > ${momGuardConfig.srBreakoutTpScoreThreshold} ` +
+                `→ bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)} (CLOSING)`)
+            }
+          }
+        }
+
+        // Update pipeline status multipliers
+        srPipelineStatus.bidMult = sizeMultipliers.bid
+        srPipelineStatus.askMult = sizeMultipliers.ask
+
+        // === Send pending S/R Discord alert with pipeline status ===
+        if (srAlertPending && srAlertData) {
+          const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', GRACE: '⏳', INV_AWARE: '⚡' }
+          const fields = [
+            { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
+            { name: srAlertData.levelLabel, value: `$${srAlertData.level.toFixed(6)}`, inline: true },
+            { name: 'Distance', value: `${(srAlertData.dist * 100).toFixed(2)}%`, inline: true },
+            { name: '15m Close', value: `$${lastCandle15mClose.toFixed(6)}`, inline: true },
+            { name: 'RSI', value: `${mgRsi.toFixed(0)}`, inline: true },
+            { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
+          ]
+          if (srPipelineStatus.phase) {
+            const phEmoji = phaseEmojiMap[srPipelineStatus.phase] || '⚙️'
+            fields.push({
+              name: 'Pipeline',
+              value: `${phEmoji} **${srPipelineStatus.phase}** ${srPipelineStatus.progress > 0 ? `${srPipelineStatus.progress.toFixed(0)}%` : ''}\n${srPipelineStatus.detail}`,
+              inline: false,
+            })
+            fields.push(
+              { name: 'bid×', value: `${srPipelineStatus.bidMult.toFixed(2)}`, inline: true },
+              { name: 'ask×', value: `${srPipelineStatus.askMult.toFixed(2)}`, inline: true },
+              { name: 'MG Score', value: `${momentumScore.toFixed(2)}`, inline: true },
+            )
+          } else {
+            fields.push({ name: 'Pipeline', value: 'Normal MG (no S/R phase active)', inline: false })
+          }
+          sendDiscordEmbed({
+            title: `${srAlertData.emoji} ${pair} — ${srAlertData.type.replace(/_/g, ' ')}`,
+            color: srAlertData.color,
+            fields,
+            footer: { text: `S/R 1h (24h) | Cooldown 15min` },
+            timestamp: new Date().toISOString(),
+          }).catch(() => {})
+        }
+
+        // === Phase transition alerts ===
+        {
+          const currentPhases = new Set<string>()
+          if (srAccumApplied) currentPhases.add('SR_ACCUM')
+          if (srReductionApplied) currentPhases.add('SR_REDUCTION')
+          if (this.srBounceHoldState.has(pair) && !srAccumApplied && srPipelineStatus.phase === 'BOUNCE_HOLD') currentPhases.add('BOUNCE_HOLD')
+          if (breakoutApplied) currentPhases.add('BREAKOUT_TP')
+          if (srGraceActive) currentPhases.add('GRACE')
+
+          const prevPhases = this.srPrevPhases.get(pair) || new Set()
+          const phaseAlertConfig: Record<string, { emoji: string; color: number; startLabel: string; endLabel: string }> = {
+            SR_ACCUM:     { emoji: '🔄', color: 0x3498db, startLabel: 'SR_ACCUM START', endLabel: 'SR_ACCUM END' },
+            SR_REDUCTION: { emoji: '📉', color: 0x9b59b6, startLabel: 'SR_REDUCTION START', endLabel: 'SR_REDUCTION END' },
+            BOUNCE_HOLD:  { emoji: '🔒', color: 0x1abc9c, startLabel: 'BOUNCE_HOLD START', endLabel: 'BOUNCE_HOLD RELEASED' },
+            GRACE:        { emoji: '⏳', color: 0xf1c40f, startLabel: 'GRACE START', endLabel: 'GRACE EXPIRED' },
+            BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
+          }
+          const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
+            const cfg = phaseAlertConfig[phase]
+            if (!cfg) return
+            const cooldownKey = `${pair}:PHASE_${phase}_${transition}`
+            const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
+            if (Date.now() - lastAlert < HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) return
+            this.srAlertCooldowns.set(cooldownKey, Date.now())
+            const label = transition === 'START' ? cfg.startLabel : cfg.endLabel
+            const transEmoji = transition === 'START' ? cfg.emoji : (phase === 'BOUNCE_HOLD' ? '🔓' : '⏰')
+            sendDiscordEmbed({
+              title: `${transEmoji} ${pair} — ${label}`,
+              color: cfg.color,
+              fields: [
+                { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
+                { name: 'Skew', value: `${(actualSkew * 100).toFixed(0)}%`, inline: true },
+                { name: 'MG Score', value: `${momentumScore.toFixed(2)}`, inline: true },
+                { name: 'bid×', value: `${sizeMultipliers.bid.toFixed(2)}`, inline: true },
+                { name: 'ask×', value: `${sizeMultipliers.ask.toFixed(2)}`, inline: true },
+                { name: 'S/R', value: `R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`, inline: true },
+              ],
+              footer: { text: `Phase transition | Cooldown 15min` },
+              timestamp: new Date().toISOString(),
+            }).catch(() => {})
+          }
+          for (const phase of currentPhases) {
+            if (!prevPhases.has(phase)) sendPhaseAlert(phase, 'START')
+          }
+          for (const phase of prevPhases) {
+            if (!currentPhases.has(phase)) sendPhaseAlert(phase, 'END')
+          }
+          this.srPrevPhases.set(pair, currentPhases)
+        }
+
+        // === 🎯 DYNAMIC TP (Spread Widener) ===
+        if (momGuardConfig.tpSpreadWidenerEnabled && microReversal && atrPct > 0) {
+          if (hasShortPos && momentumScore > 0) {
+            gridBidMult *= momGuardConfig.tpSpreadMult
+            console.log(
+              `🎯 [DYNAMIC_TP] ${pair}: SHORT+micro_reversal → bid spread ×${momGuardConfig.tpSpreadMult.toFixed(2)} ` +
+              `(ATR=${atrPct.toFixed(2)}% | bids further from mid → TP catches more drop)`)
+          } else if (hasLongPos && momentumScore < 0) {
+            gridAskMult *= momGuardConfig.tpSpreadMult
+            console.log(
+              `🎯 [DYNAMIC_TP] ${pair}: LONG+micro_reversal → ask spread ×${momGuardConfig.tpSpreadMult.toFixed(2)} ` +
+              `(ATR=${atrPct.toFixed(2)}% | asks further from mid → TP catches more rise)`)
+          }
+        }
+
+        // === 🚨 INVENTORY SL (Panic Mode) ===
+        if (momGuardConfig.inventorySlEnabled && position && atrPct > 0) {
+          const absSkew = Math.abs(actualSkew)
+          if (absSkew > momGuardConfig.maxSkewSlThreshold) {
+            const entryPx = position.entryPrice || midPrice
+            const drawdownPct = hasShortPos
+              ? ((midPrice - entryPx) / entryPx) * 100
+              : ((entryPx - midPrice) / entryPx) * 100
+            const slThresholdPct = momGuardConfig.slAtrMultiplier * atrPct
+
+            if (drawdownPct > 0 && drawdownPct > slThresholdPct) {
+              if (hasShortPos) {
+                sizeMultipliers.ask = 0
+                sizeMultipliers.bid *= momGuardConfig.panicClosingMult
+                inventorySlPanic = true
+                console.log(
+                  `🚨 [INVENTORY_SL] ${pair}: PANIC SHORT — skew=${(absSkew*100).toFixed(0)}% ` +
+                  `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                  `→ asks=0 bids×${momGuardConfig.panicClosingMult} | entry=${entryPx.toFixed(6)} mid=${midPrice.toFixed(6)}`)
+              } else if (hasLongPos) {
+                sizeMultipliers.bid = 0
+                sizeMultipliers.ask *= momGuardConfig.panicClosingMult
+                inventorySlPanic = true
+                console.log(
+                  `🚨 [INVENTORY_SL] ${pair}: PANIC LONG — skew=${(absSkew*100).toFixed(0)}% ` +
+                  `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                  `→ bids=0 asks×${momGuardConfig.panicClosingMult} | entry=${entryPx.toFixed(6)} mid=${midPrice.toFixed(6)}`)
+              }
+            }
+          }
+        }
+      } // end MG enabled block
+
+      // === ⚖️ AUTO-SKEWING (Inventory-based Price Shifting) ===
+      let skewedMidPrice = midPrice
+      if (momGuardConfig.autoSkewEnabled && position) {
+        const skewTenPercents = actualSkew * 10
+        const rawShiftBps = -(skewTenPercents * momGuardConfig.autoSkewShiftBps)
+        const maxBps = momGuardConfig.autoSkewMaxShiftBps
+        const skewShiftBps = Math.max(-maxBps, Math.min(maxBps, rawShiftBps))
+
+        if (Math.abs(skewShiftBps) > 0.01) {
+          skewedMidPrice = midPrice * (1 + skewShiftBps / 10000)
+          if (this.tickCount % 20 === 0) {
+            const dir = skewShiftBps > 0 ? 'UP (aggressive bids)' : 'DOWN (aggressive asks)'
+            console.log(
+              `⚖️ [AUTO_SKEW] ${pair}: skew=${(actualSkew * 100).toFixed(1)}% ` +
+              `→ mid shift ${skewShiftBps > 0 ? '+' : ''}${skewShiftBps.toFixed(2)}bps ${dir} ` +
+              `| real=${midPrice.toFixed(6)} skewed=${skewedMidPrice.toFixed(6)}`)
+          }
+        }
+      }
+
       gridOrders = this.gridManager!.generateGridOrders(
         pair,
-        midPrice,
+        skewedMidPrice,
         capitalPerPair,
         0.001,
         inventorySkew,

@@ -44,6 +44,7 @@
 36. [Fresh Touch Boost — silniejsza akumulacja na pierwszym dotknieciu S/R](#fresh-touch-boost--silniejsza-akumulacja-na-pierwszym-dotknieciu-sr)
 37. [S/R Bounce Hold — nie sprzedawaj za wczesnie po odbiciu](#sr-bounce-hold--nie-sprzedawaj-za-wczesnie-po-odbiciu)
 38. [S/R Pipeline — Zestawienie faz w zaleznosci od progresu](#sr-pipeline--zestawienie-faz-w-zaleznosci-od-progresu)
+39. [VIRTUAL S/R Pipeline — Daj drugiemu botowi oczy](#virtual-sr-pipeline--daj-drugiemu-botowi-oczy)
 
 ---
 
@@ -9515,3 +9516,118 @@ Trzy warstwy ochrony, każda na innym poziomie. Tightness Floor = najszersza sie
 2. **Post-hoc filtrowanie > pre-hoc konfiguracja.** Zamiast próbować skonfigurować idealny spread z góry (co jest niemożliwe bo skew i volatility się ciągle zmieniają), generuj grid normalnie, a potem odfiltruj ordery które by były nieopłacalne. Pragmatyczne, proste, skuteczne.
 
 3. **Dwa bezpieczniki > jeden mocniejszy.** Jeden bezpiecznik na 25bps zastąpiłby oba — ale byłby za sztywny. Tightness Floor (18bps od mid) + MIN_PROFIT (20bps od entry) dają bardziej inteligentną ochronę, bo patrzą na problem z dwóch perspektyw.
+
+---
+
+## Chapter 55: VIRTUAL S/R Pipeline — Daj drugiemu botowi oczy (09.03.2026)
+
+> "Wyobraz sobie kierowce, ktory jedzie noca bez swiatel. Silnik dziala, hamulce dzialaja, ale nie widzi zakretow. Dokladnie tak wygladal VIRTUAL bez S/R awareness."
+
+### Problem: Slepy bot na wsparciu
+
+VIRTUAL bot mial trzy mechanizmy:
+- **SMA Crossover** — trendfollower (kupuj gdy SMA20 > SMA30)
+- **Moon Guard** — ochrona przed pumpami
+- **Order Flow Filter** — filtrowanie zlecen
+
+Brzmi solidnie? Problem w tym, ze **zadne z tych narzedzi nie wie gdzie jest support i resistance.** Bot mogl spokojnie trzymac SHORT na daily support — najgorsze mozliwe miejsce na shorta — i nawet o tym nie wiedziec.
+
+Dokladnie to sie stalo: VIRTUAL mial SHORT z -59.5% skew, siedzac prosto na wsparciu. kPEPE w identycznej sytuacji juz dawno by zredukowal pozycje (S/R Progressive Reduction), zaczal akumulowac longi (S/R Accumulation), albo przynajmniej wstrzymal aski (BREAKEVEN_BLOCK). VIRTUAL? Dalej szorowal.
+
+### Rozwiazanie: Port pelnego pipeline'u z kPEPE
+
+Zamiast budowac cos nowego, wzielismy caly S/R pipeline z kPEPE — 600+ linii kodu — i wkleili do VIRTUAL else branch. Jedna kluczowa roznica: parametry.
+
+**kPEPE vs VIRTUAL — inne parametry, ta sama logika:**
+
+| Parametr | kPEPE | VIRTUAL | Dlaczego |
+|----------|-------|---------|----------|
+| `srReductionStartAtr` | 2.0 | 2.5 | VIRTUAL mniej agresywna redukcja |
+| `srMaxRetainPct` | 0.10 | 0.15 | VIRTUAL zachowuje wiecej pozycji |
+| `srAccumBounceBoost` | 1.8 | 1.6 | VIRTUAL wolniejsza akumulacja |
+| `pumpThresholdPct` | 3.0 | 2.5 | VIRTUAL wrazliwszy na pumpy |
+| `autoSkewShiftBps` | 2.0 | 1.5 | VIRTUAL mniejsze przesuniecie grida |
+| `srBounceHoldMinDistAtr` | 1.5 | 1.8 | VIRTUAL pozniej aktywuje bounce hold |
+
+To jak dwa samochody z tym samym silnikiem, ale inne mapowanie gazu. VIRTUAL jest bardziej konserwatywny — mniejsza pozycja, wolniejsze akumulowanie, wieksza tolerancja przed redukcja. Pasuje do tokena, ktory ma mniejsza zmiennosc niz kPEPE.
+
+### Co dokladnie zostalo portowane (i w jakiej kolejnosci)
+
+Pipeline dziala sekwencyjnie — kazdy modul modyfikuje `sizeMultipliers.bid`/`.ask` i przekazuje dalej:
+
+```
+1. Fetch momentum (niezaleznie od kPEPE branch)
+2. ATR% computation z MarketVision
+3. Moon Guard (ochrona przed pumpami)
+4. Order Flow Filter
+5. Momentum Guard scoring
+   - ATR signal, momentum signal, RSI signal
+   - Proximity signal (touch vs break distinction!)
+   - SMA Crossover wpleciony w MG scoring
+6. Position-aware guard (czy mamy LONG przy oporze? SHORT przy wsparciu?)
+7. INV_AWARE MG Override (gdy bot utknal z pozycja)
+8. S/R Grace Period (delay reduction po breakout)
+9. S/R Progressive Reduction (zmniejsz pozycje im blizej S/R)
+10. BREAKEVEN_BLOCK (nie zamykaj ze strata blisko S/R)
+11. S/R Accumulation + Fresh Touch Boost (buduj pozycje na S/R)
+12. S/R Bounce Hold (nie sprzedawaj za wczesnie po odbiciu)
+13. Breakout TP (zamknij na silnym momentum alignowanym z breakout)
+14. Dynamic TP (rozszerz spread na micro-reversal)
+15. Inventory SL (panic exit przy ekstremalnym drawdown)
+16. Auto-Skew (przesun mid price w strone potrzebnych fillow)
+17. generateGridOrders() z skewedMidPrice
+```
+
+### Czego NIE portowalismy
+
+kPEPE ma kilka unikalnych modulow, ktore nie pasuja do VIRTUAL:
+
+| Modul | Dlaczego nie | Alternatywa w VIRTUAL |
+|-------|-------------|----------------------|
+| **Toxicity Engine** | Wymaga danych toksycznego flow specyficznych dla kPEPE | Moon Guard wystarcza |
+| **4-layer Custom Grid** | kPEPE uzywa `generateGridOrdersCustom()` z 4 warstwami | VIRTUAL uzywa standard `generateGridOrders()` |
+| **TimeZone Profile** | kPEPE ma profile Asia/Europe/US | Nie potrzebne dla VIRTUAL |
+| **OBI Modulator** | Order Book Imbalance — specyficzny dla kPEPE's book | Brak |
+| **VWAP Modifier** | Volume-weighted adjustments | Brak |
+| **Dynamic Spread ATR** | kPEPE skaluje spread z ATR | VIRTUAL uzywa stalego profilu |
+
+To wazna lekcja: nie musisz portowac **wszystkiego**. Portuj rdzen (S/R pipeline), dostosuj parametry, pomin to co jest specyficzne dla tokena. Mniej kodu = mniej bugow.
+
+### Kluczowa roznica architektoniczna: `skewedMidPrice`
+
+Stary VIRTUAL uzywal raw `midPrice` w `generateGridOrders()`:
+```typescript
+// STARY KOD
+generateGridOrders(pair, midPrice, ...)
+```
+
+Nowy VIRTUAL uzywa `skewedMidPrice` — mid price po Auto-Skew:
+```typescript
+// NOWY KOD
+const skewShift = inventorySkewPct * autoSkewShiftBps / 10000
+const skewedMidPrice = midPrice * (1 + skewShift)
+generateGridOrders(pair, skewedMidPrice, ...)
+```
+
+Auto-Skew przesuwa srodek grida w strone, w ktora bot **potrzebuje fillow**. Jesli bot ma duzy LONG, skew przesuwa grid w gore (wiecej askow blizej ceny = latwiejsze zamkniecie). Jesli ma duzy SHORT, przesuwa w dol (wiecej bidow blizej ceny = latwiejsze zamkniecie).
+
+To jak regulacja celownika w karabinie — nie zmieniasz celu, tylko dostosowujesz punkt mierzenia zeby trafic tam gdzie chcesz.
+
+### Weryfikacja: co zobaczylem w logach po deployment
+
+```
+[SR_ACCUM] VIRTUAL: RESISTANCE -> accumulate SHORTS -- progress=42% dist=2.45%
+[BOUNCE_HOLD] VIRTUAL: RELEASED -- dist=1.73ATR >= 1.5ATR threshold
+```
+
+Pipeline zyje. VIRTUAL wykryl opor, zaczal akumulowac shorty (poprawne zachowanie w tym kontekscie), i Bounce Hold wylaczyl sie po potwierdzeniu odbicia. Dokladnie to, co chcielismy.
+
+### Lekcje
+
+1. **Jeden slepy bot moze zniszczyc caly portfel.** VIRTUAL bez S/R to jak prowadzenie samochodu bez swiatel — mozesz jechac, ale nie widzisz zakretow. Skew -59.5% na daily support to wypadek czekajacy na okazje.
+
+2. **Portowanie > pisanie od zera.** 600 linii kodu, ale zero nowej logiki — wszystko przetestowane na kPEPE przez tygodnie. Port zajal godzine, napisanie od zera zaloby tydzien. I mialby nowe bugi.
+
+3. **Parametryzuj, nie dupllikuj.** `getMomentumGuardConfig(pair)` zwraca inne wartosci dla kPEPE i VIRTUAL, ale logika jest identyczna. Jeden zestaw parametrow w `short_only_config.ts`, zero if/else w pipeline.
+
+4. **Standard grid != slabszy grid.** VIRTUAL nie potrzebuje 4-layer custom grida zeby miec S/R awareness. Standard grid z `skewedMidPrice` + S/R multipliers daje 90% korzysci za 10% zlozonosci.

@@ -400,13 +400,34 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     smaCrossoverAskBoost: 1.8,          // Aggressive ask boost on death cross near resistance
   },
   'VIRTUAL': {
+    // Full S/R awareness — same pipeline as kPEPE but tuned for VIRTUAL's characteristics
+    // VIRTUAL: mid-cap altcoin, daily range 3-8%, less volatile than kPEPE
+    pumpThresholdPct: 2.5,               // Lower than kPEPE (3.0) — VIRTUAL less volatile
+    atrThresholdMult: 1.8,              // 1.8× ATR for pump/dump detection (kPEPE: 2.0)
+    moderateThreshold: 0.30,            // Slightly higher than kPEPE (0.28) — less noise
+    // Auto-Skew: gentle, hold positions
+    autoSkewShiftBps: 1.5,
+    autoSkewMaxShiftBps: 10.0,
+    // S/R Reduction: start at 2.5×ATR (same as kPEPE)
+    srReductionStartAtr: 2.5,
+    srMaxRetainPct: 0.15,               // 15% max position at S/R before reduction kicks in
+    srReductionMinSkew: 0.05,
+    // S/R Accumulation: moderate (not as aggressive as kPEPE)
+    srAccumBounceBoost: 1.6,            // Moderate (kPEPE: 1.8)
+    srAccumFreshMultiplier: 2.5,        // 2.5× fresh touch (kPEPE: 3.0)
+    srReductionGraceCandles: 2,         // 2 candles (~30 min) grace — less volatile than kPEPE
+    srBreakoutTpScoreThreshold: 0.45,   // Between default (0.50) and kPEPE (0.40)
+    // Inventory-Aware MG Override
+    inventoryAwareMgThreshold: 0.10,    // 10% (kPEPE: 8%, default: 15%)
+    inventoryAwareMgClosingBoost: 1.4,  // Moderate (kPEPE: 1.5)
+    // S/R Bounce Hold
+    srBounceHoldMinDistAtr: 1.8,        // 1.8×ATR (kPEPE: 2.0, default: 1.5)
+    srBounceHoldAskReduction: 0.18,     // 18% closing at S/R (kPEPE: 15%)
     // SMA Crossover: backtest-optimized SMA 20/30 + S/R tolerance 1.08
-    // Backtest: +2.18% return, 1.28 Sharpe, 47.4% win rate, -1.92% max DD (81 days, 19 trades)
-    // VIRTUAL reacts to faster trend changes (SMA 30 vs kPEPE's 60)
     smaCrossoverEnabled: true,
-    smaFastPeriod: 20,                   // SMA 20 (1h candles)
-    smaSlowPeriod: 30,                   // SMA 30 (1h candles) — faster than kPEPE's 60
-    smaSrTolerance: 1.08,               // Tighter tolerance — 8% zone around S/R (vs kPEPE's 10%)
+    smaFastPeriod: 20,
+    smaSlowPeriod: 30,
+    smaSrTolerance: 1.08,
     smaCrossoverBidBoost: 1.8,
     smaCrossoverAskBoost: 1.8,
   },

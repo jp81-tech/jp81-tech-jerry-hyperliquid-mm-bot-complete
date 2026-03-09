@@ -49,6 +49,46 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 9 marca 2026
 
+### 117. VIRTUAL S/R Pipeline — Full S/R Awareness (09.03)
+
+**Problem:** VIRTUAL bot miał tylko SMA Crossover + Moon Guard + Order Flow Filter — ZERO S/R awareness. Trzymał SHORT na daily support z -59.5% skew, nie wiedząc że jest na wsparciu (najgorsza pozycja dla shorta).
+
+**Fix:** Skopiowano pełny S/R pipeline z kPEPE do VIRTUAL else branch w `mm_hl.ts` (~600+ linii). VIRTUAL używa własnych parametrów z `short_only_config.ts`.
+
+**Portowane moduły (w kolejności pipeline):**
+1. Momentum Guard scoring (ATR%, momentum signal, RSI signal, proximity signal z touch/break)
+2. S/R Discord alerts z cooldown
+3. MG Score + SMA Crossover merged into MG flow
+4. Pipeline status object (Discord embeds)
+5. Position-aware guard + micro-reversal detection + asymmetric multipliers
+6. INV_AWARE MG Override z S/R suppression
+7. S/R Grace Period (delay reduction po confirmed break)
+8. S/R Progressive Reduction (SHORT→support, LONG→resistance)
+9. BREAKEVEN_BLOCK (S/R-specific)
+10. S/R Accumulation + Fresh Touch Boost
+11. S/R Bounce Hold (progressive release)
+12. Breakout TP (close on strong aligned momentum)
+13. Dynamic TP (spread widener on micro-reversal)
+14. Inventory SL (panic mode, sets `inventorySlPanic = true`)
+15. Auto-Skew (creates `skewedMidPrice`)
+
+**NIE portowane (kPEPE-specific):** Toxicity Engine, TimeZone profile, 4-layer custom grid, OBI modulator, VWAP modifier, Dynamic Spread ATR scaling, Dynamic Position Sizing, Hedge trigger
+
+**Config VIRTUAL w `short_only_config.ts`:**
+- `srReductionStartAtr: 2.5`, `srMaxRetainPct: 0.15` — mniej agresywna redukcja niż kPEPE
+- `srAccumBounceBoost: 1.6`, `srAccumFreshMultiplier: 2.5` — akumulacja z fresh touch boost
+- `autoSkewShiftBps: 1.5`, `autoSkewMaxShiftBps: 10.0` — auto-skew
+- `inventoryAwareMgThreshold: 0.10` — INV_AWARE override
+- `srBounceHoldMinDistAtr: 1.8` — bounce hold
+
+**Grid:** VIRTUAL zachowuje `generateGridOrders()` (standard grid) z `skewedMidPrice`
+
+**Logi potwierdzające deployment:**
+- `🔄 [SR_ACCUM] VIRTUAL: RESISTANCE → accumulate SHORTS — progress=42%`
+- `🔓 [BOUNCE_HOLD] VIRTUAL: RELEASED — dist=1.73ATR >= 1.5ATR threshold`
+
+**Pliki:** `src/mm_hl.ts` (+700, -70), `src/config/short_only_config.ts` (+20)
+
 ### 116. kPEPE Fee Efficiency Optimization — minProfitBps 20 + Tightness Floor 18bps (09.03)
 
 **Problem:** kPEPE fee efficiency at 37% (churning territory — target <15%). Bot micro-scalped with L1 close orders just 10bps from entry, and after skew adjustments the effective spread compressed below profitable levels. Each fill's margin was too thin to cover accumulation fees.
