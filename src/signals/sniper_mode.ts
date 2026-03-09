@@ -1,5 +1,5 @@
-import { LiqCluster } from './moon_stream_guard'
-import { SniperModeConfig, getSniperModeConfig } from '../config/short_only_config'
+import { LiqCluster } from './moon_stream_guard.js'
+import { SniperModeConfig, getSniperModeConfig } from '../config/short_only_config.js'
 
 // ============================================================
 // SNIPER MODE — Mean Reversion After Liquidation Cascades
