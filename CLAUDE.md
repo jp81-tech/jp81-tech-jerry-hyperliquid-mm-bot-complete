@@ -71,6 +71,12 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - mm-virtual: GUARD usunął 8 asków (entry=$0.6599, mid=$0.6481, 1.8% underwater)
 - mm-pure: BREAKEVEN_BLOCK + GUARD = layered defense
 
+**Wyniki overnight (09.03):**
+- GUARD zatrzymał churning natychmiast (Daily PnL zamrożony na -$17.63, zero nowych strat)
+- Następny dzień: mm-pure +$25.27, mm-virtual +$31.10
+- VIRTUAL wyszedł z underwater → normalny MM (8 bids + 8 asks, grid symetryczny)
+- kPEPE zamknął longi z zyskiem, obrócił na SHORT, Total PnL: $342
+
 **Pliki:** `src/mm_hl.ts` (+23/-11 linii)
 
 ### 113. SMA Crossover Signal — VIRTUAL integration + per-token dynamic SMA (08.03)
