@@ -9822,3 +9822,145 @@ In-memory state (PM2 restart kasuje) — ale max hold 15 min, wiec nawet jesli r
 3. **Conflict resolution jest rownie wazne jak logika biznesowa.** Sniper bez conflict resolution moglby wchodzic w pozycje gdy SM mowi "HOLD SHORT" albo gdy bot jest w panice — katastrofa. Hierarchia priorytetow (panic > SM > sniper) to kregoslup bezpieczenstwa.
 
 4. **Flat-only entry eliminuje 90% edge cases.** Jesli sniper wchodzilby gdy bot juz ma pozycje, musielibysmy radzic sobie z: pozycja w tym samym kierunku (doloz?), pozycja w przeciwnym (hedge?), interakcja z innymi guardami... Wymog `|actualSkew| < 0.10` sprawia ze te problemy nie istnieja.
+
+---
+
+## Rozdzial: Churning — jak bot sam sobie strzelal w kolano (#120)
+
+### Problem: Buy High, Sell Low na autopilocie
+
+Wyobraz sobie gracza na gieldze ktory robi dokladnie odwrotnie niz powinien — kupuje na szczytach i sprzedaje na dolkach. Brzmi absurdalnie? To dokladnie robil nasz bot z kPEPE przez 9 dni.
+
+Analiza fills od 1 do 9 marca pokazala pattern ktory mrozy krew w zylach:
+
+```
+03-01/02: NET SELL @ $0.003435-3454   <-- dobrze! shortuje blisko szczytu
+03-03/04/05: NET BUY @ $0.003439-3581 <-- zle! zamyka shorty ze strata
+03-07: NET BUY @ $0.003335            <-- zle! kupuje ponizej
+03-08/09: NET SELL @ $0.003199-3247   <-- zle! re-shortuje na dnie
+```
+
+Bot zbudowal shorta na gorze (dobrze!), potem go zamknal w srodku (zle!), potem ponownie zashortwal na dnie (katastrofa!). Klasyczny "churning" — bezsensowne obracanie pozycja ktore generuje tylko straty i prowizje.
+
+### Detektywistyka: 3 root causes
+
+Nie wystarczy powiedziec "bot churnuje" — trzeba zrozumiec DLACZEGO. Okazalo sie ze 3 niezalezne mechanizmy wspolpracowaly zeby zniszczyc PnL:
+
+#### Root Cause #1: kPEPE za maly na radar
+
+`getSmDirection()` to funkcja ktora mowi botowi "SM sa SHORT" lub "SM sa LONG". Jest kluczowa bo `shouldHoldForTp()` (system ochrony pozycji) uzywa jej do decyzji czy blokowac closing-side ordery.
+
+Problem? `getSmDirection()` wymaga minimum $100,000 SM exposure zeby zwrocic jakikolwiek kierunek. kPEPE mial $34K SM exposure — duzo jak na small-cap memecoin, ale ponizej globalnego progu. Wynik: `getSmDirection()` zawsze zwracal `null`, `shouldHoldForTp()` zawsze zwracal `false`, i ZERO ochrony pozycji.
+
+To jak system alarmowy ktory dziala tylko w domach powyzej 200m2. Twoje mieszkanie ma 80m2 — alarm nie wlaczy sie nawet gdy wlamywacz juz jest w srodku.
+
+#### Root Cause #2: Whale override nieosiagalny
+
+SignalEngine ma specjalny mechanizm — `checkWhaleTrackerOverride()` — ktory moze wymusic FOLLOW_SM_SHORT nawet gdy normalny scoring daje slaby wynik. Ale ten override wymaga pozycji >= $500,000. kPEPE z $34K exposure nigdy tego nie osiagnie.
+
+Bez whale override, SignalEngine patrzyl na score (-25 do +25 = "WAIT zone") i fallbackowal do PURE_MM — market making obu stron. Bot stawial bidy I aski, co oznaczalo ze zamykal shorty i otwieral longi jednoczesnie. Mimo ze LS ratio SM wynioslo 7.54x (ekstremalnie bearish!), bot tego nie widzial.
+
+#### Root Cause #3: Oracle flip-flop
+
+SM direction zmienial sie: SHORT -> NEUTRAL -> LONG -> NEUTRAL -> SHORT przez kilka dni. Kazda zmiana powodowala ze bot otwieral przeciwna strone. SHORT -> LONG = bot zaczyna kupowac (zamyka shorty). LONG -> SHORT = bot zaczyna sprzedawac (re-shortuje). Kazdy flip = fill w zlym momencie = strata.
+
+To jak GPS ktory zmienia trase co 5 minut — zamiast jechac prosto, krazysz w kolko spalajac paliwo.
+
+### 3 fixy — kazdy celuje w inny root cause
+
+#### Fix 1: Per-token SM exposure thresholds (SmAutoDetector.ts)
+
+Zamiast globalnego $100K dla wszystkich, dodalismy `TOKEN_SM_EXPOSURE_OVERRIDES`:
+
+```typescript
+const TOKEN_SM_EXPOSURE_OVERRIDES: Record<string, number> = {
+  'kPEPE': 10_000,   // $10K wystarczy dla small-cap memecoin
+  'LIT': 20_000,     // $20K dla small-cap
+}
+```
+
+Teraz kPEPE z $34K exposure > $10K threshold = valid SM direction. `shouldHoldForTp()` wreszcie dziala — gdy bot trzyma SHORT i SM mowia SHORT, bidy sa blokowane. Koniec z zamykaniem shortow na polowie drogi.
+
+**Lekcja:** Globalne thresholdy sa wygodne ale niebezpieczne. $100K to duzo dla kPEPE ale nic dla BTC. Dobre systemy skaluja sie proporcjonalnie do kontekstu.
+
+#### Fix 2: Per-token whale override + strong ratio bypass (SignalEngine.ts)
+
+Dwa zmiany w `checkWhaleTrackerOverride()`:
+
+**A) Per-token minimum position:**
+```typescript
+const WHALE_POSITION_OVERRIDES: Record<string, number> = {
+  'kPEPE': 5_000,    // $5K minimum (was $500K global)
+  'LIT': 10_000,
+}
+```
+
+**B) Strong ratio bypass:** Gdy LS ratio >= 5.0 i exposure >= per-token minimum, override odpala sie nawet bez 80% conviction:
+
+```typescript
+if (ratio >= 5.0 && Math.abs(netExposure) >= minPosition) {
+  // 7.54x ratio mowi sam za siebie — nie potrzebujemy 80% conviction
+  return FOLLOW_SM_SHORT
+}
+```
+
+kPEPE z 7.54x ratio i $34K exposure teraz dostaje FOLLOW_SM_SHORT zamiast PURE_MM. Bot przestaje stawiac bidy (zamykac shorty) i skupia sie na agresywnym shortowaniu.
+
+**Lekcja:** Czasem jeden silny sygnal jest wart wiecej niz 10 slabych. LS ratio 7.54x to ekstremalnie mocny sygnaly kierunkowy — nie potrzeba dodatkowego potwierdzenia.
+
+#### Fix 3: Anti-churn cooldown (mm_hl.ts)
+
+Nowa mapa `lastDirectionChange` trackuje kiedy SM direction sie zmienil per pair. Gdy zmiana nastapi, bot czeka 30 minut zanim zareaguje:
+
+```typescript
+if (currentDir !== lastChange.direction) {
+  const elapsed = Date.now() - lastChange.timestamp
+  if (elapsed < 30 * 60 * 1000) {
+    // Trzymaj poprzedni kierunek — nie reaguj na flip
+    smDir = lastChange.direction === 'SHORT' ? 'SHORT' : 'LONG'
+  }
+}
+```
+
+Dlaczego to dziala? Wieksznosc flipow oracle'a to "whipsaw" — szum. SHORT -> LONG -> SHORT w ciagu godziny to nie prawdziwa zmiana trendu, to noise. 30 minut cooldownu filtruje wieksznosc tego szumu. Jesli oracle naprawde zmienil zdanie (prawdziwy trend reversal), 30 minut opoznienia to minimalna cena za unikniecie churnu.
+
+**Lekcja:** Opoznienie reakcji moze byc LEPSZE niz natychmiastowa reakcja. W tradingu, "first mover advantage" czesto oznacza "first mover to get rekt". Lepiej spoznic sie 30 minut niz stracic pieniadze na fałszywym sygnale.
+
+### Architektura rozwiazania — defense in depth
+
+Te 3 fixy dzialaja w warstwach:
+
+```
+Warstwa 1: SM Exposure Threshold (SmAutoDetector)
+  "Czy SM exposure jest wystarczajace zeby zaufac kierunkowi?"
+  kPEPE: $34K > $10K = TAK → getSmDirection() zwraca SHORT
+                                    |
+                                    v
+Warstwa 2: Whale Override (SignalEngine)
+  "Czy ratio jest wystarczajaco silne?"
+  kPEPE: 7.54x >= 5.0 = TAK → FOLLOW_SM_SHORT (nie PURE_MM)
+                                    |
+                                    v
+Warstwa 3: Anti-Churn Cooldown (mm_hl.ts)
+  "Czy kierunek naprawde sie zmienil?"
+  Flip < 30 min temu = NIE → trzymaj poprzedni kierunek
+```
+
+Kazda warstwa jest niezalezna i konserwatywna:
+- Warstwa 1 tylko wlacza istniejacy mechanizm ochrony
+- Warstwa 2 pozwala override z nizszym conviction, ale wymaga ratio >= 5.0
+- Warstwa 3 tylko opoznia reakcje, nigdy jej nie blokuje
+
+To jest wzorzec "defense in depth" — ta sama strategia co w cyberbezpieczenstwie. Jeden firewall moze zawiezc. Trzy niezalezne warstwy razem sa znacznie trudniejsze do przebicia.
+
+### Czego sie nauczylem
+
+1. **Globalne thresholdy to tykajaca bomba.** Gdy dodajesz nowy token do systemu, ZAWSZE sprawdz czy globalne progi maja sens dla niego. BTC z $10B daily volume i kPEPE z $500K daily volume to dwa rozne swiaty — jeden set regul nie pasuje do obu.
+
+2. **Churning jest gorszy niz brak tradingu.** Bot ktory nic nie robi traci $0 (minus opportunity cost). Bot ktory churnuje traci na kazdym flipie — prowizje + adverse selection + slippage. "Primum non nocere" — przede wszystkim nie szkodzic.
+
+3. **Cooldown > natychmiastowa reakcja.** W systemach z szumem (a rynki sa PELNE szumu), szybkosc reakcji to bug, nie feature. Najlepsi traderzy (ludzcy i algorytmiczni) filtruja szum zanim zareaguja. Nasz 30-minutowy cooldown to prosty ale skuteczny filtr.
+
+4. **Config-driven > hardcoded.** `TOKEN_SM_EXPOSURE_OVERRIDES` i `WHALE_POSITION_OVERRIDES` to slowniki — dodanie nowego tokena to 1 linia kodu. Gdybysmy hardcodowali `if (token === 'kPEPE') threshold = 10000`, kazdy nowy token wymagalby kolejnego if/else. Open/Closed Principle w praktyce.
+
+5. **Diagnoza > fix.** 80% czasu poszlo na ZROZUMIENIE problemu (analiza fills, sledzenie kodu, identyfikacja 3 root causes). Sam fix to 62 linie kodu w 3 plikach. Jak mowi stare powiedzenie chirurgow: "Czas na sali operacyjnej jest odwrotnie proporcjonalny do czasu na diagnostyce."

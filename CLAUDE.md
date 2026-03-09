@@ -48,7 +48,54 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
-## Zmiany 9 marca 2026
+## Zmiany 9 marca 2026 (kontynuacja)
+
+### 120. Fix kPEPE Buy-High-Sell-Low Churning — 3-layer anti-churn protection (09.03)
+
+**Problem:** kPEPE tracił pieniądze przez pattern buy-high-sell-low. Analiza fills 03-01 do 03-09:
+- 03-01/02: NET SELL @ $0.003435-3454 (dobrze — shortowanie blisko szczytu)
+- 03-03/04/05: NET BUY @ $0.003439-3581 (źle — zamykanie shortów ze stratą)
+- 03-07: NET BUY @ $0.003335 (źle)
+- 03-08/09: NET SELL @ $0.003199-3247 (źle — re-shortowanie na dnie)
+
+**3 root causes + 3 fixy:**
+
+**Fix 1 — Per-token SM exposure thresholds (`SmAutoDetector.ts`):**
+
+| Problem | `getSmDirection()` wymaga `minSmExposureUsd: $100K` — kPEPE SM exposure tylko $34K → zawsze null → `shouldHoldForTp()` zawsze false |
+|---------|------|
+| Fix | `TOKEN_SM_EXPOSURE_OVERRIDES`: kPEPE $10K, LIT $20K (default $100K) |
+| Efekt | kPEPE z $34K exposure > $10K threshold → valid SM direction → bid blocking działa |
+
+**Fix 2 — Per-token whale override thresholds (`SignalEngine.ts`):**
+
+| Problem | `checkWhaleTrackerOverride()` wymaga `minPositionValue: $500K` — niemożliwe dla kPEPE → fallback PURE_MM |
+|---------|------|
+| Fix | `WHALE_POSITION_OVERRIDES`: kPEPE $5K, LIT $10K (default $500K) + "strong ratio bypass" gdy LS ratio >= 5.0 |
+| Efekt | kPEPE z 7.54x ratio i $34K exposure → FOLLOW_SM_SHORT zamiast PURE_MM |
+
+**Fix 3 — Anti-churn cooldown (`mm_hl.ts`):**
+
+| Problem | Signal zmienia SHORT→NEUTRAL→LONG→NEUTRAL→SHORT przez kilka dni → bot churnuje |
+|---------|------|
+| Fix | `lastDirectionChange` Map + 30-min cooldown. Gdy SM direction flip → trzymaj poprzedni kierunek 30 min |
+| Efekt | Oracle flip SHORT→LONG → bot czeka 30 min. Jeśli wróci do SHORT → zero churnu |
+
+**Logi:**
+- Fix 1: `⚪ [kPEPE] Low SM exposure ($34k < $10k)` → teraz NIE wyświetli (bo $34K > $10K)
+- Fix 2: `🐋 WHALE OVERRIDE (strong ratio): Ratio 7.5x (≥5.0x) + $34k exposure → FORCE SHORT`
+- Fix 3: `🔄 [ANTI-CHURN] kPEPE: direction flip SHORT→LONG blocked, cooldown 25min remaining`
+
+**Profil ryzyka:**
+- Fix 1 (lower threshold): Konserwatywny — tylko włącza istniejącą ochronę. Risk: SM direction może być błędny dla small-cap. Mitigated: `moderateDominanceRatio: 1.5` nadal wymagany.
+- Fix 2 (whale override): Umiarkowany — pozwala FOLLOW_SM z niższym conviction. Risk: fałszywe sygnały. Mitigated: wymaga ratio >= 5.0 (bardzo silny sygnał kierunkowy).
+- Fix 3 (anti-churn): Konserwatywny — tylko opóźnia akcję, nigdy jej nie blokuje. 30 min wystarczająco krótkie na prawdziwe zmiany trendu.
+
+**Pliki:** `src/mm/SmAutoDetector.ts` (+9), `src/core/strategy/SignalEngine.ts` (+22), `src/mm_hl.ts` (+31)
+
+---
+
+## Zmiany 9 marca 2026 (wcześniejsze)
 
 ### 119. Sniper Mode — Mean Reversion After Liquidation Cascades (09.03)
 
@@ -5042,3 +5089,6 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **copy-general baseline pitfall (02.03)**: NIGDY nie usuwaj wpisów z activeCopies state — bot potraktuje istniejące pozycje Generała jako "nowe" i otworzy kopie. Zamiast usuwać, ustaw `baseline: true` flag. Baseline entries = "znana pozycja, nie zarządzaj".
 - **PM2 ecosystem.config.cjs env loading (02.03)**: `pm2 restart --update-env` czyta env z SHELL, nie z ecosystem.config.cjs. Żeby załadować env z pliku: `pm2 delete <name> && pm2 start ecosystem.config.cjs --only <name>`. Bez tego nowe env vars (np. COPY_ALLOWED_COINS) nie zostaną załadowane.
 - **dotenv w scripts/ (02.03)**: Skrypty w `scripts/` nie ładują automatycznie `.env`. Trzeba explicit `import { config as dotenvConfig } from 'dotenv'; dotenvConfig()`. Bez tego env vars z `.env` (np. COPY_PRIVATE_KEY) są niewidoczne po PM2 recreate.
+- **Anti-churn cooldown (09.03)**: 30-min cooldown po SM direction flip. `lastDirectionChange` Map na HyperliquidMMBot, `DIRECTION_CHANGE_COOLDOWN_MS = 30min`. Gdy `getSmDirection()` zwraca inny kierunek niż poprzednio → trzymaj stary kierunek dla downstream (shouldHoldForTp, Pump Shield, FibGuard, etc.) przez 30 min. Nie blokuje — tylko opóźnia. Log: `🔄 [ANTI-CHURN]`. Placement: po `getSmDirection()`, przed FOLLOW SM MODE block w mm_hl.ts.
+- **TOKEN_SM_EXPOSURE_OVERRIDES (09.03)**: Per-token progi minSmExposureUsd w SmAutoDetector.ts. kPEPE: $10K, LIT: $20K, default: $100K. Używane w `determineMode()`. Bez tego kPEPE ($34K exposure) zawsze dostawał PURE_MM → `getSmDirection()` null → `shouldHoldForTp()` false → brak ochrony pozycji.
+- **WHALE_POSITION_OVERRIDES (09.03)**: Per-token progi minPositionValue w SignalEngine.ts `checkWhaleTrackerOverride()`. kPEPE: $5K, LIT: $10K, default: $500K. + "strong ratio bypass": ratio >= 5.0 + exposure >= per-token min + token has lower threshold → override nawet bez 80% conviction. Bez tego kPEPE nigdy nie dostawał whale override → fallback PURE_MM.
