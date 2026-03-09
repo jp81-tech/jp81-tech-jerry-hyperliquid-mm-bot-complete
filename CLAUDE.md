@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-08
+- Data: 2026-03-09
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -48,6 +48,39 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 ---
 
 ## Zmiany 9 marca 2026
+
+### 116. kPEPE Fee Efficiency Optimization — minProfitBps 20 + Tightness Floor 18bps (09.03)
+
+**Problem:** kPEPE fee efficiency at 37% (churning territory — target <15%). Bot micro-scalped with L1 close orders just 10bps from entry, and after skew adjustments the effective spread compressed below profitable levels. Each fill's margin was too thin to cover accumulation fees.
+
+**Diagnoza:** SPREAD log showed `L1 bid=10bps` (baseProfiled 25bps + skewAdj -15bps = 10bps). MIN_PROFIT only filtered at 10bps — fills between 10-20bps were profitable pre-fee but unprofitable post-fee.
+
+**2 zmiany:**
+
+| # | Zmiana | Efekt |
+|---|--------|-------|
+| 1 | **minProfitBps: 10→20** w `DYNAMIC_SPREAD_OVERRIDES['kPEPE']` | Close orders muszą być >= 20bps od entry (was 10bps) |
+| 2 | **Tightness Floor 18bps** w `mm_hl.ts` (po `generateGridOrdersCustom`, PRZED MIN_PROFIT) | Po wszystkich skew/spread adjustments, ordery bliżej niż 18bps od mid usuwane |
+
+**Tightness Floor logika:**
+```typescript
+const TIGHTNESS_FLOOR_BPS = 18
+const minBidPx = skewedMidPrice * (1 - 18/10000)  // max bid
+const maxAskPx = skewedMidPrice * (1 + 18/10000)  // min ask
+gridOrders = gridOrders.filter(o => {
+  if (o.side === 'bid' && o.price > minBidPx) return false
+  if (o.side === 'ask' && o.price < maxAskPx) return false
+  return true
+})
+```
+
+**Pipeline position:** Po `generateGridOrdersCustom`, PRZED `MIN_PROFIT`. Działa na WSZYSTKIE ordery (nie tylko close), zapewniając że żaden order nie jest zbyt blisko mid po skew adjustments.
+
+**Log:** `📐 [LIQUIDITY] kPEPE: spread floor active (min 18bps) — removed N orders too close to mid`
+
+**Cel:** Zmniejszyć fee/profit ratio z 37% do <15% (healthy).
+
+**Pliki:** `src/config/short_only_config.ts` (+1), `src/mm_hl.ts` (+21)
 
 ### 115. Daily Discord Performance Report (09.03)
 

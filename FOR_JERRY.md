@@ -9400,3 +9400,118 @@ Skrypt jest w czystym Pythonie (bez TS/node dependencies) — łatwiejszy do deb
 2. **Automatyzuj obserwację.** Ręczne sprawdzanie logów (`pm2 logs | grep ...`) działa do debugowania, ale nie do codziennego monitoringu. Cron + Discord = dostajesz raport na telefon każdego ranka.
 
 3. **Progi > wartości absolutne.** "Fee: $4.22" nic nie mówi. "Fee/Profit: 11.3% ✅ Healthy" mówi wszystko. Progi (< 15% / 15-30% / > 30%) zamieniają dane w decyzje.
+
+---
+
+## Rozdział 54: Fee Efficiency Optimization — Nie zarabiaj po to, żeby płacić prowizję
+
+> "Jeśli 37 centów z każdego dolara zysku oddajesz giełdzie, to nie jesteś traderem — jesteś dostarczycielem płynności pro bono."
+
+### Problem: kPEPE churning (37% fee efficiency)
+
+Raport z Rozdziału 53 ujawnił coś niepokojącego: kPEPE miał **fee efficiency 37%**. To znaczy, że z każdego $1 zrealizowanego zysku, $0.37 szło na opłaty transakcyjne. Dla porównania, VIRTUAL miał 4.4% — prawie 10x lepiej.
+
+Dlaczego? Bot **micro-scalpował** — otwierał i zamykał pozycje z maleńkim spreadem (10-15 basis points), co ledwo pokrywało koszty opłat. Wyobraź sobie, że prowadzisz taksówkę, ale każdy kurs jest tak krótki, że więcej paliwa palisz na rozgrzewanie silnika niż na sam przejazd.
+
+### Diagnoza: zbyt wąski spread po adjustmentach
+
+Spread pipeline kPEPE wygląda tak:
+
+```
+Base L1 = 32bps (HIGH_VOL, z Dynamic Spread)
+    ↓
+Skew Adjustment = -15bps (AUTO_SKEW przesuwa mid, inventory adjustment kompresuje)
+    ↓
+Efektywne L1 = ~10-17bps
+    ↓
+Round-trip = 20-34bps
+    ↓
+Fee round-trip = ~7bps (3.5bps maker × 2 strony)
+    ↓
+Netto na fill = 13-27bps... ale te najwęższe (13bps) to krawędź opłacalności
+```
+
+Problem leżał w dwóch miejscach:
+
+1. **`minProfitBps = 10`** — close ordery musiały być zaledwie 10bps od entry. Przy 7bps fee round-trip, zostawało 3bps marginu. Jeden tick w złą stronę i fill był na stracie.
+
+2. **Brak "podłogi" na effective spread** — po wszystkich adjustmentach (skew, toxicity, spread multipliers), ordery mogły wylądować dowolnie blisko mid price. Żaden mechanizm nie mówił "hej, ten order jest za blisko, nie ma sensu go składać".
+
+### Rozwiązanie: dwa bezpieczniki
+
+**Bezpiecznik #1: minProfitBps 10 → 20 (dla kPEPE)**
+
+Prosty config override:
+
+```typescript
+DYNAMIC_SPREAD_OVERRIDES['kPEPE'] = {
+  minProfitBps: 20,  // was 10 — close order musi być >= 20bps od entry
+}
+```
+
+Teraz close ordery, które zamykałyby pozycję z marginem mniejszym niż 20bps, są automatycznie odfiltrowane. 20bps minus 7bps fee = 13bps czystego zysku minimum na każdym filli.
+
+**Bezpiecznik #2: Tightness Floor 18bps**
+
+Nowy filtr po wygenerowaniu grida, PRZED MIN_PROFIT:
+
+```typescript
+const TIGHTNESS_FLOOR_BPS = 18
+const minBidPx = mid * (1 - 18/10000)  // max bid = mid - 0.18%
+const maxAskPx = mid * (1 + 18/10000)  // min ask = mid + 0.18%
+
+// Usuń ordery zbyt blisko mid
+gridOrders = gridOrders.filter(o => {
+  if (o.side === 'bid' && o.price > minBidPx) return false
+  if (o.side === 'ask' && o.price < maxAskPx) return false
+  return true
+})
+```
+
+To jest jak "strefa buforowa" wokół mid price. Żaden order — ani bid, ani ask, ani open, ani close — nie może być bliżej niż 18bps od aktualnej ceny. To chroni przed sytuacją, gdzie skew adjustment ścisnął spread do absurdalnie wąskiego poziomu.
+
+### Dlaczego dwa bezpieczniki, nie jeden?
+
+Bo chronią przed **różnymi** problemami:
+
+| Bezpiecznik | Co chroni | Kiedy działa |
+|-------------|-----------|-------------|
+| **Tightness Floor (18bps)** | Ordery zbyt blisko **mid price** | Zawsze — nawet bez pozycji |
+| **MIN_PROFIT (20bps)** | Close ordery zbyt blisko **entry price** | Tylko gdy masz pozycję |
+
+Scenariusz: Mid=$0.003200, entry=$0.003180 (SHORT, 20bps pod wodą).
+
+- Tightness Floor: "Nie składaj bida powyżej $0.003194" (18bps od mid)
+- MIN_PROFIT: "Nie składaj bida powyżej $0.003174" (20bps od entry — profitable close)
+
+Oba działają, ale MIN_PROFIT jest strictszy (wymaga profitu od entry), a Floor chroni przed absurdalnie ciasnym spredem nawet gdy MIN_PROFIT by przepuścił.
+
+### Analogia: Minimum Order Value
+
+To jak "minimum order value" w dostawie jedzenia. Uber Eats nie pozwala ci zamówić jednego banana za $0.50, bo koszt dostawy ($5) zjadłby cały przychód. Ustawiają minimum $15 żeby każde zamówienie było opłacalne po odjęciu kosztów.
+
+Nasz bot robi to samo: "Nie rób filla, który jest tak mały, że opłata transakcyjna zjada cały spread."
+
+### Pipeline position
+
+```
+generateGridOrdersCustom()  →  ordery wygenerowane
+    ↓
+>>> TIGHTNESS FLOOR (18bps) <<<  →  usuń ordery zbyt blisko mid
+    ↓
+MIN_PROFIT (20bps)  →  usuń close ordery zbyt blisko entry
+    ↓
+HARD BREAKEVEN GUARD  →  usuń close ordery poniżej breakeven
+    ↓
+Toxicity layer removal  →  usuń L1/L2 przy toksycznym flow
+```
+
+Trzy warstwy ochrony, każda na innym poziomie. Tightness Floor = najszersza sieć (łapie wszystko), MIN_PROFIT = precyzyjny filtr (tylko close ordery), GUARD = ostatnia linia obrony (absolutny breakeven).
+
+### Lekcje
+
+1. **Fee efficiency to kluczowa metryka.** Bez niej nie wiesz, czy twój spread pokrywa koszty. Możesz mieć "zielone PnL" a nadal tracić pieniądze na prowizje w długim terminie (wysoki volume, niski net).
+
+2. **Post-hoc filtrowanie > pre-hoc konfiguracja.** Zamiast próbować skonfigurować idealny spread z góry (co jest niemożliwe bo skew i volatility się ciągle zmieniają), generuj grid normalnie, a potem odfiltruj ordery które by były nieopłacalne. Pragmatyczne, proste, skuteczne.
+
+3. **Dwa bezpieczniki > jeden mocniejszy.** Jeden bezpiecznik na 25bps zastąpiłby oba — ale byłby za sztywny. Tightness Floor (18bps od mid) + MIN_PROFIT (20bps od entry) dają bardziej inteligentną ochronę, bo patrzą na problem z dwóch perspektyw.
