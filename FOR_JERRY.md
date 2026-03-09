@@ -9631,3 +9631,194 @@ Pipeline zyje. VIRTUAL wykryl opor, zaczal akumulowac shorty (poprawne zachowani
 3. **Parametryzuj, nie dupllikuj.** `getMomentumGuardConfig(pair)` zwraca inne wartosci dla kPEPE i VIRTUAL, ale logika jest identyczna. Jeden zestaw parametrow w `short_only_config.ts`, zero if/else w pipeline.
 
 4. **Standard grid != slabszy grid.** VIRTUAL nie potrzebuje 4-layer custom grida zeby miec S/R awareness. Standard grid z `skewedMidPrice` + S/R multipliers daje 90% korzysci za 10% zlozonosci.
+
+---
+
+## Chapter 56: Sniper Mode — Polowanie na Wyczerpanie (09.03.2026)
+
+### Co to jest i dlaczego tego potrzebujemy
+
+Wyobraz sobie pole bitwy. Z jednej strony okopala sie armia shortujacych traderow — ich pozycje tworzą "klaster likwidacyjny" o wartosci $1.67M, 7% powyżej aktualnej ceny VIRTUAL. Cena zaczyna rosnac. Shorty zaczynaja tracic. Margin calle zaczynaja dzwonic.
+
+I wtedy dzieje sie cos fascynujacego: **kaskada likwidacji**.
+
+Pierwszy short zostaje zlikwidowany. Giełda musi zamknac jego pozycje — kupuje na rynku (forced buy). To podnosi cene. Nastepny short zostaje zlikwidowany. Znowu forced buy. Cena rośnie dalej. Efekt domina — kazda likwidacja powoduje kolejna. Cena leci w gore jak rakieta.
+
+Ale tu jest klucz: **te forced buys nie sa organicznym popytem**. To nie sa ludzie, ktorzy wierza ze cena powinna byc tak wysoko. To giełda wymuszajaca zamkniecie pozycji. I w pewnym momencie — ostatni short w klastrze zostaje zlikwidowany. Nie ma juz wiecej wymuszonych kupujacych.
+
+I cena... spada z powrotem.
+
+To jest **mean reversion po kaskadzie likwidacji**. I dokładnie to Sniper Mode eksploatuje.
+
+### Analogia: Katapulta i gumka recepturka
+
+Pomysl o katapulcie zrobionej z gumki recepturki. Naciagasz ja (cena idzie w kierunku klastra). Im bardziej naciagasz, tym wiecej energii jest zmagazynowane (wiecej shortow dostaje squeezed). W pewnym momencie puszczasz (ostatni short zlikwidowany) — i gumka strzela Z POWROTEM z impetem proporcjonalnym do tego jak mocno ja naciagnales.
+
+Sniper Mode czeka cierpliwie na moment puszczenia gumki, a potem wchodzi w kierunku "snapbacku".
+
+### 6 faz maszyny stanowej
+
+Sniper Mode to **state machine** — automat z 6 fazami, kazda z precyzyjnymi warunkami przejscia:
+
+```
+WATCHING  -->  CASCADE_DETECTED  -->  SNIPER_ARMED  -->  ENTRY_ACTIVE
+                                                              |
+COOLDOWN  <--  POSITION_HELD  <-------------------------------|
+    |
+    +--> WATCHING (cykl od nowa)
+```
+
+#### Faza 1: WATCHING (obserwacja)
+
+Bot monitoruje klastry likwidacyjne z Moon Dev API. Szuka trzech jednoczesnych sygnalow:
+
+1. **Duzy klaster w zasiegu** — cluster > $200K (kPEPE) lub $300K (VIRTUAL) w odleglosci < 3% od ceny
+2. **Ruch cenowy w kierunku klastra** — cena przesunela sie > 3% (kPEPE) w strone klastra w ciagu 15 minut
+3. **Volume spike** — wolumen na aktualnej swiece 15m jest > 3x sredni wolumen z 8 poprzednich swiec
+
+Wszystkie trzy naraz = "cos sie dzieje". Przechodzimy do fazy 2.
+
+#### Faza 2: CASCADE_DETECTED (kaskada wykryta)
+
+Bot jest teraz w trybie "alert". Sledzi `cascadePeakPrice` — najwyzsza (lub najnizsza) cena osiagnieta podczas kaskady. Timeout: 5 minut. Jesli cena nie dotrze do klastra w tym czasie → reset do WATCHING.
+
+#### Faza 3: SNIPER_ARMED (karabin zaladowany)
+
+Cena weszla w strefe klastra (`|distancePct| < 0.5%`). Likwidacje powinny byc w toku. Bot aktualizuje `cascadePeakPrice` — sledzi szczyt/dolina ruchu.
+
+Teraz czeka na **exhaustion** — moment wyczerpania.
+
+#### Faza 4: ENTRY_ACTIVE (wejscie)
+
+Cena odwrocila sie o >= `reversalThresholdPct` (0.5% dla kPEPE) od peaku. To jest sygnał wyczerpania — nie ma juz wiecej forced buyers/sellers.
+
+Bot wchodzi **counter-trend** przez agresywne multipliers grida:
+- Short cluster squeezed (cena pompnela) → enter SHORT: `askMult=3.0, bidMult=0.0`
+- Long cluster dumped (cena zrzucona) → enter LONG: `bidMult=3.0, askMult=0.0`
+
+Wazne: bot wchodzi TYLKO gdy jest flat (`|actualSkew| < 0.10`). Nie otwiera sniper trades gdy juz ma pozycje.
+
+#### Faza 5: POSITION_HELD (pozycja trzymana)
+
+Fill wykryty. Teraz zarzadzanie pozycja z trzema mechanizmami wyjscia:
+
+| Mechanizm | Warunek | Akcja |
+|-----------|---------|-------|
+| **Trailing stop** | Profit > 1% → sledz, retrace 0.5% | Exit z zyskiem |
+| **Hard stop** | Strata > 2% (kPEPE: 3%) | Natychmiastowe zamkniecie |
+| **Max hold** | 15 minut | Wymuszone zamkniecie |
+
+`exitUrgent` bypassa HARD BREAKEVEN GUARD — sniper musi moc zamknac pozycje natychmiast, nawet na stracie.
+
+#### Faza 6: COOLDOWN (odpoczynek)
+
+30 minut przerwy przed nastepnym sniper trade. Zapobiega over-tradingowi i pozwala rynkowi sie ustabilizowac.
+
+### Conflict resolution — kto ma priorytet
+
+Sniper to potezne narzedzie, ale NIE moze nadpisywac wyzszych systemow. Implementacja sprawdza trzy warunki **przed** ticknieciem snipera:
+
+```typescript
+const sniperSkip = inventorySlPanic                    // emergency exit > sniper
+  || (se.mode === FOLLOW_SM_SHORT || FOLLOW_SM_LONG)   // SM signal > sniper
+  || (!permissions.allowLongs && !permissions.allowShorts) // HARD_BLOCK > sniper
+```
+
+Hierarchia priorytetow:
+1. **inventorySlPanic** — bot ma ekstremalny drawdown, musi zamknac pozycje TERAZ
+2. **FOLLOW_SM modes** — Smart Money daje kierunkowy sygnal, nie chcemy go nadpisywac
+3. **HARD_BLOCK** — oba kierunki zablokowane przez regime/external signal
+
+Jesli jakikolwiek z tych warunkow jest prawdziwy, sniper zwraca neutralny output (phase=WATCHING, multipliers=1.0) — jakby go nie bylo.
+
+### Jak to dziala w kodzie — pattern override
+
+Sniper NIE uzywa `forceEntry()` ani IOC orderow. Dziala przez **ten sam mechanizm co wszystkie inne guardy** — modyfikuje `sizeMultipliers.bid` i `sizeMultipliers.ask`. To eleganckie, bo:
+
+1. **Brak specjalnego kodu orderowania** — grid engine robi swoja robote jak zwykle
+2. **Kompatybilnosc** z innymi systemami — multiplicative, nie binary
+3. **Latwe debugowanie** — widzisz efekt w logach multiplierow
+
+Dodatkowo sniper moze **undo Gravity Guard** — jesli Gravity Guard zmniejszyl aski (bo widzi squeeze risk), a sniper chce wchodzic SHORT po squeeze, to sniper przywraca pre-gravity multipliers:
+
+```typescript
+const preGravityBid = sizeMultipliers.bid  // zapisz PRZED gravity
+const preGravityAsk = sizeMultipliers.ask
+
+// ... Gravity Guard modyfikuje multipliers ...
+
+if (sniperOut.overrideLiqGravity) {
+  sizeMultipliers.bid = preGravityBid  // przywroc
+  sizeMultipliers.ask = preGravityAsk
+}
+sizeMultipliers.bid *= sniperOut.bidMultOverride  // zastosuj sniper
+sizeMultipliers.ask *= sniperOut.askMultOverride
+```
+
+To jest pattern "save/restore" — czesto uzywany w systemach graficznych (save canvas state, transform, restore).
+
+### Hoisted variable pattern
+
+`sniperExitUrgent` jest zadeklarowany **ponad** if/else block (kPEPE vs VIRTUAL) — ten sam pattern co `inventorySlPanic`:
+
+```typescript
+let inventorySlPanic = false   // hoisted
+let sniperExitUrgent = false   // hoisted
+
+if (pair === 'kPEPE') {
+  // ... moze ustawic sniperExitUrgent = true ...
+} else {
+  // ... moze ustawic sniperExitUrgent = true ...
+}
+
+// HARD BREAKEVEN GUARD — ponizej if/else, uzywa obu zmiennych
+if (position && !inventorySlPanic && !sniperExitUrgent) {
+  // filtruj ordery poniżej breakeven
+}
+```
+
+Dlaczego "hoisted"? Bo zmienna musi byc widoczna **po** bloku if/else, w sekcji BREAKEVEN GUARD. Gdyby byla zadeklarowana wewnatrz `if (pair === 'kPEPE')`, nie bylaby dostepna po zamknieciu klamry. JavaScript/TypeScript ma block scope dla `let/const` — zmienne nie "wyciekaja" z blokow.
+
+### Per-token config pattern
+
+Sniper Mode uzywa tego samego patternu co Momentum Guard, Dynamic Spread, Pump Shield, itd.:
+
+```typescript
+// Interface → Defaults → Per-token overrides → Getter
+export interface SniperModeConfig { ... }
+export const SNIPER_DEFAULTS: SniperModeConfig = { ... }
+export const SNIPER_OVERRIDES: Record<string, Partial<SniperModeConfig>> = {
+  'kPEPE': { enabled: true, clusterMinValueUsd: 200_000, ... },
+  'VIRTUAL': { enabled: true, clusterMinValueUsd: 300_000, ... },
+}
+export function getSniperModeConfig(token: string): SniperModeConfig {
+  return { ...SNIPER_DEFAULTS, ...(SNIPER_OVERRIDES[token] || {}) }
+}
+```
+
+`Partial<SniperModeConfig>` = mozesz podac tylko te pola ktore chcesz nadpisac, reszta bierze sie z defaults. Spread operator `...` laczy obiekty — jesli override ma pole, nadpisuje default. Jesli nie, default zostaje.
+
+To jest **Open/Closed Principle** w praktyce — system jest otwarty na rozszerzenia (dodaj nowy token = 1 wpis w OVERRIDES), ale zamkniety na modyfikacje (nie musisz zmieniac zadnego istniejacego kodu).
+
+### Profil ryzyka — dlaczego to jest bezpieczne
+
+```
+Max loss per sniper trade: -3% of 50% grid size = ~1.5% capitalPerPair
+Max hold time:             15 minut (nie overnight!)
+Max frequency:             1 na 30 min = max 2/h
+Worst case hourly loss:    ~3% grid capital (~$150 z $5000 capital)
+```
+
+Porownaj z normalnym MM ktory moze trzymac pozycje godzinami i stracic 10%+ na jednym trendzie. Sniper trades sa krotkie, capped, i rzadkie.
+
+In-memory state (PM2 restart kasuje) — ale max hold 15 min, wiec nawet jesli restart "osierocí" pozycje, istniejace guardy (BREAKEVEN, INVENTORY_SL) je ogarnia.
+
+### Lekcje
+
+1. **Defensywa + ofensywa = pelny obraz.** Gravity Guard (#118) broni przed klastrami. Sniper Mode (#119) zarabia na nich. Ten sam sygnał (klaster likwidacyjny), dwa rozne uzycia. To jak w szachach — ten sam pion moze bronic krola albo atakować.
+
+2. **State machine > spaghetti if/else.** 6 faz z wyraznymi przejsciami jest latwe do zrozumienia, debugowania i rozszerzania. Gdyby to bylo 15 zagniezdżonych if/else, kazdy nowy warunek ryzykowalby zlamanie czegoś innego.
+
+3. **Conflict resolution jest rownie wazne jak logika biznesowa.** Sniper bez conflict resolution moglby wchodzic w pozycje gdy SM mowi "HOLD SHORT" albo gdy bot jest w panice — katastrofa. Hierarchia priorytetow (panic > SM > sniper) to kregoslup bezpieczenstwa.
+
+4. **Flat-only entry eliminuje 90% edge cases.** Jesli sniper wchodzilby gdy bot juz ma pozycje, musielibysmy radzic sobie z: pozycja w tym samym kierunku (doloz?), pozycja w przeciwnym (hedge?), interakcja z innymi guardami... Wymog `|actualSkew| < 0.10` sprawia ze te problemy nie istnieja.

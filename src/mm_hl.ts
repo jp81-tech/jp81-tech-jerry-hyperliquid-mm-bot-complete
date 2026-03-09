@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig, getSniperModeConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -87,6 +87,7 @@ import {
 import { GridManager, GridOrder, GridLayer } from './utils/grid_manager.js'
 import { KpepeToxicityEngine, getKpepeTimeZoneProfile } from './mm/kpepe_toxicity.js'
 import { MoonStreamGuard } from './signals/moon_stream_guard.js'
+import { SniperMode } from './signals/sniper_mode.js'
 import { killSwitchActive } from './utils/kill_switch.js'
 import { fetchAllFillsByTime } from './utils/paginated_fills.js'
 import { createLegacyUnwinderFromEnv, LegacyUnwinder } from './utils/legacy_unwinder.js'
@@ -376,6 +377,9 @@ const kpepeToxicity = new KpepeToxicityEngine()
 // Moon Stream Guard — liquidation & order flow imbalance sniper (Moon Dev API)
 const moonGuard = new MoonStreamGuard()
 moonGuard.start()
+
+// Sniper Mode — mean reversion after liquidation cascade exhaustion
+const sniperMode = new SniperMode(['kPEPE', 'VIRTUAL'])
 
 // kPEPE per-layer refresh rate tracking
 const kpepeLayerRefresh = { lastL1: 0, lastL23: 0, lastL4: 0 }
@@ -8111,6 +8115,7 @@ class HyperliquidMMBot {
     // 🐸 kPEPE: Custom 4-layer grid + Toxicity Engine + enhanced time-of-day
     let gridOrders: GridOrder[]
     let inventorySlPanic = false  // Hoisted: used by HARD BREAKEVEN GUARD after grid generation
+    let sniperExitUrgent = false  // Hoisted: sniper mode urgent exit bypasses BREAKEVEN_GUARD
     if (pair === 'kPEPE') {
       // ── Gather signals for toxicity engine ──
       const vpinInfo = liveTrading?.vpinAnalyzers?.get(pair)?.getToxicityLevel()
@@ -8162,6 +8167,10 @@ class HyperliquidMMBot {
           }
         }
 
+        // Save pre-gravity multipliers for sniper override
+        const preGravityBid = sizeMultipliers.bid
+        const preGravityAsk = sizeMultipliers.ask
+
         // === LIQ GRAVITY GUARD: liquidation cluster proximity protection ===
         {
           const clusters = moonOut.kpepeLiqClusters
@@ -8202,6 +8211,34 @@ class HyperliquidMMBot {
                 if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — ride the cascade, bid×0.50 spread×1.30`)
               }
             }
+          }
+        }
+
+        // === SNIPER MODE: mean-reversion after liquidation cascade ===
+        // Conflict resolution: skip sniper when SignalEngine has directional mode, HARD_BLOCK, or inventorySlPanic
+        const sniperSeResult = getSignalEngineForPair(pair)
+        const sniperSkip = inventorySlPanic
+          || (sniperSeResult?.signalEngineOverride && (sniperSeResult.mode === MmMode.FOLLOW_SM_SHORT || sniperSeResult.mode === MmMode.FOLLOW_SM_LONG))
+          || (!permissions.allowLongs && !permissions.allowShorts)
+        const sniperOut = sniperSkip
+          ? { active: false, phase: 'WATCHING' as const, bidMultOverride: 1, askMultOverride: 1, sizeCapPct: 1, overrideLiqGravity: false, exitUrgent: false, reason: 'skipped: conflict' }
+          : sniperMode.tick(pair, {
+              midPrice,
+              actualSkew,
+              clusters: moonOut.kpepeLiqClusters,
+              recentVolumes15m: this.marketVision?.getPairAnalysis(pair)?.recentVolumes15m || [],
+              priceHistory: this.pumpShieldHistory.get(pair) || [],
+            })
+        if (sniperOut.active) {
+          if (sniperOut.overrideLiqGravity) {
+            sizeMultipliers.bid = preGravityBid
+            sizeMultipliers.ask = preGravityAsk
+          }
+          sizeMultipliers.bid *= sniperOut.bidMultOverride
+          sizeMultipliers.ask *= sniperOut.askMultOverride
+          if (sniperOut.exitUrgent) sniperExitUrgent = true
+          if (this.tickCount % 3 === 0) {
+            console.log(`\uD83C\uDFAF [SNIPER] ${pair}: ${sniperOut.phase} | ${sniperOut.reason}`)
           }
         }
 
@@ -9439,6 +9476,10 @@ class HyperliquidMMBot {
         }
       }
 
+      // Save pre-gravity multipliers for sniper override (VIRTUAL)
+      const preGravityBidV = sizeMultipliers.bid
+      const preGravityAskV = sizeMultipliers.ask
+
       // === LIQ GRAVITY GUARD: liquidation cluster proximity protection ===
       if (pair === 'VIRTUAL') {
         const clusters = moonOutOther.virtualLiqClusters
@@ -9476,6 +9517,36 @@ class HyperliquidMMBot {
               gridBidMult *= 1.30
               if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — ride the cascade, bid×0.50 spread×1.30`)
             }
+          }
+        }
+      }
+
+      // === SNIPER MODE: mean-reversion after liquidation cascade (VIRTUAL) ===
+      if (pair === 'VIRTUAL') {
+        // Conflict resolution: skip sniper when SignalEngine has directional mode, HARD_BLOCK, or inventorySlPanic
+        const sniperSeResultV = getSignalEngineForPair(pair)
+        const sniperSkipV = inventorySlPanic
+          || (sniperSeResultV?.signalEngineOverride && (sniperSeResultV.mode === MmMode.FOLLOW_SM_SHORT || sniperSeResultV.mode === MmMode.FOLLOW_SM_LONG))
+          || (!permissions.allowLongs && !permissions.allowShorts)
+        const sniperOutV = sniperSkipV
+          ? { active: false, phase: 'WATCHING' as const, bidMultOverride: 1, askMultOverride: 1, sizeCapPct: 1, overrideLiqGravity: false, exitUrgent: false, reason: 'skipped: conflict' }
+          : sniperMode.tick(pair, {
+              midPrice,
+              actualSkew,
+              clusters: moonOutOther.virtualLiqClusters,
+              recentVolumes15m: mvAnalysisMg?.recentVolumes15m || [],
+              priceHistory: this.pumpShieldHistory.get(pair) || [],
+            })
+        if (sniperOutV.active) {
+          if (sniperOutV.overrideLiqGravity) {
+            sizeMultipliers.bid = preGravityBidV
+            sizeMultipliers.ask = preGravityAskV
+          }
+          sizeMultipliers.bid *= sniperOutV.bidMultOverride
+          sizeMultipliers.ask *= sniperOutV.askMultOverride
+          if (sniperOutV.exitUrgent) sniperExitUrgent = true
+          if (this.tickCount % 3 === 0) {
+            console.log(`\uD83C\uDFAF [SNIPER] ${pair}: ${sniperOutV.phase} | ${sniperOutV.reason}`)
           }
         }
       }
@@ -10230,7 +10301,7 @@ class HyperliquidMMBot {
     // 0.1% buffer covers round-trip fees (~4bps maker × 2 = 8bps, +2bps safety margin)
     // BYPASSED ONLY by INVENTORY_SL panic (extreme drawdown + high skew = emergency exit)
     const BREAKEVEN_FEE_BUFFER = 0.001  // 0.1% = 10bps
-    if (position && Math.abs(position.size) > 0 && position.entryPrice && Array.isArray(gridOrders) && !inventorySlPanic) {
+    if (position && Math.abs(position.size) > 0 && position.entryPrice && Array.isArray(gridOrders) && !inventorySlPanic && !sniperExitUrgent) {
       const entryPx = position.entryPrice
       if (position.size < 0) {
         // SHORT: filter bids priced above entry-buffer (would close at a loss)

@@ -28,7 +28,8 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
-- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard)
+- `src/signals/sniper_mode.ts` - SniperMode (mean-reversion after liquidation cascade exhaustion)
+- `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard, SniperMode)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
 - `src/utils/paginated_fills.ts` - paginated fill fetcher (obchodzi 2000-fill API limit)
 - `src/utils/discord_notifier.ts` - Discord webhook notifier (S/R alerts, embeds)
@@ -48,6 +49,70 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 ---
 
 ## Zmiany 9 marca 2026
+
+### 119. Sniper Mode — Mean Reversion After Liquidation Cascades (09.03)
+
+**Problem:** Liq Gravity Guard (#118) defensywnie chroni pozycje przed klastrami likwidacyjnymi, ale nie eksploatuje okazji mean-reversion. Po kaskadzie likwidacji (np. short squeeze) cena "snapuje" z powrotem — nie ma już wymuszonych kupujących/sprzedających. Brak mechanizmu wejścia counter-trend w momencie wyczerpania.
+
+**Przykład:** VIRTUAL ma $1.67M SHORT cluster 7% powyżej ceny. Cena pompuje w klaster → shorty squeezowane → forced buys → cena sztucznie wysoka → po likwidacji ostatniego shorta → brak więcej forced buyers → cena spada. Sniper wchodzi SHORT na szczycie.
+
+**Rozwiązanie:** 6-fazowa maszyna stanów + integracja w pipeline kPEPE i VIRTUAL.
+
+**Nowy plik `src/signals/sniper_mode.ts` (~515 linii):**
+- Klasa `SniperMode` z 6 fazami: `WATCHING → CASCADE_DETECTED → SNIPER_ARMED → ENTRY_ACTIVE → POSITION_HELD → COOLDOWN`
+- Detekcja kaskady: cluster proximity + price move + volume spike (3x avg)
+- Exhaustion = reversal cenowy od peaku (0.3-0.5% w zależności od tokena)
+- Flat-only entry: `|actualSkew| < 0.10` — nie otwiera gdy ma pozycję
+- Trailing stop + hard stop + max hold duration (15 min)
+- Cooldown 30 min między trade'ami
+
+**Fazy przejść:**
+
+| Przejście | Warunek |
+|-----------|---------|
+| WATCHING → CASCADE_DETECTED | Cluster >$200K (kPEPE) w zasięgu <3% + price move >3% w kierunku + volume spike 3x |
+| CASCADE_DETECTED → SNIPER_ARMED | Cena wchodzi w strefę klastra (`\|dist\| < 0.5%`), timeout 5 min |
+| SNIPER_ARMED → ENTRY_ACTIVE | Cena odwraca ≥ reversalThresholdPct od peaku + bot jest flat |
+| ENTRY_ACTIVE → POSITION_HELD | Fill detected (`\|skew\| > 0.05`), timeout 3 min |
+| POSITION_HELD → COOLDOWN | Trailing stop / hard stop / max hold / external close |
+| COOLDOWN → WATCHING | `cooldownMinutes` elapsed |
+
+**Config (`src/config/short_only_config.ts`):**
+
+| Parametr | Default | kPEPE | VIRTUAL |
+|----------|---------|-------|---------|
+| enabled | false | **true** | **true** |
+| clusterMinValueUsd | $500K | **$200K** | **$300K** |
+| cascadeMinMovePct | 2.0% | **3.0%** | **2.5%** |
+| reversalThresholdPct | 0.3% | **0.5%** | **0.4%** |
+| hardStopPct | 2.0% | **3.0%** | 2.0% |
+| maxHoldMinutes | 15 | 15 | 15 |
+| cooldownMinutes | 30 | 30 | 30 |
+
+**Integracja w `src/mm_hl.ts`:**
+- Pipeline: po LIQ_GRAVITY, przed ORDER_FLOW_FILTER
+- Pre-gravity save/restore: sniper może undo Gravity Guard multipliers
+- `sniperExitUrgent` hoisted variable: bypassa HARD BREAKEVEN GUARD (jak `inventorySlPanic`)
+- **Conflict resolution (Step 4e):** Sniper NIE aktywuje się gdy:
+  - `inventorySlPanic` aktywny (emergency exit ma priorytet)
+  - SignalEngine w trybie `FOLLOW_SM_SHORT/LONG` (SM directional ma priorytet)
+  - `!permissions.allowLongs && !permissions.allowShorts` (HARD_BLOCK obu stron)
+
+**`recentVolumes15m` dodane do `market_vision.ts`:**
+- Nowe pole w `PairAnalysis`: `recentVolumes15m: number[]`
+- Ostatnie 9 candles 15m (volume spike detection)
+
+**Profil ryzyka:**
+```
+Max loss per trade: -2% (kPEPE: -3%) of 50% grid size = ~1% normalnego kapitału
+Duration: max 15 minut
+Frequency: max 1 na 30 min = max 2/h
+Worst case hourly loss: ~2% grid capital
+```
+
+**Logi:** `🎯 [SNIPER] kPEPE: WATCHING | reason...` (co 3 ticki)
+
+**Pliki:** `src/signals/sniper_mode.ts` (NEW, 515 LOC), `src/config/short_only_config.ts` (+52), `src/signals/market_vision.ts` (+8), `src/mm_hl.ts` (+75, -2)
 
 ### 118. Liquidation Gravity Guard + Order Flow Upgrade (09.03)
 

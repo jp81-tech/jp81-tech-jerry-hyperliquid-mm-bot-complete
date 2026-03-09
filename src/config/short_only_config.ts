@@ -509,3 +509,55 @@ export const DYNAMIC_SPREAD_OVERRIDES: Record<string, Partial<DynamicSpreadConfi
 export function getDynamicSpreadConfig(token: string): DynamicSpreadConfig {
   return { ...DYNAMIC_SPREAD_DEFAULTS, ...(DYNAMIC_SPREAD_OVERRIDES[token] || {}) }
 }
+
+// ============================================================
+// SNIPER MODE — Mean Reversion After Liquidation Cascades
+// ============================================================
+
+export interface SniperModeConfig {
+  enabled: boolean
+  clusterMinValueUsd: number       // Min cluster size to trigger ($500K default)
+  cascadeMinMovePct: number        // Min price move toward cluster in 15min (2%)
+  reversalThresholdPct: number     // Price reversal from peak to confirm exhaustion (0.3%)
+  volumeSpikeMultiplier: number    // Current vol > N x avg to detect cascade (3x)
+  maxPositionPct: number           // Cap at 50% of normal grid size
+  trailingActivatePct: number      // Activate trailing after +1% profit
+  trailingStopPct: number          // Trail by 0.5%
+  hardStopPct: number              // Max loss -2%
+  maxHoldMinutes: number           // Force exit after 15 min
+  cooldownMinutes: number          // Wait 30 min between sniper trades
+}
+
+export const SNIPER_DEFAULTS: SniperModeConfig = {
+  enabled: false,
+  clusterMinValueUsd: 500_000,
+  cascadeMinMovePct: 2.0,
+  reversalThresholdPct: 0.3,
+  volumeSpikeMultiplier: 3.0,
+  maxPositionPct: 0.50,
+  trailingActivatePct: 1.0,
+  trailingStopPct: 0.5,
+  hardStopPct: 2.0,
+  maxHoldMinutes: 15,
+  cooldownMinutes: 30,
+}
+
+export const SNIPER_OVERRIDES: Record<string, Partial<SniperModeConfig>> = {
+  'kPEPE': {
+    enabled: true,
+    clusterMinValueUsd: 200_000,
+    cascadeMinMovePct: 3.0,
+    reversalThresholdPct: 0.5,
+    hardStopPct: 3.0,
+  },
+  'VIRTUAL': {
+    enabled: true,
+    clusterMinValueUsd: 300_000,
+    cascadeMinMovePct: 2.5,
+    reversalThresholdPct: 0.4,
+  },
+}
+
+export function getSniperModeConfig(token: string): SniperModeConfig {
+  return { ...SNIPER_DEFAULTS, ...(SNIPER_OVERRIDES[token] || {}) }
+}

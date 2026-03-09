@@ -306,6 +306,7 @@ export type PairAnalysis = {
   biasScore: number; // -100 to +100
   nansenPressure: number; // Net Buy/Sell Pressure in USD
   nansenScore: number; // Contribution to bias
+  recentVolumes15m: number[]; // Last 9 candle volumes for spike detection (sniper mode)
 };
 
 export class MarketVisionService {
@@ -547,6 +548,11 @@ export class MarketVisionService {
             console.warn(`⚡ ${pair}: FLASH CRASH/PUMP DETECTED! (${(rangePct * 100).toFixed(1)}% move in 15m)`);
           }
         }
+
+        // Recent 15m volumes for sniper mode cascade detection
+        const recentVolumes15m = (candles15m && candles15m.length >= 9)
+          ? candles15m.slice(-9).map(c => Number(c.v || 0))
+          : [];
 
         // AI VISION (GPT-4o Chart Analysis)
         let visualAnalysis: VisualAnalysis | undefined = this.pairAnalysis.get(pair)?.visualAnalysis;
@@ -795,7 +801,8 @@ export class MarketVisionService {
           visualAnalysis,
           nansenPressure,
           nansenScore,
-          biasScore: Math.max(-100, Math.min(100, score))
+          biasScore: Math.max(-100, Math.min(100, score)),
+          recentVolumes15m,
         };
 
         this.pairAnalysis.set(pair, analysis);
