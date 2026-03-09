@@ -6626,6 +6626,10 @@ class HyperliquidMMBot {
       return
     }
 
+    // Pass mid prices to moonGuard for liquidation cluster distance calculation
+    if (pair === 'kPEPE') moonGuard.updateMidPrices(midPrice, 0)
+    else if (pair === 'VIRTUAL') moonGuard.updateMidPrices(0, midPrice)
+
     // 🛡️ TIER 0: EXTERNAL PRICE ANCHOR (Binance Protection)
     const symbol = pair.split(/[-_]/)[0]
     const liveTrading = this.trading instanceof LiveTrading ? this.trading : null;
@@ -8158,21 +8162,86 @@ class HyperliquidMMBot {
           }
         }
 
-        // === ORDER FLOW FILTER: throttle side facing heavy pressure ===
-        if (moonOut.lastUpdate > 0 && !moonOut.kpepeSqueezeWarning) {
-          const imb = moonOut.kpepeImbalanceRatio
-          if (imb < -0.75) {
-            // Heavy sell pressure — don't catch falling knife
-            sizeMultipliers.bid *= 0.50
-            gridBidMult *= 1.20  // widen bid spread 20%
-            if (this.tickCount % 10 === 0) {
-              console.log(`[ORDER_FLOW] kPEPE Imbalance: ${imb.toFixed(2)}. Throttling Bids (bid×0.50 spread×1.20) for safety.`)
+        // === LIQ GRAVITY GUARD: liquidation cluster proximity protection ===
+        {
+          const clusters = moonOut.kpepeLiqClusters
+          const hasShortPos = actualSkew < -0.05
+          const hasLongPos = actualSkew > 0.05
+          if (clusters.length > 0) {
+            // Find nearest SHORT cluster above price (squeeze risk for shorts)
+            const nearestShortAbove = clusters.find(c => c.side === 'short' && c.distancePct > 0)
+            if (nearestShortAbove) {
+              const dist = nearestShortAbove.distancePct
+              if (hasShortPos && dist < 5) {
+                sizeMultipliers.ask *= 0.20
+                sizeMultipliers.bid *= 1.50
+                if (this.tickCount % 5 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — squeeze imminent! ask×0.20 bid×1.50`)
+              } else if (hasShortPos && dist < 10) {
+                sizeMultipliers.ask *= 0.50
+                if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — reduce shorts, ask×0.50`)
+              } else if (hasLongPos && dist < 10) {
+                sizeMultipliers.ask *= 0.50
+                gridAskMult *= 1.30
+                if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — ride the squeeze, ask×0.50 spread×1.30`)
+              }
             }
-          } else if (imb > 0.75) {
-            // Heavy buy pressure — let price run up before selling
-            sizeMultipliers.ask *= 0.50
-            if (this.tickCount % 10 === 0) {
-              console.log(`[ORDER_FLOW] kPEPE Imbalance: +${imb.toFixed(2)}. Throttling Asks (ask×0.50) — let it run.`)
+            // Find nearest LONG cluster below price (dump cascade risk for longs)
+            const nearestLongBelow = clusters.find(c => c.side === 'long' && c.distancePct < 0)
+            if (nearestLongBelow) {
+              const dist = Math.abs(nearestLongBelow.distancePct)
+              if (hasLongPos && dist < 5) {
+                sizeMultipliers.bid *= 0.20
+                sizeMultipliers.ask *= 1.50
+                if (this.tickCount % 5 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — cascade imminent! bid×0.20 ask×1.50`)
+              } else if (hasLongPos && dist < 10) {
+                sizeMultipliers.bid *= 0.50
+                if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — reduce longs, bid×0.50`)
+              } else if (hasShortPos && dist < 10) {
+                sizeMultipliers.bid *= 0.50
+                gridBidMult *= 1.30
+                if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] kPEPE: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — ride the cascade, bid×0.50 spread×1.30`)
+              }
+            }
+          }
+        }
+
+        // === ORDER FLOW FILTER: graduated thresholds + divergence detection ===
+        if (moonOut.lastUpdate > 0 && !moonOut.kpepeSqueezeWarning) {
+          const imb1h = moonOut.kpepeImbalance1h
+          const imb4h = moonOut.kpepeImbalance4h
+          const absImb = Math.abs(imb1h)
+          // Divergence detection: 1h bearish + 4h bullish = shakeout
+          const isDivergence = (imb1h < -0.30 && imb4h > 0.20) || (imb1h > 0.30 && imb4h < -0.20)
+          const divFactor = isDivergence ? 0.50 : 1.0  // halve throttle effect on shakeout
+
+          if (imb1h < 0) {
+            // Sell pressure — graduated throttle on bids
+            let bidThrottle = 1.0
+            let spreadWiden = 1.0
+            if (absImb > 0.90) { bidThrottle = 0.20; spreadWiden = 1.20 }
+            else if (absImb > 0.75) { bidThrottle = 0.40; spreadWiden = 1.20 }
+            else if (absImb > 0.50) { bidThrottle = 0.70 }
+            // Apply divergence dampening
+            if (isDivergence && bidThrottle < 1.0) bidThrottle = 1.0 - (1.0 - bidThrottle) * divFactor
+            if (bidThrottle < 1.0) {
+              sizeMultipliers.bid *= bidThrottle
+              gridBidMult *= spreadWiden
+            }
+            if (this.tickCount % 10 === 0 && absImb > 0.50) {
+              console.log(`[ORDER_FLOW] kPEPE: 1h=${imb1h.toFixed(2)} 4h=${imb4h.toFixed(2)} → bid×${bidThrottle.toFixed(2)} spread×${spreadWiden.toFixed(2)}${isDivergence ? ' DIVERGENCE(shakeout)' : ''}`)
+            }
+          } else if (imb1h > 0) {
+            // Buy pressure — graduated throttle on asks
+            let askThrottle = 1.0
+            if (absImb > 0.90) askThrottle = 0.20
+            else if (absImb > 0.75) askThrottle = 0.40
+            else if (absImb > 0.50) askThrottle = 0.70
+            if (isDivergence && askThrottle < 1.0) askThrottle = 1.0 - (1.0 - askThrottle) * divFactor
+            if (askThrottle < 1.0) {
+              sizeMultipliers.ask *= askThrottle
+            }
+            if (this.tickCount % 10 === 0 && absImb > 0.50) {
+              console.log(`[ORDER_FLOW] kPEPE: 1h=+${imb1h.toFixed(2)} 4h=${imb4h.toFixed(2)} → ask×${askThrottle.toFixed(2)}${isDivergence ? ' DIVERGENCE(shakeout)' : ''}`)
             }
           }
         }
@@ -9370,19 +9439,80 @@ class HyperliquidMMBot {
         }
       }
 
-      // === ORDER FLOW FILTER ===
-      if (pair === 'VIRTUAL' && moonOutOther.lastUpdate > 0 && !moonOutOther.virtualSqueezeWarning) {
-        const imb = moonOutOther.virtualImbalanceRatio
-        if (imb < -0.75) {
-          sizeMultipliers.bid *= 0.50
-          gridBidMult *= 1.20
-          if (this.tickCount % 10 === 0) {
-            console.log(`[ORDER_FLOW] VIRTUAL Imbalance: ${imb.toFixed(2)}. Throttling Bids (bid×0.50 spread×1.20) for safety.`)
+      // === LIQ GRAVITY GUARD: liquidation cluster proximity protection ===
+      if (pair === 'VIRTUAL') {
+        const clusters = moonOutOther.virtualLiqClusters
+        const hasShortPos = actualSkew < -0.05
+        const hasLongPos = actualSkew > 0.05
+        if (clusters.length > 0) {
+          const nearestShortAbove = clusters.find(c => c.side === 'short' && c.distancePct > 0)
+          if (nearestShortAbove) {
+            const dist = nearestShortAbove.distancePct
+            if (hasShortPos && dist < 5) {
+              sizeMultipliers.ask *= 0.20
+              sizeMultipliers.bid *= 1.50
+              if (this.tickCount % 5 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — squeeze imminent! ask×0.20 bid×1.50`)
+            } else if (hasShortPos && dist < 10) {
+              sizeMultipliers.ask *= 0.50
+              if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — reduce shorts, ask×0.50`)
+            } else if (hasLongPos && dist < 10) {
+              sizeMultipliers.ask *= 0.50
+              gridAskMult *= 1.30
+              if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: SHORT cluster $${(nearestShortAbove.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% above — ride the squeeze, ask×0.50 spread×1.30`)
+            }
           }
-        } else if (imb > 0.75) {
-          sizeMultipliers.ask *= 0.50
-          if (this.tickCount % 10 === 0) {
-            console.log(`[ORDER_FLOW] VIRTUAL Imbalance: +${imb.toFixed(2)}. Throttling Asks (ask×0.50) — let it run.`)
+          const nearestLongBelow = clusters.find(c => c.side === 'long' && c.distancePct < 0)
+          if (nearestLongBelow) {
+            const dist = Math.abs(nearestLongBelow.distancePct)
+            if (hasLongPos && dist < 5) {
+              sizeMultipliers.bid *= 0.20
+              sizeMultipliers.ask *= 1.50
+              if (this.tickCount % 5 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — cascade imminent! bid×0.20 ask×1.50`)
+            } else if (hasLongPos && dist < 10) {
+              sizeMultipliers.bid *= 0.50
+              if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — reduce longs, bid×0.50`)
+            } else if (hasShortPos && dist < 10) {
+              sizeMultipliers.bid *= 0.50
+              gridBidMult *= 1.30
+              if (this.tickCount % 10 === 0) console.log(`🧲 [LIQ_GRAVITY] VIRTUAL: LONG cluster $${(nearestLongBelow.totalValueUsd/1000).toFixed(0)}K at ${dist.toFixed(1)}% below — ride the cascade, bid×0.50 spread×1.30`)
+            }
+          }
+        }
+      }
+
+      // === ORDER FLOW FILTER: graduated thresholds + divergence detection ===
+      if (pair === 'VIRTUAL' && moonOutOther.lastUpdate > 0 && !moonOutOther.virtualSqueezeWarning) {
+        const imb1h = moonOutOther.virtualImbalance1h
+        const imb4h = moonOutOther.virtualImbalance4h
+        const absImb = Math.abs(imb1h)
+        const isDivergence = (imb1h < -0.30 && imb4h > 0.20) || (imb1h > 0.30 && imb4h < -0.20)
+        const divFactor = isDivergence ? 0.50 : 1.0
+
+        if (imb1h < 0) {
+          let bidThrottle = 1.0
+          let spreadWiden = 1.0
+          if (absImb > 0.90) { bidThrottle = 0.20; spreadWiden = 1.20 }
+          else if (absImb > 0.75) { bidThrottle = 0.40; spreadWiden = 1.20 }
+          else if (absImb > 0.50) { bidThrottle = 0.70 }
+          if (isDivergence && bidThrottle < 1.0) bidThrottle = 1.0 - (1.0 - bidThrottle) * divFactor
+          if (bidThrottle < 1.0) {
+            sizeMultipliers.bid *= bidThrottle
+            gridBidMult *= spreadWiden
+          }
+          if (this.tickCount % 10 === 0 && absImb > 0.50) {
+            console.log(`[ORDER_FLOW] VIRTUAL: 1h=${imb1h.toFixed(2)} 4h=${imb4h.toFixed(2)} → bid×${bidThrottle.toFixed(2)} spread×${spreadWiden.toFixed(2)}${isDivergence ? ' DIVERGENCE(shakeout)' : ''}`)
+          }
+        } else if (imb1h > 0) {
+          let askThrottle = 1.0
+          if (absImb > 0.90) askThrottle = 0.20
+          else if (absImb > 0.75) askThrottle = 0.40
+          else if (absImb > 0.50) askThrottle = 0.70
+          if (isDivergence && askThrottle < 1.0) askThrottle = 1.0 - (1.0 - askThrottle) * divFactor
+          if (askThrottle < 1.0) {
+            sizeMultipliers.ask *= askThrottle
+          }
+          if (this.tickCount % 10 === 0 && absImb > 0.50) {
+            console.log(`[ORDER_FLOW] VIRTUAL: 1h=+${imb1h.toFixed(2)} 4h=${imb4h.toFixed(2)} → ask×${askThrottle.toFixed(2)}${isDivergence ? ' DIVERGENCE(shakeout)' : ''}`)
           }
         }
       }
