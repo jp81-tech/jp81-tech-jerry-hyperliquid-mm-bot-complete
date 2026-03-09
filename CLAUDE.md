@@ -49,6 +49,43 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 9 marca 2026
 
+### 118. Liquidation Gravity Guard + Order Flow Upgrade (09.03)
+
+**Problem:** Moon Dev API integration (`moon_stream_guard.ts`) używała starego klucza API i zepsutego endpointu `/api/orderflow.json` (zwracał puste dane). Bot nie miał świadomości klastrów likwidacyjnych — nie wiedział o $1.67M SHORT cluster 7% nad ceną VIRTUAL (squeeze risk).
+
+**Fix:** Pełny rewrite `moon_stream_guard.ts` + nowy pipeline stage `LIQ_GRAVITY` + upgrade Order Flow Filter w `mm_hl.ts`.
+
+**Nowy pipeline (kolejność):**
+```
+Vision Ratio → Moon Guard (squeeze) → LIQ GRAVITY (new) → Order Flow (upgraded) → Momentum Guard
+```
+
+**`src/signals/moon_stream_guard.ts` — rewrite:**
+- API key: `jaroslaw_qe` (was: `moonstream_fbe77ee04a00`)
+- Nowy interface `LiqCluster` (price, totalValueUsd, positionCount, distancePct, side)
+- `fetchJsonRaw<T>()` — raw JSON (stary `fetchJson` unwrapował do arrays)
+- Imbalance endpoints: `/api/imbalance/1h.json` + `/api/imbalance/4h.json` (zamiast broken `/api/orderflow.json`)
+- Position polling 90s: `/api/positions/all_crypto.json` → cluster detection
+- `updateMidPrices(kpepe, virtual)` — public method, wywoływany z mm_hl.ts
+- Cluster detection: grupowanie pozycji w promieniu 2%, filtr >$50K, distance <25%
+
+**Liq Gravity Guard (nowy stage w mm_hl.ts dla kPEPE i VIRTUAL):**
+- SHORT cluster above (squeeze risk):
+  - Bot SHORT + cluster <5%: ask×0.20, bid×1.50 (squeeze imminent)
+  - Bot SHORT + cluster <10%: ask×0.50 (reduce shorts)
+  - Bot LONG + cluster <10%: ask×0.50, gridAskMult×1.30 (ride the squeeze)
+- LONG cluster below (dump cascade):
+  - Bot LONG + cluster <5%: bid×0.20, ask×1.50 (cascade imminent)
+  - Bot LONG + cluster <10%: bid×0.50 (reduce longs)
+  - Bot SHORT + cluster <10%: bid×0.50, gridBidMult×1.30 (ride the cascade)
+
+**Order Flow Filter upgrade (graduated thresholds + divergence):**
+- Stary: binary threshold -0.75
+- Nowy: `|ratio| > 0.50` → ×0.70, `|ratio| > 0.75` → ×0.40 + spread×1.20, `|ratio| > 0.90` → ×0.20
+- 1h/4h divergence: jeśli 1h bearish + 4h bullish → "shakeout" → throttle halved
+
+**Config:** VIRTUAL leverage 3→5, capital 5000→8000 w `ecosystem.config.cjs`
+
 ### 117. VIRTUAL S/R Pipeline — Full S/R Awareness (09.03)
 
 **Problem:** VIRTUAL bot miał tylko SMA Crossover + Moon Guard + Order Flow Filter — ZERO S/R awareness. Trzymał SHORT na daily support z -59.5% skew, nie wiedząc że jest na wsparciu (najgorsza pozycja dla shorta).
