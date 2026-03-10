@@ -100,7 +100,7 @@ export async function sendDiscordMessage(content: string): Promise<void> {
   )
 }
 
-/** Send embed to all configured webhooks (no throttle) */
+/** Send embed to alert channel only (webhook 2) */
 export async function sendDiscordEmbed(embed: {
   title?: string
   description?: string
@@ -109,13 +109,13 @@ export async function sendDiscordEmbed(embed: {
   footer?: { text: string }
   timestamp?: string
 }): Promise<void> {
-  if (discordWebhooks.length === 0) {
-    console.warn(`[discord_notifier] No DISCORD_WEBHOOK_URL configured`)
+  if (!alertWebhook) {
+    console.warn(`[discord_notifier] No DISCORD_WEBHOOK_URL_2 configured for embeds`)
     return
   }
-  await Promise.allSettled(
-    discordWebhooks.map(url => postJson(url, { embeds: [embed] }).catch(e =>
-      console.error(`[discord_notifier] Failed to send embed to ${url.slice(-20)}:`, e)
-    ))
-  )
+  try {
+    await postJson(alertWebhook, { embeds: [embed] })
+  } catch (e) {
+    console.error(`[discord_notifier] Failed to send embed:`, e)
+  }
 }

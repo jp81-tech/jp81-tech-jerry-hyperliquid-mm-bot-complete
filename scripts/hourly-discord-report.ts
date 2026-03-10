@@ -8,9 +8,9 @@ config();
 const TOKENS = ['kPEPE'];
 
 async function main() {
-  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL_2 || process.env.DISCORD_WEBHOOK_URL;
   if (!webhookUrl) {
-    console.error('DISCORD_WEBHOOK_URL not set');
+    console.error('DISCORD_WEBHOOK_URL_2 / DISCORD_WEBHOOK_URL not set');
     process.exit(1);
   }
 
