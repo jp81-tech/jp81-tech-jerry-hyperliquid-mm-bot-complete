@@ -10273,21 +10273,50 @@ Bearish consensus: majority discovered whales SHORT kPEPE
 
 24 nowe adresy znalezione w pierwszym runie! Nie wszystkie beda warte dodania do trackera (niektore to market makerzy, jednodniowe pozycje, albo dust amounts), ale **discovery pipeline dziala.**
 
-### Deployment
+### Deployment — Nauka z Produkcji
 
 **Lokalnie (test):**
 ```bash
 npx tsx scripts/whale_discovery.ts --dry-run
 ```
 
-**Na serwerze (produkcja):**
-```bash
-# 1. Zainstaluj nansen-cli
-ssh hl-mm 'npm i -g nansen-cli && nansen login'
+**Na serwerze — 4 przeszkody ktore musielismy pokonac:**
 
-# 2. Dodaj cron
-0 10 * * 0 cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/whale_discovery.ts >> runtime/whale_discovery.log 2>&1
+**1. Git divergent branches:** Serwer mial lokalny commit (`chore(security): backup sshd_config`) ktorego nie bylo na remote. `git pull --ff-only` failowal. Fix: `git stash && git rebase origin/feat/next && git stash pop`. Dodatkowo 4 untracked files blokowaly rebase (plik trackowany w nowych commitach ale istniejacy jako untracked na serwerze) — backup do `/tmp/` i usuniecie.
+
+**2. npm global install permission denied:** `npm i -g nansen-cli` wymagal sudo (zapis do `/usr/lib/node_modules/`). Fix: **user-local npm prefix**:
+```bash
+mkdir -p ~/.npm-global
+npm config set prefix ~/.npm-global
+npm i -g nansen-cli
+echo 'export PATH=$HOME/.npm-global/bin:$PATH' >> ~/.bashrc
 ```
+Pattern wart zapamietania: **nigdy nie uzywaj `sudo npm i -g`** — to antypattern ktory moze zepsuc uprawnienia calego `/usr/lib/`. User-local prefix jest bezpieczny i nie wymaga roota.
+
+**3. Nansen CLI nie zalogowany:** Skrypt wywolywal `nansen research ...` ale serwer nie mial skonfigurowanego API key. Fix: `nansen login --api-key dE5Hv...` (klucz z lokalnego `~/.nansen/config.json`).
+
+**4. Hardcoded macOS path:** Skrypt mial `/opt/homebrew/bin/nansen` (Homebrew na macOS). Na serwerze Linux binarka byla w `~/.npm-global/bin/nansen`. Fix: **dynamiczny path resolution**:
+```typescript
+const NANSEN_CLI = (() => {
+  const candidates = [
+    process.env.NANSEN_CLI_PATH,
+    '/opt/homebrew/bin/nansen',              // macOS (homebrew)
+    `${process.env.HOME}/.npm-global/bin/nansen`,  // Linux (npm prefix)
+    '/usr/local/bin/nansen',
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return 'nansen';  // fallback to PATH
+})();
+```
+
+**5. Cron nie laduje `.bashrc`:** Cron entry potrzebuje inline `PATH=`:
+```bash
+0 10 * * 0 cd ~/hyperliquid-mm-bot-complete && PATH=$HOME/.npm-global/bin:$PATH npx tsx scripts/whale_discovery.ts >> runtime/whale_discovery.log 2>&1
+```
+
+**Lekcja metapoziomowa:** Deploy to NIGDY nie jest "po prostu skopiuj plik na serwer". Kazdy serwer ma swoj stan — inne sciezki, inne uprawnienia, inny stan git, inne zmienne srodowiskowe. **Skrypt ktory dziala lokalnie i nie dziala na serwerze** to norma, nie wyjatek. Dobry inzynier pisze kod ktory adaptuje sie do srodowiska (dynamic paths, env var fallbacks, graceful errors) zamiast zakladac konkretna konfiguracje.
 
 Weekly, Sunday 10:00 UTC — pasuje do istniejacego cyklu raportow (hourly, daily whale, 3x whale changes).
 

@@ -99,7 +99,13 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 **Cron:** `0 10 * * 0` (weekly Sunday 10:00 UTC)
 **State file:** `/tmp/whale_discovery_seen.json` (30-day TTL, pruned on each run)
-**Server deployment:** Requires `nansen-cli` installed on server (`npm i -g nansen-cli && nansen login`)
+**Server deployment (DONE 10.03):**
+- `nansen-cli` installed at `~/.npm-global/bin/nansen` (user-local npm prefix, no sudo)
+- Authenticated: `nansen login --api-key dE5...` → `~/.nansen/config.json`
+- PATH: `~/.npm-global/bin` added to `~/.bashrc` + inline in cron entry
+- Dynamic path resolution: checks `/opt/homebrew/bin/nansen` (macOS), `~/.npm-global/bin/nansen` (Linux), `/usr/local/bin/nansen`, PATH fallback
+- Dry-run verified on server: 21 new whales discovered from 38 candidates
+- Cron entry added with `PATH=$HOME/.npm-global/bin:$PATH` prefix (cron doesn't load .bashrc)
 
 **Pliki:** `scripts/whale_discovery.ts` (NEW, 534 LOC)
 
