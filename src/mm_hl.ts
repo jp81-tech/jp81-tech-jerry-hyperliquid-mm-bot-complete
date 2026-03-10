@@ -108,7 +108,7 @@ import {
 } from './utils/quant.js'
 import { RateLimitReserver } from './utils/rate_limit_reserve.js'
 import { sendRiskAlert, sendSystemAlert } from './utils/slack_router.js'
-import { sendDiscordEmbed } from './utils/discord_notifier.js'
+import { sendDiscordEmbed, sendDiscordAlert } from './utils/discord_notifier.js'
 import { applySpecOverrides } from './utils/spec_overrides.js'
 import { VolatilityRotation } from './utils/volatility_rotation.js'
 import { HyperliquidWebSocket, L2BookUpdate } from './utils/websocket_client.js'
@@ -8273,6 +8273,11 @@ class HyperliquidMMBot {
           if (this.tickCount % 3 === 0) {
             console.log(`\uD83C\uDFAF [SNIPER] ${pair}: ${sniperOut.phase} | ${sniperOut.reason}`)
           }
+          // Discord alert for actionable phases
+          const sniperAlertPhases = ['CASCADE_DETECTED', 'SNIPER_ARMED', 'ENTRY_ACTIVE', 'POSITION_HELD']
+          if (sniperAlertPhases.includes(sniperOut.phase)) {
+            sendDiscordAlert(`🎯 [SNIPER] ${pair}: ${sniperOut.phase} | mid=$${midPrice.toPrecision(6)} skew=${(actualSkew*100).toFixed(1)}% | ${sniperOut.reason}`).catch(() => {})
+          }
         }
 
         // === ORDER FLOW FILTER: graduated thresholds + divergence detection ===
@@ -9611,6 +9616,11 @@ class HyperliquidMMBot {
           if (sniperOutV.exitUrgent) sniperExitUrgent = true
           if (this.tickCount % 3 === 0) {
             console.log(`\uD83C\uDFAF [SNIPER] ${pair}: ${sniperOutV.phase} | ${sniperOutV.reason}`)
+          }
+          // Discord alert for actionable phases
+          const sniperAlertPhasesV = ['CASCADE_DETECTED', 'SNIPER_ARMED', 'ENTRY_ACTIVE', 'POSITION_HELD']
+          if (sniperAlertPhasesV.includes(sniperOutV.phase)) {
+            sendDiscordAlert(`🎯 [SNIPER] ${pair}: ${sniperOutV.phase} | mid=$${midPrice.toPrecision(6)} skew=${(actualSkew*100).toFixed(1)}% | ${sniperOutV.reason}`).catch(() => {})
           }
         }
       }
