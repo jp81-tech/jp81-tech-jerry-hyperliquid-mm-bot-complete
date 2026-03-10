@@ -28,6 +28,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `src/telemetry/TelemetryServer.ts` - serwer telemetrii (port 8082)
 - `src/alerts/AlertManager.ts` - zarządzanie alertami
 - `src/mm/kpepe_toxicity.ts` - KpepeToxicityEngine (detekcja toksycznego flow + hedge triggers)
+- `src/signals/moon_stream_guard.ts` - Moon Guard (liquidation clusters, order flow imbalance, HLP vault position tracking)
 - `src/signals/sniper_mode.ts` - SniperMode (mean-reversion after liquidation cascade exhaustion)
 - `src/config/short_only_config.ts` - filtry grid pipeline (BounceFilter, DipFilter, FundingFilter, FibGuard, PumpShield, MomentumGuard, SniperMode)
 - `src/execution/TwapExecutor.ts` - TWAP executor (zamykanie pozycji w slice'ach jak Generał)
@@ -45,6 +46,63 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 10 marca 2026
+
+### 121. HLP Vault Position Tracking + Discord Alerts (10.03)
+
+**Problem:** Bot nie wiedział o pozycjach HLP (Hyperliquid Liquidity Pool, $121.5M equity). HLP to de facto market maker giełdy — gdy HLP ma dużą pozycję kierunkową, jest podatne na squeeze/cascade. Ta informacja jest kluczowa dla risk management.
+
+**Rozwiązanie:** Bezpośredni polling HLP vault via Hyperliquid API (`clearinghouseState` dla `0x010461C14e146ac35Fe42271BDC1134Ee31C703a`). Moon Dev API endpointy `/hlp_aggregated_positions` zwracały 404 — pominięto, dane pobierane natywnie z HL.
+
+**Nowe w `src/signals/moon_stream_guard.ts` (~230 LOC dodanych):**
+
+| Element | Opis |
+|---------|------|
+| `pollHlp()` | Co 120s fetchuje `clearinghouseState` HLP vault, parsuje pozycje kPEPE/VIRTUAL |
+| `checkHlpAlerts()` | Discord alerty gdy pozycja > threshold: side flip, nowa pozycja, value surge >50% |
+| `fetchHlpState()` | HTTPS POST do HL API, 10s timeout |
+| `HlpPosition` interface | coin, szi, entryPx, valueUsd, unrealizedPnl, side |
+| `MoonGuardOutput` rozszerzone | +hlpPositions, hlpKpepe, hlpVirtual, hlpEquity |
+
+**Stałe:**
+```
+HLP_POLL_INTERVAL_MS = 120_000    // 120s
+HLP_ALERT_COOLDOWN_MS = 60min     // per alert type
+HLP_ALERT_MIN_VALUE_USD = $100K   // kPEPE threshold
+HLP_ALERT_MIN_VALUE_VIRTUAL = $50K
+```
+
+**Alert scenarios:**
+
+| HLP Pozycja | Ryzyko | Kiedy alert |
+|-------------|--------|-------------|
+| HLP LONG kPEPE $195K | CASCADE — dump wymusi HLP do sprzedaży | First poll, side flip, value surge >50% |
+| HLP SHORT kPEPE | SQUEEZE — pump wymusi HLP do odkupienia | First poll, side flip, value surge >50% |
+| HLP LONG VIRTUAL $56K | CASCADE risk | Analogicznie |
+| HLP SHORT VIRTUAL | SQUEEZE risk | Analogicznie |
+
+**HLP vs SM — porównanie wielkości pozycji (10.03):**
+
+| Token | HLP | SM SHORT | SM LONG | HLP vs SM |
+|-------|-----|----------|---------|-----------|
+| kPEPE | LONG $195K | $40K | $8K | **HLP 4x > całe SM** — HLP jest dominującym graczem na kPEPE! |
+| VIRTUAL | LONG $56K | $217K | $14K | HLP ~25% SM SHORT — mniejsze, ale znaczące |
+
+**Kluczowe wnioski:**
+- kPEPE: HLP LONG $195K to **większa pozycja niż wszystkie SM razem** ($48K total). HLP de facto dominuje rynek kPEPE. Cascade risk realny.
+- VIRTUAL: SM SHORT $217K dominuje, HLP LONG $56K jest kontra-pozycją (~25% SM). Mniejsze ryzyko.
+- HLP equity $121.5M z 189 pozycjami — kPEPE/VIRTUAL to ułamek portfela HLP, ale dla naszego bota te pozycje są ogromne.
+
+**Integracja w `mm_hl.ts`:** `moonGuard.getOutput()` teraz zawiera `hlpKpepe`/`hlpVirtual` — downstream pipeline może reagować na HLP exposure.
+
+**Logi:**
+- `[HLP_TRACKER] tick=2 kPEPE: LONG $195308 uPnl=$-78 | VIRTUAL: LONG $56143 uPnl=$-779 | HLP equity=$121.5M | 189 positions` (co ~30 min)
+- `[HLP_ALERT] kPEPE LONG $195K — cascade risk alert sent` (na Discord, 60min cooldown)
+
+**Pliki:** `src/signals/moon_stream_guard.ts` (+228), `src/mm_hl.ts` (+2/-4)
 
 ---
 
@@ -5114,3 +5172,4 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Anti-churn cooldown (09.03)**: 30-min cooldown po SM direction flip. `lastDirectionChange` Map na HyperliquidMMBot, `DIRECTION_CHANGE_COOLDOWN_MS = 30min`. Gdy `getSmDirection()` zwraca inny kierunek niż poprzednio → trzymaj stary kierunek dla downstream (shouldHoldForTp, Pump Shield, FibGuard, etc.) przez 30 min. Nie blokuje — tylko opóźnia. Log: `🔄 [ANTI-CHURN]`. Placement: po `getSmDirection()`, przed FOLLOW SM MODE block w mm_hl.ts.
 - **TOKEN_SM_EXPOSURE_OVERRIDES (09.03)**: Per-token progi minSmExposureUsd w SmAutoDetector.ts. kPEPE: $10K, LIT: $20K, default: $100K. Używane w `determineMode()`. Bez tego kPEPE ($34K exposure) zawsze dostawał PURE_MM → `getSmDirection()` null → `shouldHoldForTp()` false → brak ochrony pozycji.
 - **WHALE_POSITION_OVERRIDES (09.03)**: Per-token progi minPositionValue w SignalEngine.ts `checkWhaleTrackerOverride()`. kPEPE: $5K, LIT: $10K, default: $500K. + "strong ratio bypass": ratio >= 5.0 + exposure >= per-token min + token has lower threshold → override nawet bez 80% conviction. Bez tego kPEPE nigdy nie dostawał whale override → fallback PURE_MM.
+- **HLP Vault Tracking (10.03)**: HLP address `0x010461C14e146ac35Fe42271BDC1134Ee31C703a`, equity $121.5M, 189 pozycji. Polling co 120s via HL API (`clearinghouseState`). Moon Dev API endpointy HLP zwracały 404 — pominięte. kPEPE LONG $195K (4x > całe SM!), VIRTUAL LONG $56K. Discord alerts via `sendDiscordAlert()` z 60min cooldown. Output w `moonGuard.getOutput().hlpKpepe/.hlpVirtual`. HLP to dominujący gracz na kPEPE — większa pozycja niż wszystkie SM razem.

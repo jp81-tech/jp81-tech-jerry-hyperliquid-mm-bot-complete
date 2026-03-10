@@ -45,6 +45,7 @@
 37. [S/R Bounce Hold — nie sprzedawaj za wczesnie po odbiciu](#sr-bounce-hold--nie-sprzedawaj-za-wczesnie-po-odbiciu)
 38. [S/R Pipeline — Zestawienie faz w zaleznosci od progresu](#sr-pipeline--zestawienie-faz-w-zaleznosci-od-progresu)
 39. [VIRTUAL S/R Pipeline — Daj drugiemu botowi oczy](#virtual-sr-pipeline--daj-drugiemu-botowi-oczy)
+40. [HLP Vault Tracking — Sledzenie Wieloryba Gieldy](#hlp-vault-tracking--sledzenie-wieloryba-gieldy)
 
 ---
 
@@ -9964,3 +9965,111 @@ To jest wzorzec "defense in depth" — ta sama strategia co w cyberbezpieczenstw
 4. **Config-driven > hardcoded.** `TOKEN_SM_EXPOSURE_OVERRIDES` i `WHALE_POSITION_OVERRIDES` to slowniki — dodanie nowego tokena to 1 linia kodu. Gdybysmy hardcodowali `if (token === 'kPEPE') threshold = 10000`, kazdy nowy token wymagalby kolejnego if/else. Open/Closed Principle w praktyce.
 
 5. **Diagnoza > fix.** 80% czasu poszlo na ZROZUMIENIE problemu (analiza fills, sledzenie kodu, identyfikacja 3 root causes). Sam fix to 62 linie kodu w 3 plikach. Jak mowi stare powiedzenie chirurgow: "Czas na sali operacyjnej jest odwrotnie proporcjonalny do czasu na diagnostyce."
+
+---
+
+## HLP Vault Tracking — Sledzenie Wieloryba Gieldy
+
+### Kontekst — kim jest HLP?
+
+Wyobraz sobie, ze grasz w pokera. Sledzisz wieloryby — Generala, Pulkownika, Majora. Ale jest jeszcze jeden gracz przy stole, ktorego dotychczas ignorowales: **sam kasyno**.
+
+**HLP (Hyperliquid Liquidity Pool)** to oficjalny vault gieldy Hyperliquid. Ma **$121.5M equity** i **189 otwartych pozycji**. To nie jest zwykly trader — to de facto market maker calej gieldy. Kazdy kto handluje na Hyperliquid, czesto handluje PRZECIWKO HLP.
+
+Dlaczego to wazne? Bo HLP ma cechy ktore czynia go unikalnym:
+
+1. **Ogromny rozmiar** — $121.5M to wiecej niz jakakolwiek pojedyncza SM pozycja
+2. **Passive market making** — HLP nie ma "opinion" o kierunku rynku, reaguje na flow
+3. **Cascade/Squeeze risk** — gdy HLP ma duza pozycje kierunkowa i cena rusza przeciwko, HLP musi redukowac → wymusza dalszy ruch ceny → kaskada
+
+### Odkrycie ktore zmienilo perspektywe
+
+Gdy po raz pierwszy sfetchowalismy pozycje HLP, zobaczylem cos szokujacego:
+
+| Token | HLP | SM SHORT | SM LONG | HLP vs SM |
+|-------|-----|----------|---------|-----------|
+| **kPEPE** | LONG $195K | $40K | $8K | **HLP 4x > calego SM!** |
+| VIRTUAL | LONG $56K | $217K | $14K | HLP ~25% SM SHORT |
+
+kPEPE: HLP LONG $195K to **wieksza pozycja niz wszystkie SM razem** ($48K total). Na tym tokenie HLP jest dominujacym graczem — nie Smart Money!
+
+To calkowicie zmienia obraz. Sledzilismy 30+ wielorybow, analizowalismy ich conviction, LS ratio, PnL — a tymczasem "kasyno" mialo 4x wieksza pozycje niz oni wszyscy. To tak jakbys sledzil karty pokerzystow i nie zauwazyl, ze krupier tez gra.
+
+### Implementacja techniczna
+
+**Problem:** Moon Dev API endpointy (`/api/hlp_aggregated_positions`) zwracaly 404. Trzeba bylo alternatywnego zrodla.
+
+**Rozwiazanie:** Bezposredni polling HLP vault przez natywne Hyperliquid API. HLP to po prostu adres na Hyperliquid (`0x010461C14e146ac35Fe42271BDC1134Ee31C703a`) — mozna sfetchowac jego pozycje identycznie jak pozycje kazdego wieloryba:
+
+```typescript
+// To samo API co whale_tracker.py uzywa dla SM!
+const resp = await fetch('https://api.hyperliquid.xyz/info', {
+  method: 'POST',
+  body: JSON.stringify({
+    type: 'clearinghouseState',
+    user: '0x010461C14e146ac35Fe42271BDC1134Ee31C703a'
+  })
+});
+```
+
+Zaimplementowane w `src/signals/moon_stream_guard.ts` (~230 linii):
+
+| Element | Co robi |
+|---------|---------|
+| `pollHlp()` | Co 120s fetchuje pozycje HLP, parsuje kPEPE/VIRTUAL |
+| `checkHlpAlerts()` | Discord alerty gdy: side flip, nowa pozycja > threshold, value surge >50% |
+| `fetchHlpState()` | HTTPS POST do HL API, 10s timeout, error handling |
+| `HlpPosition` | Interface: coin, szi, entryPx, valueUsd, unrealizedPnl, side |
+
+### Alerty — kiedy HLP moze nam pomoc lub zaszkodzic
+
+Bot wysyla Discord alert gdy HLP pozycja na kPEPE/VIRTUAL sie zmieni w istotny sposob:
+
+| HLP pozycja | Ryzyko | Scenariusz |
+|------------|--------|------------|
+| HLP LONG kPEPE $195K | **CASCADE** | Dump wymusi HLP do sprzedazy → dalszy dump → kaskada w dol |
+| HLP SHORT kPEPE | **SQUEEZE** | Pump wymusi HLP do odkupienia → dalszy pump → squeeze w gore |
+| HLP LONG VIRTUAL | CASCADE | Analogicznie |
+| HLP SHORT VIRTUAL | SQUEEZE | Analogicznie |
+
+Alert scenarios: first poll (bot startuje — natychmiast pokaz co HLP trzyma), side flip (HLP zmienil kierunek — cos sie dzieje), value surge >50% (HLP drastycznie zwiekszyl ekspozycje).
+
+Cooldown 60 minut per alert type — zeby nie spamowac Discorda gdy HLP pozycja oscyluje.
+
+### Architektura — jak to wyglada w kodzie
+
+```
+mm_hl.ts mainLoop (co 60s)
+  |
+  v
+moonGuard.tick(midPrices)
+  |
+  +---> pollMoonDev()     -- liquidation clusters, order flow
+  +---> pollHlp()         -- [NOWE] HLP vault positions
+  |       |
+  |       +---> fetchHlpState()     -- HTTPS POST do HL API
+  |       +---> checkHlpAlerts()    -- Discord via sendDiscordAlert()
+  |       +---> update output       -- hlpKpepe, hlpVirtual, hlpEquity
+  |
+  v
+moonGuard.getOutput()
+  |
+  +---> hlpPositions[]    -- lista pozycji HLP
+  +---> hlpKpepe          -- HlpPosition | null
+  +---> hlpVirtual        -- HlpPosition | null
+  +---> hlpEquity         -- $121.5M
+```
+
+Output trafia do `mm_hl.ts` — downstream pipeline MOZE reagowac na HLP exposure (na razie informacyjnie, w przyszlosci mozna dodac logike typu "HLP ma duzy LONG blisko liquidation → zmniejsz nasze longi").
+
+### Lekcje
+
+1. **Nie ignoruj "oczywistych" graczy.** HLP to publiczny adres z publicznie dostepnymi pozycjami. Kazdy moze go sprawdzic. A mimo to spedzilismy tygodnie sledzac 30+ wielorybow zanim ktos zapytal "a co z samym vaultem gieldy?". Najwazniejsza informacja czesto jest na widoku — po prostu nikt nie patrzy.
+
+2. **Rozmiar > conviction.** SM mieli "conviction" (7.54x LS ratio na kPEPE). Ale HLP mial 4x wiecej kapitalu. W tradingu $195K > $48K, niezaleznie od tego jak madry jest trader po drugiej stronie. **Grubszy portfel wygrywa przez sile gravity** — HLP liquidation cascade moze zmyc wszystkie SM pozycje.
+
+3. **Reuse istniejacych narzedzi.** Zamiast budowac dedykowane HLP API, uzylem dokladnie tego samego `clearinghouseState` co whale_tracker.py. Zero nowych endpointow, zero nowych dependencies. HLP to "po prostu kolejny adres" — elegancko wpasowuje sie w istniejaca architekture.
+
+4. **Moon Dev API failure → direct HL API.** Probowalem najpierw Moon Dev (`/api/hlp_aggregated_positions`) — 404. Zamiast debugowac cudze API, poszerlem bezposrednio do zrodla. Hyperliquid API jest darmowe, stabilne, i nie wymaga klucza. **Zawsze preferuj primary source nad third-party wrapper.**
+
+5. **Alerting z cooldownem > raw data dump.** HLP status log pojawia sie co ~30 minut (co 15 tickow). Alerty ograniczone cooldownem 60 min. Bez tego Discord bylby zasypany "HLP kPEPE LONG $195K" co 2 minuty. **Signal-to-noise ratio jest wazniejszy niz ilosc danych.**
