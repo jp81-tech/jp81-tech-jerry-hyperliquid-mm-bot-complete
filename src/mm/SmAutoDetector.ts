@@ -405,6 +405,7 @@ const KNOWN_TRADERS: Record<string, KnownTrader> = {
 const TOKEN_SM_EXPOSURE_OVERRIDES: Record<string, number> = {
   'kPEPE': 10_000,      // Small-cap memecoin, $10K SM exposure is significant
   'LIT': 20_000,        // Small-cap
+  'VIRTUAL': 50_000,    // Mid-cap, 15x LS ratio — SM strongly SHORT
 }
 
 const THRESHOLDS = {

@@ -404,6 +404,8 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
   'VIRTUAL': {
     // Full S/R awareness — same pipeline as kPEPE but tuned for VIRTUAL's characteristics
     // VIRTUAL: mid-cap altcoin, daily range 3-8%, less volatile than kPEPE
+    slAtrMultiplier: 4.0,               // 4× ATR (~8% drawdown) — Diamond Hands when SM SHORT (15x ratio)
+    maxSkewSlThreshold: 0.65,           // 65% skew (was 40%) — VIRTUAL has -56% skew, don't panic
     pumpThresholdPct: 2.5,               // Lower than kPEPE (3.0) — VIRTUAL less volatile
     atrThresholdMult: 1.8,              // 1.8× ATR for pump/dump detection (kPEPE: 2.0)
     moderateThreshold: 0.30,            // Slightly higher than kPEPE (0.28) — less noise
