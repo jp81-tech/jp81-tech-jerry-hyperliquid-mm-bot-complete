@@ -7950,7 +7950,8 @@ class HyperliquidMMBot {
     // RISING: bounce trwa, cena wciąż rośnie → czekaj na szczyt (mała moc)
     // FADING: cena spadła od szczytu bounce → TERAZ shortuj (pełna moc)
     let bounceFilterChaseBlock = false
-    if (getSmDirection(pair) === 'SHORT' && sizeMultipliers.ask > 0) {
+    const holdForTpBounceBypass = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, 'short')
+    if (getSmDirection(pair) === 'SHORT' && sizeMultipliers.ask > 0 && !holdForTpBounceBypass) {
       const bounceConfig = getBounceFilterConfig(pair)
       if (bounceConfig.enabled) {
         const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
@@ -8637,6 +8638,20 @@ class HyperliquidMMBot {
               ` | S/R(1h): R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}` +
               (smaCrossoverApplied ? ` | SMA${momGuardConfig.smaFastPeriod}/${momGuardConfig.smaSlowPeriod}:${mvAnalysis?.smaCrossover ?? 'none'}` : '')
             )
+          }
+
+          // 🚀 AGGRESSIVE_SHORT: when SM confirms SHORT and HOLD_FOR_TP active,
+          // force ask multiplier to 1.2 to aggressively scale into short position.
+          // Overrides all upstream reductions (dynamic_config, bounce, MG).
+          if (holdForTpBounceBypass) {
+            const prevAsk = sizeMultipliers.ask
+            sizeMultipliers.ask = Math.max(sizeMultipliers.ask, 1.2)
+            if (this.tickCount % 10 === 0 || prevAsk < 1.0) {
+              console.log(
+                `🚀 [AGGRESSIVE_SHORT] ${pair}: ask×${prevAsk.toFixed(2)} → ask×${sizeMultipliers.ask.toFixed(2)} ` +
+                `(SM confirms SHORT, scaling into position)`
+              )
+            }
           }
 
           // === 📊 L2 ORDER BOOK IMBALANCE (OBI) MODULATOR ===
@@ -10545,9 +10560,12 @@ class HyperliquidMMBot {
     const totalBefore = gridOrders.reduce((a, o) => a + (o.sizeUsd || 0), 0)
 
     // kPEPE custom grid: preserve per-layer sizing from capitalPct, only filter below minUsd
+    // AGGRESSIVE_SHORT mode: raise minimum to $50/order for meaningful position building
     // Other tokens: rebucket to uniform targetUsd (legacy behavior)
+    const isAggressiveShortMode = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, 'short')
     if (pair === 'kPEPE') {
-      gridOrders = gridOrders.filter((o: GridOrder) => o.sizeUsd >= rebucketMin)
+      const kpepeMinUsd = isAggressiveShortMode ? 50 : rebucketMin
+      gridOrders = gridOrders.filter((o: GridOrder) => o.sizeUsd >= kpepeMinUsd)
     } else {
       gridOrders = normalizeChildNotionals(
         gridOrders,
