@@ -74,7 +74,7 @@ module.exports = {
         COPY_MIN_VALUE_USD: "10000",
         COPY_SCALING_MODE: "fixed",
         COPY_BLOCKED_COINS: "PUMP",
-        COPY_ALLOWED_COINS: "LIT,xyz:GOLD",
+        COPY_ALLOWED_COINS: "LIT,xyz:CL,ASTER,APEX",
         // COPY_PRIVATE_KEY: "..."  // Set on server .env or PM2 env
       },
       max_memory_restart: "150M",
