@@ -9144,16 +9144,22 @@ class HyperliquidMMBot {
               BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
             }
 
+            const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {
+              GRACE: 60 * 60 * 1000,  // 60min — GRACE toggles frequently, not actionable
+            }
+
             const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
               const cfg = phaseAlertConfig[phase]
               if (!cfg) return
               const cooldownKey = `${pair}:PHASE_${phase}_${transition}`
               const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
-              if (Date.now() - lastAlert < HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) return
+              const cooldownMs = PHASE_COOLDOWN_OVERRIDES[phase] ?? HyperliquidMMBot.SR_ALERT_COOLDOWN_MS
+              if (Date.now() - lastAlert < cooldownMs) return
               this.srAlertCooldowns.set(cooldownKey, Date.now())
 
               const label = transition === 'START' ? cfg.startLabel : cfg.endLabel
               const transEmoji = transition === 'START' ? cfg.emoji : (phase === 'BOUNCE_HOLD' ? '🔓' : '⏰')
+              const cooldownMin = Math.round(cooldownMs / 60000)
 
               sendDiscordEmbed({
                 title: `${transEmoji} ${pair} — ${label}`,
@@ -9166,7 +9172,7 @@ class HyperliquidMMBot {
                   { name: 'ask×', value: `${sizeMultipliers.ask.toFixed(2)}`, inline: true },
                   { name: 'S/R', value: `R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`, inline: true },
                 ],
-                footer: { text: `Phase transition | Cooldown 15min` },
+                footer: { text: `Phase transition | Cooldown ${cooldownMin}min` },
                 timestamp: new Date().toISOString(),
               }).catch(() => {})
             }
@@ -10239,15 +10245,21 @@ class HyperliquidMMBot {
             GRACE:        { emoji: '⏳', color: 0xf1c40f, startLabel: 'GRACE START', endLabel: 'GRACE EXPIRED' },
             BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
           }
+          const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {
+            GRACE: 60 * 60 * 1000,  // 60min — GRACE toggles frequently, not actionable
+          }
+
           const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
             const cfg = phaseAlertConfig[phase]
             if (!cfg) return
             const cooldownKey = `${pair}:PHASE_${phase}_${transition}`
             const lastAlert = this.srAlertCooldowns.get(cooldownKey) || 0
-            if (Date.now() - lastAlert < HyperliquidMMBot.SR_ALERT_COOLDOWN_MS) return
+            const cooldownMs = PHASE_COOLDOWN_OVERRIDES[phase] ?? HyperliquidMMBot.SR_ALERT_COOLDOWN_MS
+            if (Date.now() - lastAlert < cooldownMs) return
             this.srAlertCooldowns.set(cooldownKey, Date.now())
             const label = transition === 'START' ? cfg.startLabel : cfg.endLabel
             const transEmoji = transition === 'START' ? cfg.emoji : (phase === 'BOUNCE_HOLD' ? '🔓' : '⏰')
+            const cooldownMin = Math.round(cooldownMs / 60000)
             sendDiscordEmbed({
               title: `${transEmoji} ${pair} — ${label}`,
               color: cfg.color,
@@ -10259,7 +10271,7 @@ class HyperliquidMMBot {
                 { name: 'ask×', value: `${sizeMultipliers.ask.toFixed(2)}`, inline: true },
                 { name: 'S/R', value: `R=$${mgResistBody.toFixed(6)} S=$${mgSupportBody.toFixed(6)}`, inline: true },
               ],
-              footer: { text: `Phase transition | Cooldown 15min` },
+              footer: { text: `Phase transition | Cooldown ${cooldownMin}min` },
               timestamp: new Date().toISOString(),
             }).catch(() => {})
           }
