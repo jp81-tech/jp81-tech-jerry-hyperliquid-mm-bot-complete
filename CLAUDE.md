@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-09
+- Data: 2026-03-10
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -37,6 +37,7 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `scripts/vip_spy.py` - monitoring VIP SM traderów (Operacja "Cień Generała"), ALL COINS dla Generała
 - `scripts/general_copytrade.ts` - copy-trading bot: kopiuje pozycje Generała (dry-run/live)
 - `scripts/daily_discord_report.py` - dzienny raport 24h na Discord (PnL, skew, fee efficiency, aging, guard blocks)
+- `scripts/whale_discovery.ts` - weekly scan for new large kPEPE/VIRTUAL positions not in whale_tracker.py (nansen CLI + HL API)
 
 **Kluczowe pliki danych:**
 - `/tmp/smart_money_data.json` - dane z whale_tracker.py (na serwerze)
@@ -45,11 +46,62 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/nansen_raw_alert_queue.json` - kolejka alertów z Telegram
 - `/tmp/vip_spy_state.json` - stan VIP Spy (pozycje Generałów)
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
+- `/tmp/whale_discovery_seen.json` - seen addresses for whale discovery dedup (30-day TTL)
 - `rotator.config.json` - config rotacji par
 
 ---
 
 ## Zmiany 10 marca 2026
+
+### 122. Whale Discovery Script — automated scan for new large positions (10.03)
+
+**Problem:** Nowe wieloryby na kPEPE/VIRTUAL były odkrywane ad-hoc (ręczne sprawdzanie Nansen leaderboardów). whale_tracker.py trackuje ~53 adresów ręcznie kurowanych przez miesiące — brak automatyzacji discovery nowych dużych pozycji.
+
+**Rozwiązanie:** `scripts/whale_discovery.ts` (~300 LOC) — weekly cron job skanujący Nansen leaderboardy + Hyperliquid API i flagujący nowe adresy do human review.
+
+**Data flow:**
+```
+1. nansen CLI: perp-pnl-leaderboard per token (kPEPE, VIRTUAL) --days 7
+2. nansen CLI: global perp leaderboard (top traders overall)
+3. Dedup + filter: NOT in KNOWN_ADDRESSES (57 tracked addresses)
+4. Threshold filter: kPEPE PnL>$10K or pos>$50K, VIRTUAL PnL>$20K or pos>$100K
+5. HL API: clearinghouseState for each candidate (free, no auth)
+6. Seen file dedup: /tmp/whale_discovery_seen.json (30-day TTL)
+7. Discord embed per batch + console output
+```
+
+**Nansen CLI integration:**
+- Subprocess calls via `execSync()` z `--format csv`
+- Custom CSV parser z fix dla `0x`-prefixed addresses (JavaScript `Number('0x...')` parsuje hex jako valid number — muszą być traktowane jako stringi)
+- 3 nansen calls per run (~4-6 credits/week)
+- Commands: `nansen research token perp-pnl-leaderboard --symbol X --days 7` + `nansen research perp leaderboard`
+
+**Reused patterns:**
+
+| Pattern | Source |
+|---------|--------|
+| KNOWN_ADDRESSES Set | `whale-changes-report.ts` (57 addresses) |
+| dotenv + shebang | `hourly-discord-report.ts` |
+| Discord embed | `discord_notifier.ts` → native `fetch` POST |
+| `--dry-run` flag | `whale-changes-report.ts` |
+| fmtUsd helper | `hourly-discord-report.ts` |
+| HL API fetch | `general_copytrade.ts` (native fetch POST) |
+
+**Dry-run test results (10.03):**
+- 24 new whale addresses discovered (not in KNOWN_ADDRESSES)
+- Notable finds: Wintermute ($4.8M PnL, SHORT kPEPE+VIRTUAL), Auros Global ($2.0M PnL), HLP Strategy B ($121.3M equity)
+- Bearish consensus: majority discovered whales SHORT kPEPE
+- Known addresses properly filtered (0 matches for tracked whales)
+
+**Bug fix during implementation:**
+- `Number('0x985f02b19dbc...')` = `8.698e+47` (valid hex!) → CSV parser converted Ethereum addresses to numbers → `.toLowerCase()` failed
+- Fix: `val.startsWith('0x') ? val : num` in `parseCsv()`
+
+**Cron:** `0 10 * * 0` (weekly Sunday 10:00 UTC)
+**State file:** `/tmp/whale_discovery_seen.json` (30-day TTL, pruned on each run)
+**Server deployment:** Requires `nansen-cli` installed on server (`npm i -g nansen-cli && nansen login`)
+
+**Pliki:** `scripts/whale_discovery.ts` (NEW, 534 LOC)
 
 ### 121. HLP Vault Position Tracking + Discord Alerts (10.03)
 
@@ -3803,6 +3855,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 - `15 * * * *` — `scripts/hourly-discord-report.ts` → Discord hourly report
 - `0 8 * * *` — `scripts/daily-whale-report.ts` → Discord daily whale report
 - `0 6,12,18 * * *` — `scripts/whale-changes-report.ts` → Discord whale changes report (3x daily)
+- `0 10 * * 0` — `scripts/whale_discovery.ts` → Weekly whale discovery scan (Sunday 10:00 UTC)
 
 **Poza PM2 (katalog `/home/jerry/ai-risk-agent/`):**
 - PID 1474087: `ai-chat-gemini.mjs` — prosty Gemini chatbot (token `8145609459`)
@@ -5173,3 +5226,4 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **TOKEN_SM_EXPOSURE_OVERRIDES (09.03)**: Per-token progi minSmExposureUsd w SmAutoDetector.ts. kPEPE: $10K, LIT: $20K, default: $100K. Używane w `determineMode()`. Bez tego kPEPE ($34K exposure) zawsze dostawał PURE_MM → `getSmDirection()` null → `shouldHoldForTp()` false → brak ochrony pozycji.
 - **WHALE_POSITION_OVERRIDES (09.03)**: Per-token progi minPositionValue w SignalEngine.ts `checkWhaleTrackerOverride()`. kPEPE: $5K, LIT: $10K, default: $500K. + "strong ratio bypass": ratio >= 5.0 + exposure >= per-token min + token has lower threshold → override nawet bez 80% conviction. Bez tego kPEPE nigdy nie dostawał whale override → fallback PURE_MM.
 - **HLP Vault Tracking (10.03)**: HLP address `0x010461C14e146ac35Fe42271BDC1134Ee31C703a`, equity $121.5M, 189 pozycji. Polling co 120s via HL API (`clearinghouseState`). Moon Dev API endpointy HLP zwracały 404 — pominięte. kPEPE LONG $195K (4x > całe SM!), VIRTUAL LONG $56K. Discord alerts via `sendDiscordAlert()` z 60min cooldown. Output w `moonGuard.getOutput().hlpKpepe/.hlpVirtual`. HLP to dominujący gracz na kPEPE — większa pozycja niż wszystkie SM razem.
+- **Whale Discovery (10.03)**: `scripts/whale_discovery.ts` — weekly cron (Sunday 10:00 UTC) skanujący Nansen perp leaderboardy + HL API dla nowych dużych pozycji na kPEPE/VIRTUAL. 57 KNOWN_ADDRESSES (synced z whale-changes-report.ts) filtrowanych. Seen file `/tmp/whale_discovery_seen.json` z 30-day TTL. Nansen CLI via `execSync()` z `--format csv`. **CSV parser bug fix:** `Number('0x...')` parsuje hex adresy jako valid numbers — dodano `val.startsWith('0x')` guard. Progi: kPEPE PnL>$10K lub pos>$50K, VIRTUAL PnL>$20K lub pos>$100K. `--dry-run` flag. Wymaga nansen-cli na serwerze (`npm i -g nansen-cli`).

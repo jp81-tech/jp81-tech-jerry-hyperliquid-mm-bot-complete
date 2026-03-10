@@ -10073,3 +10073,232 @@ Output trafia do `mm_hl.ts` — downstream pipeline MOZE reagowac na HLP exposur
 4. **Moon Dev API failure → direct HL API.** Probowalem najpierw Moon Dev (`/api/hlp_aggregated_positions`) — 404. Zamiast debugowac cudze API, poszerlem bezposrednio do zrodla. Hyperliquid API jest darmowe, stabilne, i nie wymaga klucza. **Zawsze preferuj primary source nad third-party wrapper.**
 
 5. **Alerting z cooldownem > raw data dump.** HLP status log pojawia sie co ~30 minut (co 15 tickow). Alerty ograniczone cooldownem 60 min. Bez tego Discord bylby zasypany "HLP kPEPE LONG $195K" co 2 minuty. **Signal-to-noise ratio jest wazniejszy niz ilosc danych.**
+
+---
+
+## Rozdzial 41: Whale Discovery — Automatyczny Zwiad Nowych Wielorybow
+
+### Problem: Reczny Discovery to Bottleneck
+
+Przez miesiace budowalismy armie sledczych — whale_tracker.py z 53 adresami, vip_spy.py z 25 VIPami, whale-changes-report.ts z alertami 3x dziennie. Ale jak DODAWALISMY nowe adresy do trackera? **Recznie.** Ktos (ja) szedl na Nansen, przegladal leaderboardy, sprawdzal pozycje, i rucznie wpisywal adres do kodu.
+
+To jest jak miec najlepsza armie wywiadowcza na swiecie, ale rekrutowac nowych agentow przez ogłoszenie w gazecie. **Bottleneck nie byl w analizie — byl w discovery.**
+
+Wyobraz sobie: jakis nowy wieloryb otwiera $500K SHORT na kPEPE w poniedzialek. Nasz tracker go nie zna. Przez caly tydzien ten wieloryb handluje, zarabia, zmienia pozycje — a my nie mamy pojecia. Dopiero w niedziele, gdy recznie sprawdzam Nansen, zauwazam "o, jest ktos nowy z duza pozycja". Tydzien opoznienia.
+
+### Rozwiazanie: Automatyczny Zwiad Co Niedziele
+
+`scripts/whale_discovery.ts` — skrypt ktory co tydzien (niedziele 10:00 UTC) automatycznie:
+
+1. **Skanuje Nansen leaderboardy** — kto zarobil/stracil najwiecej na kPEPE i VIRTUAL w ostatnich 7 dniach
+2. **Filtruje znane adresy** — 57 adresow juz w trackerze = ignorowane
+3. **Sprawdza pozycje na Hyperliquid** — equity, otwarte pozycje, uPnL
+4. **Deduplicuje** — adresy juz flagowane w ostatnich 30 dniach = pominięte
+5. **Wysyla na Discord** — embed z nowymi wielorybami do human review
+
+Kluczowe: skrypt **nie dodaje automatycznie** adresow do trackera. Flaguje je do przegladu przez czlowieka. Automatyzacja discovery, nie decyzji.
+
+### Architektura: Nansen CLI + Hyperliquid API
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  NANSEN CLI (subprocess)                                │
+│  nansen research token perp-pnl-leaderboard             │
+│    --symbol kPEPE --days 7 --format csv                 │
+│    --symbol VIRTUAL --days 7 --format csv               │
+│  nansen research perp leaderboard --format csv          │
+│  → Top PnL earners per token + global top traders       │
+└────────────────────┬────────────────────────────────────┘
+                     │ CSV output (parsed in-process)
+                     v
+┌─────────────────────────────────────────────────────────┐
+│  FILTER PIPELINE                                        │
+│  1. Parse CSV → objects (custom parser)                 │
+│  2. Dedup across leaderboards (address Set)             │
+│  3. Filter: NOT in KNOWN_ADDRESSES (57 tracked)         │
+│  4. Threshold: kPEPE PnL>$10K or pos>$50K              │
+│                VIRTUAL PnL>$20K or pos>$100K            │
+│  5. Dedup: NOT in seen file (30-day TTL)               │
+└────────────────────┬────────────────────────────────────┘
+                     │ candidate addresses
+                     v
+┌─────────────────────────────────────────────────────────┐
+│  HYPERLIQUID API (free, no auth)                        │
+│  POST https://api.hyperliquid.xyz/info                  │
+│  { type: "clearinghouseState", user: "0x..." }          │
+│  → equity, positions, uPnL per candidate                │
+└────────────────────┬────────────────────────────────────┘
+                     │ enriched candidates
+                     v
+┌─────────────────────────────────────────────────────────┐
+│  OUTPUT                                                 │
+│  --dry-run: console only (no Discord, no state save)    │
+│  normal:    Discord embed + save to seen file           │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Nansen CLI: Subprocess zamiast API
+
+Dlaczego `execSync('nansen research ...')` zamiast Nansen MCP albo API SDK?
+
+1. **Nansen CLI jest juz zainstalowany** — `/opt/homebrew/bin/nansen`, zalogowany, dziala
+2. **Prostota** — jeden subprocess call z `--format csv` zwraca gotowe dane
+3. **Kredyty** — ~3 calls per run = ~4-6 kredytow/tydzien (vs sm-short-monitor: ~8000/msc)
+4. **Niezaleznosc** — nie wymaga MCP servera ani dodatkowych dependencies
+
+To jest wzorzec ktory warto zapamietac: **jesli narzedzie CLI juz istnieje i dziala, uzyj go jako subprocess zamiast budowac wrapper.** `execSync` to 3 linijki kodu. Natywny SDK to dependency hell + auth flow + error handling.
+
+```typescript
+function nansenCmd(args: string): string {
+  return execSync(`nansen ${args} --format csv`, {
+    timeout: 30_000,
+    encoding: 'utf-8',
+  });
+}
+
+// Uzycie:
+const csvOutput = nansenCmd('research token perp-pnl-leaderboard --symbol kPEPE --days 7');
+```
+
+### Bug Dnia: JavaScript i Adresy Ethereum
+
+To byl jeden z tych bugow ktore wydaja sie niemozliwe dopoki nie zobaczysz ich na wlasne oczy.
+
+**Problem:** Skrypt crashowal z `TypeError: toLowerCase is not a function` na linijce ktora robilna `(entry.trader_address ?? '').toLowerCase()`.
+
+**Reakcja:** Jak to? `trader_address` to string, stringi maja `toLowerCase()`. Co tu moze nie dzialac?
+
+**Diagnoza:** Napisalem custom CSV parser (bo `csv-parse` to dodatkowa dependency). Parser konwertowal wartosci na numbery:
+
+```typescript
+const num = Number(val);
+obj[key] = isNaN(num) || val === '' ? val : num;
+```
+
+Wyglada niewinnie, prawda? **Ale Ethereum adresy zaczynaja sie od `0x`.**
+
+I teraz kluczowy moment: JavaScript traktuje `0x` prefix jako hex notation:
+
+```javascript
+Number('0x985f02b19dbc062e565c981aac5614baf2cf501f')
+// = 8.698854026233e+47  (!!!)
+// To jest VALID NUMBER w JavaScript!!!
+```
+
+Parser widzial adres Ethereum `0x985f02...`, pytal "czy to numer?", JavaScript odpowiadal "tak, to hex number 8.7e47", i zapisywal go jako `number` zamiast `string`. Potem `.toLowerCase()` na numerze = TypeError.
+
+**Fix:**
+
+```typescript
+const num = Number(val);
+obj[key] = isNaN(num) || val === '' || val.startsWith('0x') ? val : num;
+//                                     ^^^^^^^^^^^^^^^^^^
+// Adresy Ethereum ZAWSZE zostaja stringami
+```
+
+**Lekcja:** `Number()` w JavaScript parsuje wiecej formatow niz myslisz. `0x` (hex), `0o` (octal), `0b` (binary) — wszystkie sa "valid numbers". Jesli parsujesz dane z zewnetrznych zrodel (CSV, JSON, API), **nigdy nie ufaj automatycznej konwersji typow.** Explicite sprawdzaj formaty ktore chcesz zachowac jako stringi.
+
+To jest szersza zasada w programowaniu: **implicit type coercion to zrodlo najdziwniejszych bugow.** Python, Go, Rust — wszystkie sa stricte z typami. JavaScript? "Let me help you by converting this Ethereum address to a number!" Dziekuje, nie trzeba.
+
+### Reused Patterns: Standing on the Shoulders of Giants
+
+Jednym z powodow dlaczego ten skrypt ma ~300 LOC logiki (a nie 1000) jest agresywny reuse istniejacych patternow:
+
+| Pattern | Skad | Co robi |
+|---------|------|---------|
+| KNOWN_ADDRESSES Set | `whale-changes-report.ts` | 57 adresow juz trackowanych — skopiowane jako `Set<string>` |
+| dotenv + shebang | `hourly-discord-report.ts` | `#!/usr/bin/env -S npx tsx` + `config()` |
+| Discord embed | `discord_notifier.ts` | `sendDiscordEmbed()` — rich embed z polami |
+| `--dry-run` flag | `whale-changes-report.ts` | Console only, no side effects |
+| fmtUsd helper | `hourly-discord-report.ts` | `+$123.45` / `-$67.89` formatting |
+| HL API fetch | `general_copytrade.ts` | `fetch('https://api.hyperliquid.xyz/info', {...})` |
+
+**Zasada:** Zanim napiszesz nowa funkcje, sprawdz czy juz istnieje w codebase. Ctrl+F `fmtUsd`, `sendDiscord`, `clearinghouseState` — 90% "utility code" juz gdzies jest. Copy-paste z istniejacego, dzialajacego kodu > pisanie od zera.
+
+To sie laczy z szersza zasada software engineeringu: **consistency > elegance.** Lepiej miec 5 skryptow ktore uzyje tego samego `fmtUsd()` pattern (nawet jesli to copy-paste) niz 5 roznych formatowac dolary. Gdy ktos czyta kod, widzi znajomy pattern i od razu rozumie co robi.
+
+### State File: Pamiec Miedzy Runami
+
+```
+/tmp/whale_discovery_seen.json
+{
+  "0x1234...abcd": {
+    "firstSeen": 1710000000,
+    "token": "kPEPE",
+    "label": "Wintermute"
+  },
+  "0x5678...efgh": {
+    "firstSeen": 1709500000,
+    "token": "VIRTUAL",
+    "label": "Unknown"
+  }
+}
+```
+
+Kazdy adres ktory zostal juz flagowany trafia do "seen file" na 30 dni. Po 30 dniach wpis jest automatycznie usuwany (pruning na kazdym runie). Dlaczego?
+
+- **Bez dedup:** Ten sam wieloryb pojawiałby sie na Discord co tydzien ("Hej, Wintermute nadal ma pozycje!"). Szum.
+- **Z dedup, bez TTL:** Adres flagowany RAZ nigdy nie pojawi sie ponownie — nawet jesli za 3 miesiace zmieni pozycje z $50K na $5M. Missed signal.
+- **Z dedup + 30d TTL:** Adres jest wyciszony na miesiac. Jesli po miesiacu nadal jest aktywny — re-discovery. Balans miedzy szumem a pokryciem.
+
+Ten pattern (state file + TTL + pruning) jest uzywany w wielu miejscach w naszym systemie:
+- `/tmp/whale_changes_snapshot.json` — snapshot do porownania zmian
+- `/tmp/copy_general_state.json` — activeCopies + baseline
+- `/tmp/whale_activity.json` — last_change_epoch dla dormant decay
+
+### Wyniki Pierwszego Runu (Dry-Run)
+
+```
+$ npx tsx scripts/whale_discovery.ts --dry-run
+
+Whale Discovery — Weekly Scan
+==============================
+Fetching kPEPE perp leaderboard...
+  → 50 entries
+Fetching VIRTUAL perp leaderboard...
+  → 50 entries
+Fetching global perp leaderboard...
+  → 50 entries
+Combined: 109 unique addresses (after dedup)
+Known addresses filtered: 57
+Candidates after filtering: 24
+
+Notable finds:
+  Wintermute    — $4.8M PnL, SHORT kPEPE + VIRTUAL
+  Auros Global  — $2.0M PnL
+  HLP Strategy B — $121.3M equity (!)
+
+Bearish consensus: majority discovered whales SHORT kPEPE
+```
+
+24 nowe adresy znalezione w pierwszym runie! Nie wszystkie beda warte dodania do trackera (niektore to market makerzy, jednodniowe pozycje, albo dust amounts), ale **discovery pipeline dziala.**
+
+### Deployment
+
+**Lokalnie (test):**
+```bash
+npx tsx scripts/whale_discovery.ts --dry-run
+```
+
+**Na serwerze (produkcja):**
+```bash
+# 1. Zainstaluj nansen-cli
+ssh hl-mm 'npm i -g nansen-cli && nansen login'
+
+# 2. Dodaj cron
+0 10 * * 0 cd ~/hyperliquid-mm-bot-complete && npx tsx scripts/whale_discovery.ts >> runtime/whale_discovery.log 2>&1
+```
+
+Weekly, Sunday 10:00 UTC — pasuje do istniejacego cyklu raportow (hourly, daily whale, 3x whale changes).
+
+### Lekcje
+
+1. **Automatyzuj discovery, nie decyzje.** Skrypt NIE dodaje adresow do trackera automatycznie. Flaguje je na Discord do human review. Dlaczego? Bo kontekst jest wazny — adres moze byc market makerem, moze miec dust position, moze byc powiazany z juz trackowanym VIPem. Czlowiek podejmuje decyzje, maszyna robi grunt work. To ten sam pattern co w DevOps: CI automatyzuje testy, ale PR review robi czlowiek.
+
+2. **`Number()` w JavaScript to pulapka.** Hex strings (`0x...`), octal (`0o...`), binary (`0b...`) — wszystkie sa "valid numbers". Przy parsowaniu zewnetrznych danych ZAWSZE dodawaj explicit checks na formaty ktore chcesz zachowac jako stringi. `val.startsWith('0x')` to 20 znakow kodu ktore oszczedzaja godzine debugowania.
+
+3. **CLI subprocess > custom SDK** gdy narzedzie juz istnieje i jest zalogowane. `execSync('nansen ...')` = 3 linijki. Nansen SDK = import + auth + error handling + types + 50 linijek boilerplate. Dla weekly cron joba ktory robi 3 calle? Subprocess wygrywa.
+
+4. **State file TTL chroni przed dwoma skrajnosciami.** Bez dedup = spam. Bez TTL = missed signals. 30-dniowy TTL to sweet spot — daje miesiac ciszy na adres, potem re-discovery jesli nadal aktywny. Inspiracja z DNS TTL, HTTP cache headers, i certificate validity periods — **wszystko w IT ma swoj optymalny czas zycia.**
+
+5. **Reuse > rewrite.** 6 patternow skopiowanych z istniejacych skryptow — `fmtUsd`, Discord embeds, HL API fetch, dry-run flag, dotenv, KNOWN_ADDRESSES. Kazdy zaoszczedzil 15-30 minut kodowania i testowania. Na skali calego projektu, konsystentny reuse to roznica miedzy "skrypt gotowy w 2 godziny" a "skrypt gotowy w 2 dni".
