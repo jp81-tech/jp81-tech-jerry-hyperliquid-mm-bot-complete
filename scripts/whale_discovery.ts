@@ -101,7 +101,18 @@ const KNOWN_ADDRESSES = new Set([
 const HL_API_URL = 'https://api.hyperliquid.xyz/info';
 const SEEN_FILE = '/tmp/whale_discovery_seen.json';
 const SEEN_TTL_DAYS = 30;
-const NANSEN_CLI = '/opt/homebrew/bin/nansen';
+const NANSEN_CLI = (() => {
+  const candidates = [
+    process.env.NANSEN_CLI_PATH,
+    '/opt/homebrew/bin/nansen',                          // macOS (homebrew)
+    `${process.env.HOME}/.npm-global/bin/nansen`,        // Linux (npm global prefix)
+    '/usr/local/bin/nansen',
+  ].filter(Boolean) as string[];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return 'nansen'; // fallback to PATH
+})();
 
 interface TokenConfig {
   symbol: string;
