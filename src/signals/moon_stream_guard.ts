@@ -6,11 +6,20 @@
 // ============================================================
 
 import https from 'https';
+import { sendDiscordAlert } from '../utils/discord_notifier.js';
 
 const API_BASE = 'https://api.moondev.com/api';
 const API_KEY = 'jaroslaw_qe';
 const POLL_INTERVAL_MS = 45_000;       // 45s — main poll (liqs + imbalance)
 const POSITION_POLL_INTERVAL_MS = 90_000; // 90s — position poll (cluster detection)
+const HLP_POLL_INTERVAL_MS = 120_000;  // 120s — HLP position poll (direct from HL API)
+
+// ── HLP Config ────────────────────────────────────────────
+const HLP_ADDRESS = '0x010461C14e146ac35Fe42271BDC1134Ee31C703a';
+const HLP_API_URL = 'https://api.hyperliquid.xyz/info';
+const HLP_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 60 min between same-type alerts
+const HLP_ALERT_MIN_VALUE_USD = 100_000;       // Min position value to alert (kPEPE)
+const HLP_ALERT_MIN_VALUE_VIRTUAL = 50_000;    // Min for VIRTUAL
 
 // ── Danger Zone Thresholds ──────────────────────────────────
 const KPEPE_LIQ_THRESHOLD_USD = 15_000;
@@ -36,6 +45,15 @@ export interface LiqCluster {
   side: 'long' | 'short';
 }
 
+export interface HlpPosition {
+  coin: string;
+  szi: number;               // signed size (positive=LONG, negative=SHORT)
+  entryPx: number;
+  valueUsd: number;           // |szi| * entryPx
+  unrealizedPnl: number;
+  side: 'LONG' | 'SHORT';
+}
+
 export interface MoonGuardOutput {
   kpepeSqueezeWarning: boolean;
   virtualSqueezeWarning: boolean;
@@ -54,6 +72,11 @@ export interface MoonGuardOutput {
   // New: liquidation clusters
   kpepeLiqClusters: LiqCluster[];
   virtualLiqClusters: LiqCluster[];
+  // HLP positions
+  hlpPositions: HlpPosition[];
+  hlpKpepe: HlpPosition | null;
+  hlpVirtual: HlpPosition | null;
+  hlpEquity: number;
   lastUpdate: number;
   reason: string;
 }
@@ -77,15 +100,24 @@ export class MoonStreamGuard {
   private output: MoonGuardOutput = this.defaultOutput();
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private positionTimer: ReturnType<typeof setInterval> | null = null;
+  private hlpTimer: ReturnType<typeof setInterval> | null = null;
   private tickCount = 0;
   private positionTickCount = 0;
+  private hlpTickCount = 0;
   private kpepeWarningUntil = 0;
   private virtualWarningUntil = 0;
   private consecutiveErrors = 0;
   private positionConsecutiveErrors = 0;
+  private hlpConsecutiveErrors = 0;
 
   // Mid prices for cluster distance calculation
   private midPrices: Record<string, number> = {};
+
+  // HLP alert cooldowns: key → last alert timestamp
+  private hlpAlertCooldowns: Map<string, number> = new Map();
+  // Previous HLP positions for change detection
+  private prevHlpKpepe: HlpPosition | null = null;
+  private prevHlpVirtual: HlpPosition | null = null;
 
   private defaultOutput(): MoonGuardOutput {
     return {
@@ -103,6 +135,10 @@ export class MoonStreamGuard {
       virtualShortLongRatio: 0,
       kpepeLiqClusters: [],
       virtualLiqClusters: [],
+      hlpPositions: [],
+      hlpKpepe: null,
+      hlpVirtual: null,
+      hlpEquity: 0,
       lastUpdate: 0,
       reason: '',
     };
@@ -110,11 +146,13 @@ export class MoonStreamGuard {
 
   start(): void {
     if (this.pollTimer) return;
-    console.log(`[MOON_GUARD] Started — main poll ${POLL_INTERVAL_MS / 1000}s, positions ${POSITION_POLL_INTERVAL_MS / 1000}s`);
+    console.log(`[MOON_GUARD] Started — main poll ${POLL_INTERVAL_MS / 1000}s, positions ${POSITION_POLL_INTERVAL_MS / 1000}s, HLP ${HLP_POLL_INTERVAL_MS / 1000}s`);
     this.poll();
     this.pollPositions();
+    this.pollHlp();
     this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
     this.positionTimer = setInterval(() => this.pollPositions(), POSITION_POLL_INTERVAL_MS);
+    this.hlpTimer = setInterval(() => this.pollHlp(), HLP_POLL_INTERVAL_MS);
   }
 
   stop(): void {
@@ -125,6 +163,10 @@ export class MoonStreamGuard {
     if (this.positionTimer) {
       clearInterval(this.positionTimer);
       this.positionTimer = null;
+    }
+    if (this.hlpTimer) {
+      clearInterval(this.hlpTimer);
+      this.hlpTimer = null;
     }
   }
 
@@ -267,6 +309,190 @@ export class MoonStreamGuard {
       }
       // Keep previous cached data — don't zero out
     }
+  }
+
+  // ── HLP poll: Hyperliquid LP position tracking ─────────────
+
+  private async pollHlp(): Promise<void> {
+    this.hlpTickCount++;
+
+    try {
+      const data = await this.fetchHlpState();
+      this.hlpConsecutiveErrors = 0;
+
+      const equity = parseFloat(data?.marginSummary?.accountValue ?? '0');
+      this.output.hlpEquity = equity;
+
+      const positions: HlpPosition[] = [];
+      for (const ap of (data?.assetPositions ?? [])) {
+        const pos = ap.position;
+        const szi = parseFloat(pos.szi);
+        if (szi === 0) continue;
+        const entryPx = parseFloat(pos.entryPx);
+        const valueUsd = Math.abs(szi) * entryPx;
+        const unrealizedPnl = parseFloat(pos.unrealizedPnl);
+        const side = szi > 0 ? 'LONG' as const : 'SHORT' as const;
+        positions.push({ coin: pos.coin, szi, entryPx, valueUsd, unrealizedPnl, side });
+      }
+
+      // Sort by value descending
+      positions.sort((a, b) => b.valueUsd - a.valueUsd);
+      this.output.hlpPositions = positions;
+
+      // Extract kPEPE and VIRTUAL
+      const kpepePos = positions.find(p => p.coin === 'kPEPE') ?? null;
+      const virtualPos = positions.find(p => p.coin === 'VIRTUAL') ?? null;
+
+      this.output.hlpKpepe = kpepePos;
+      this.output.hlpVirtual = virtualPos;
+
+      // Check for alerts
+      this.checkHlpAlerts(kpepePos, virtualPos);
+
+      // Store for next comparison
+      this.prevHlpKpepe = kpepePos;
+      this.prevHlpVirtual = virtualPos;
+
+      // Periodic log every 15 ticks (~30 min)
+      if (this.hlpTickCount % 15 === 0 || this.hlpTickCount <= 2) {
+        const kStr = kpepePos ? `${kpepePos.side} $${kpepePos.valueUsd.toFixed(0)} uPnl=$${kpepePos.unrealizedPnl.toFixed(0)}` : 'FLAT';
+        const vStr = virtualPos ? `${virtualPos.side} $${virtualPos.valueUsd.toFixed(0)} uPnl=$${virtualPos.unrealizedPnl.toFixed(0)}` : 'FLAT';
+        console.log(`[HLP_TRACKER] tick=${this.hlpTickCount} kPEPE: ${kStr} | VIRTUAL: ${vStr} | HLP equity=$${(equity / 1e6).toFixed(1)}M | ${positions.length} positions`);
+      }
+
+    } catch (err: any) {
+      this.hlpConsecutiveErrors++;
+      if (this.hlpConsecutiveErrors <= 3 || this.hlpConsecutiveErrors % 10 === 0) {
+        console.warn(`[HLP_TRACKER] Poll error #${this.hlpConsecutiveErrors}: ${err?.message || err}`);
+      }
+    }
+  }
+
+  private checkHlpAlerts(kpepe: HlpPosition | null, virtual: HlpPosition | null): void {
+    const now = Date.now();
+
+    // ── kPEPE HLP alerts ──────────────────────────────────────
+    if (kpepe && kpepe.valueUsd >= HLP_ALERT_MIN_VALUE_USD) {
+      const prevSide = this.prevHlpKpepe?.side ?? null;
+      const sideFlipped = prevSide && prevSide !== kpepe.side;
+      const isNew = !this.prevHlpKpepe && kpepe.valueUsd >= HLP_ALERT_MIN_VALUE_USD;
+      const valueSurge = this.prevHlpKpepe && kpepe.valueUsd > this.prevHlpKpepe.valueUsd * 1.5;
+
+      if (kpepe.side === 'LONG') {
+        // HLP LONG kPEPE = HLP accumulated longs → dump could force HLP to sell → cascade
+        const alertKey = `hlp_kpepe_long`;
+        if (this.shouldSendHlpAlert(alertKey, now) && (sideFlipped || isNew || valueSurge || this.hlpTickCount <= 2)) {
+          const msg = [
+            `[HLP] kPEPE: HLP is LONG $${this.fmtK(kpepe.valueUsd)} (${this.fmtSzi(kpepe.szi)} kPEPE)`,
+            `Entry: $${kpepe.entryPx.toPrecision(4)} | uPnl: $${kpepe.unrealizedPnl.toFixed(0)}`,
+            `If price dumps, HLP forced to sell = CASCADE risk`,
+            sideFlipped ? `FLIPPED from ${prevSide}!` : '',
+          ].filter(Boolean).join('\n');
+          sendDiscordAlert(msg).catch(() => {});
+          this.hlpAlertCooldowns.set(alertKey, now);
+          console.log(`[HLP_ALERT] kPEPE LONG $${this.fmtK(kpepe.valueUsd)} — cascade risk alert sent`);
+        }
+      } else {
+        // HLP SHORT kPEPE = HLP accumulated shorts → pump could force HLP to buy back → squeeze
+        const alertKey = `hlp_kpepe_short`;
+        if (this.shouldSendHlpAlert(alertKey, now) && (sideFlipped || isNew || valueSurge || this.hlpTickCount <= 2)) {
+          const msg = [
+            `[HLP] kPEPE: HLP is SHORT $${this.fmtK(kpepe.valueUsd)} (${this.fmtSzi(kpepe.szi)} kPEPE)`,
+            `Entry: $${kpepe.entryPx.toPrecision(4)} | uPnl: $${kpepe.unrealizedPnl.toFixed(0)}`,
+            `If price pumps, HLP forced to buy back = SQUEEZE risk`,
+            sideFlipped ? `FLIPPED from ${prevSide}!` : '',
+          ].filter(Boolean).join('\n');
+          sendDiscordAlert(msg).catch(() => {});
+          this.hlpAlertCooldowns.set(alertKey, now);
+          console.log(`[HLP_ALERT] kPEPE SHORT $${this.fmtK(kpepe.valueUsd)} — squeeze risk alert sent`);
+        }
+      }
+    }
+
+    // ── VIRTUAL HLP alerts ────────────────────────────────────
+    if (virtual && virtual.valueUsd >= HLP_ALERT_MIN_VALUE_VIRTUAL) {
+      const prevSide = this.prevHlpVirtual?.side ?? null;
+      const sideFlipped = prevSide && prevSide !== virtual.side;
+      const isNew = !this.prevHlpVirtual && virtual.valueUsd >= HLP_ALERT_MIN_VALUE_VIRTUAL;
+      const valueSurge = this.prevHlpVirtual && virtual.valueUsd > this.prevHlpVirtual.valueUsd * 1.5;
+
+      if (virtual.side === 'LONG') {
+        const alertKey = `hlp_virtual_long`;
+        if (this.shouldSendHlpAlert(alertKey, now) && (sideFlipped || isNew || valueSurge || this.hlpTickCount <= 2)) {
+          const msg = [
+            `[HLP] VIRTUAL: HLP is LONG $${this.fmtK(virtual.valueUsd)} (${this.fmtSzi(virtual.szi)} VIRTUAL)`,
+            `Entry: $${virtual.entryPx.toFixed(4)} | uPnl: $${virtual.unrealizedPnl.toFixed(0)}`,
+            `If price dumps, HLP forced to sell = CASCADE risk`,
+            sideFlipped ? `FLIPPED from ${prevSide}!` : '',
+          ].filter(Boolean).join('\n');
+          sendDiscordAlert(msg).catch(() => {});
+          this.hlpAlertCooldowns.set(alertKey, now);
+          console.log(`[HLP_ALERT] VIRTUAL LONG $${this.fmtK(virtual.valueUsd)} — cascade risk alert sent`);
+        }
+      } else {
+        const alertKey = `hlp_virtual_short`;
+        if (this.shouldSendHlpAlert(alertKey, now) && (sideFlipped || isNew || valueSurge || this.hlpTickCount <= 2)) {
+          const msg = [
+            `[HLP] VIRTUAL: HLP is SHORT $${this.fmtK(virtual.valueUsd)} (${this.fmtSzi(virtual.szi)} VIRTUAL)`,
+            `Entry: $${virtual.entryPx.toFixed(4)} | uPnl: $${virtual.unrealizedPnl.toFixed(0)}`,
+            `If price pumps, HLP forced to buy back = SQUEEZE risk`,
+            sideFlipped ? `FLIPPED from ${prevSide}!` : '',
+          ].filter(Boolean).join('\n');
+          sendDiscordAlert(msg).catch(() => {});
+          this.hlpAlertCooldowns.set(alertKey, now);
+          console.log(`[HLP_ALERT] VIRTUAL SHORT $${this.fmtK(virtual.valueUsd)} — squeeze risk alert sent`);
+        }
+      }
+    }
+  }
+
+  private shouldSendHlpAlert(key: string, now: number): boolean {
+    const last = this.hlpAlertCooldowns.get(key) ?? 0;
+    return now - last >= HLP_ALERT_COOLDOWN_MS;
+  }
+
+  private fmtK(val: number): string {
+    if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(2)}M`;
+    if (val >= 1_000) return `${(val / 1_000).toFixed(1)}K`;
+    return val.toFixed(0);
+  }
+
+  private fmtSzi(szi: number): string {
+    const abs = Math.abs(szi);
+    if (abs >= 1_000_000) return `${(abs / 1_000_000).toFixed(2)}M`;
+    if (abs >= 1_000) return `${(abs / 1_000).toFixed(1)}K`;
+    return abs.toFixed(2);
+  }
+
+  private fetchHlpState(): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('HLP fetch timeout')), 10_000);
+      const payload = JSON.stringify({ type: 'clearinghouseState', user: HLP_ADDRESS });
+
+      const req = https.request(HLP_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        res.on('end', () => {
+          clearTimeout(timeout);
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            reject(new Error(`HLP JSON parse error: ${body.slice(0, 100)}`));
+          }
+        });
+        res.on('error', (e: Error) => { clearTimeout(timeout); reject(e); });
+      });
+
+      req.on('error', (e: Error) => { clearTimeout(timeout); reject(e); });
+      req.write(payload);
+      req.end();
+    });
   }
 
   // ── Helpers ─────────────────────────────────────────────────

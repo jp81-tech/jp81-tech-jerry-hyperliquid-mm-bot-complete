@@ -3701,7 +3701,7 @@ class HyperliquidMMBot {
   private srBreakGraceStart: Map<string, number> = new Map()  // S/R break grace period: pair → timestamp when break first detected
   private srBounceHoldState: Map<string, { timestamp: number; srLevel: number; side: 'long' | 'short' }> = new Map()  // S/R Bounce Hold: track when S/R Accum built position
   private srPrevPhases: Map<string, Set<string>> = new Map()  // S/R Phase tracking: pair → active phases last tick
-  private static readonly SR_ALERT_COOLDOWN_MS = 15 * 60 * 1000  // 15 min per token per level type (first alert instant)
+  private static readonly SR_ALERT_COOLDOWN_MS = 60 * 60 * 1000  // 60 min per token per level type (first alert instant)
 
   // 🔄 ANTI-CHURN — cooldown after direction change to prevent whipsaw losses
   private lastDirectionChange: Map<string, { direction: string; timestamp: number }> = new Map()
@@ -9125,7 +9125,7 @@ class HyperliquidMMBot {
               title: `${srAlertData.emoji} ${pair} — ${srAlertData.type.replace(/_/g, ' ')}`,
               color: srAlertData.color,
               fields,
-              footer: { text: `S/R 1h (24h) | Cooldown 15min` },
+              footer: { text: `S/R 1h (24h) | Cooldown 60min` },
               timestamp: new Date().toISOString(),
             }).catch(() => {})
           }
@@ -10233,7 +10233,7 @@ class HyperliquidMMBot {
             title: `${srAlertData.emoji} ${pair} — ${srAlertData.type.replace(/_/g, ' ')}`,
             color: srAlertData.color,
             fields,
-            footer: { text: `S/R 1h (24h) | Cooldown 15min` },
+            footer: { text: `S/R 1h (24h) | Cooldown 60min` },
             timestamp: new Date().toISOString(),
           }).catch(() => {})
         }
