@@ -10331,3 +10331,128 @@ Weekly, Sunday 10:00 UTC — pasuje do istniejacego cyklu raportow (hourly, dail
 4. **State file TTL chroni przed dwoma skrajnosciami.** Bez dedup = spam. Bez TTL = missed signals. 30-dniowy TTL to sweet spot — daje miesiac ciszy na adres, potem re-discovery jesli nadal aktywny. Inspiracja z DNS TTL, HTTP cache headers, i certificate validity periods — **wszystko w IT ma swoj optymalny czas zycia.**
 
 5. **Reuse > rewrite.** 6 patternow skopiowanych z istniejacych skryptow — `fmtUsd`, Discord embeds, HL API fetch, dry-run flag, dotenv, KNOWN_ADDRESSES. Kazdy zaoszczedzil 15-30 minut kodowania i testowania. Na skali calego projektu, konsystentny reuse to roznica miedzy "skrypt gotowy w 2 godziny" a "skrypt gotowy w 2 dni".
+
+---
+
+## Rozdzial 55: Cztery Straze — Discord Alerts ktore Mowia Ci Co Wazne (10.03.2026)
+
+Wyobraz sobie ze prowadzisz samochod z oczami zamknietymi. Masz wskazniki — predkosc, obroty, temperature — ale zeby je zobaczyc, musisz zjechac na pobocze, otworzyc maske i odczytac je recznie. Absurd? Dokladnie tak dzialal nasz bot przed ta zmiana.
+
+Bot logowal kluczowe zdarzenia do PM2 logow. Zeby je zobaczyc, trzeba bylo:
+```bash
+ssh hl-mm 'pm2 logs mm-pure --lines 500' | grep "funding\|whale\|SM direction"
+```
+Nikt nie robi tego co 30 minut. W efekcie kluczowe sygnaly ginely w szumie — funding spike o 3 rano, whale wall ktory pojawil sie na 10 minut, SM flip ktory nastapil miedzy twoimi sprawdzeniami logow.
+
+### Rozwiazanie: 4 Discord Alerty
+
+Zamiast dodawac nowy serwis, nowy endpoint czy nowy dashboard — po prostu podlaczylismy 4 warunki do juz istniejacego `sendDiscordAlert()`. Zero nowych zaleznosci. Zero nowych plikow. 68 linii kodu w jednym pliku.
+
+#### 1. FUNDING ALERT (📈)
+
+```
+Trigger: |fundingRate| > 0.1%
+Cooldown: 60 min per pair
+```
+
+Funding rate to "oplata" ktora longs placa shortom (lub odwrotnie). Normalnie jest mikro (0.001-0.01%). Gdy przekracza 0.1%, rynek jest **ekstremalnie skrzywiony** — wielu traderow jest po jednej stronie i placa premie za utrzymanie pozycji. To czesto sygnalizuje przeladowanie pozycji i zbliajacy sie mean-reversion move.
+
+Analogia: To jak temperature silnika. Normalna = 90°C, 0.1% funding = 120°C. Nie musisz patrzec caly czas, ale chcesz alarm gdy robi sie goraco.
+
+#### 2. PROFIT GUARD (💰)
+
+```
+Trigger: unrealized PnL > +3% notional
+Cooldown: 30 min per pair
+```
+
+Bot trzyma pozycje po Diamond Hands. Ale czasem pozycja wchodzi w gleboki profit (+5%, +10%) i nikt nie wie, bo nikt nie patrzyl na logi. Profit Guard mowi: "Hej, ta pozycja zarabia. Moze warto rozwazyc czesiowe zamkniecie?"
+
+To NIE jest auto-close. To informacja. Decyzje podejmujesz Ty.
+
+Implementacja jest prosta ale warto zwrocic uwage na obliczenie `pnlPct`:
+```typescript
+const posNotional = Math.abs(position.size) * midPrice  // biezaca wartosc pozycji
+const pnlPct = (unrealizedPnlForAlert / posNotional) * 100
+```
+Uzywa `midPrice` (aktualna cena) a nie `entryPrice`, bo chcemy wiedziec procent **biezacej ekspozycji**, nie procent od entry.
+
+#### 3. SM FLIP (🔄)
+
+```
+Trigger: Smart Money direction zmienia sie (np. SHORT → LONG)
+Cooldown: brak (to zdarza sie raz na kilka godzin/dni)
+```
+
+Najprostsza implementacja, a zarazem najwazniejszy alert. Caly nasz system podaza za Smart Money — gdy SM flipuja z SHORT na LONG, to jest moment w ktorym **cala strategia sie odwraca**.
+
+Drobny szczegol implementacyjny ktory warto zauwazyc:
+```typescript
+const prevDir = this.prevSmDirection.get(pair) ?? null
+const curDir = smDir ?? null
+if (prevDir !== null && curDir !== null && prevDir !== curDir) {
+  sendDiscordAlert(...)
+}
+```
+Dlaczego `?? null` i podwojny null check? Bo nie chcemy alertowac na:
+- **null → SHORT** (pierwsza inicjalizacja, nie flip)
+- **SHORT → null** (brak danych, nie flip)
+- Tylko **SHORT → LONG** lub **LONG → SHORT** (prawdziwy flip)
+
+To jest pattern "state machine with null initial state" — czesto uzywany w systemach real-time.
+
+#### 4. WHALE WALL (🐳)
+
+```
+Trigger: Order book wall > $100K w 1.5% od mid price
+Cooldown: 30 min per pair per side (BID/ASK osobno)
+```
+
+Najciekawsza implementacja. Bot ma juz `l2BookCache` — cache orderbooka aktualizowany co tick. Skanujemy top 10 levelow po kazdej stronie:
+
+```typescript
+for (let i = 0; i < Math.min(10, levels.length); i++) {
+  const px = Number(levels[i][0])   // cena
+  const sz = Number(levels[i][1])   // wielkosc
+  const val = sz * px               // wartosc w USD
+  const dist = Math.abs(px - midPrice) / midPrice  // odleglosc od mid
+  if (val > 100_000 && dist < 0.015) {
+    // ALERT!
+    break  // tylko pierwszy wall per side
+  }
+}
+```
+
+Dwa filtry:
+- **$100K minimum** — filtruje retail ordery. Sciany ponizej $100K to szum.
+- **1.5% od mid** — filtruje daleki liquidity. Sciana $500K 10% od ceny nas nie obchodzi.
+
+`break` po pierwszym wallu per side zapobiega spamowi gdy jest wiele duzych ordow blisko siebie.
+
+Cooldown jest per `pair:side` (np. `whale_wall:kPEPE:BID` i `whale_wall:kPEPE:ASK` to osobne cooldowny). Bo sciana na bidach i sciana na askach to rozne informacje — bid wall = wsparcie (ktos broni ceny), ask wall = opor (ktos chce sprzedac duzo).
+
+### Architektura — dlaczego tak a nie inaczej
+
+**Podejscie 1 (odrzucone):** Nowy serwis `DiscordAlertService` z wlasnym polling loop.
+- Problem: kolejna rzecz do zarzadzania w PM2, wiecej kodu, wiecej bugow
+- Bot juz ma wszystkie dane w main loop — funding, PnL, SM direction, orderbook
+
+**Podejscie 2 (wybrane):** Inline w `mm_hl.ts`, cooldowny w Map.
+- Zero nowych plikow, zero nowych procesow
+- Kazdy alert to ~10 linii kodu w miejscu gdzie dane sa juz dostepne
+- Cooldowny w `Map<string, number>` — ten sam pattern co `srAlertCooldowns`
+
+**Podejscie 3 (odrzucone):** Event emitter pattern (`bot.on('fundingSpike', handler)`).
+- Overengineering dla 4 alertow. Gdybysmy mieli 20+ alertow, warto by bylo. Dla 4? KISS wins.
+
+### Lekcje
+
+1. **Cooldown key design matters.** `funding:${pair}` vs `whale_wall:${pair}:${sideName}` — rozna granularnosc dla roznych alertow. Funding rate dotyczy calego pairow. Whale wall dotyczy jednej strony orderbooka. Zly klucz = albo za duzo spamu, albo za malo alertow. Zawsze pytaj: "co jest niezaleznym zdarzeniem?"
+
+2. **Alerts powinny informowac, nie decydowac.** Zaden z 4 alertow nie zmienia zachowania bota. Nie modyfikuja bidow, nie zamykaja pozycji. Mowia Ci co sie dzieje. Ty decydujesz. To fundamentalna roznica miedzy **monitoring** a **automation** — jedno jest bezpieczne, drugie wymaga perfekcji.
+
+3. **`.catch(() => {})` na kazdym `sendDiscordAlert()`.** Discord webhook moze failowac (rate limit, network glitch). Bez `.catch()` unhandled promise rejection mogloby crashnac main loop bota. Ten jednolinijkowy pattern — fire-and-forget z cichym failem — jest standardem dla side-effect notifications.
+
+4. **Nie buduj dashboardu gdy wystarczy push notification.** Discord alert dociera do Ciebie sam — na telefon, na desktop, o kazdej porze. Dashboard wymaga zeby Ty do niego przyszedl. Dla krytycznych eventow (SM flip, whale wall) push > pull. Dla analytics (wykresy PnL, historia fills) — dashboard wygrywa.
+
+5. **`sed` na produkcji jest jak operacja na otwartym sercu.** 5 edycji `sed -i` na pliku z 12,447 liniami, na produkcyjnym serwerze, bez type-checkera (transpile-only). Zadzialalo, ale kazdy edit mogl zepsuc caly bot. Backup (`cp mm_hl.ts mm_hl.ts.bak`) to absolutne minimum. Lepsze podejscie: edit lokalnie → push → pull na serwerze. Ale gdy serwer nie ma push access do GitHub (jak w naszym przypadku — SSH key `jaroslawpostument-sys` bez dostepu), trzeba byc kreatywnym: `git format-patch` na serwerze → `git am` lokalnie → push z lokala.

@@ -53,6 +53,31 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 10 marca 2026
 
+### 123. Discord Alerts — 4 nowe alerty real-time (10.03)
+
+**Problem:** Bot logował kluczowe eventy (funding spikes, profit targets, SM direction flips, whale walls) tylko do PM2 logów. Żadne z nich nie generowało Discord notyfikacji — trzeba było SSH + grep żeby sprawdzić co się dzieje.
+
+**Rozwiązanie:** 4 nowe Discord alerty w `src/mm_hl.ts`, reużywające istniejący `sendDiscordAlert()` z throttlingiem:
+
+| Alert | Emoji | Trigger | Cooldown | Lokalizacja |
+|-------|-------|---------|----------|-------------|
+| **FUNDING** | 📈 | `\|fundingRate\| > 0.1%` | 60 min/pair | Po `fundingRate = Number(...)` |
+| **PROFIT GUARD** | 💰 | `uPnL > +3%` | 30 min/pair | Po `unrealizedPnlForAlert` |
+| **SM FLIP** | 🔄 | SM direction change | brak (rare) | Po anti-churn guard |
+| **WHALE WALL** | 🐳 | `>$100K wall w 1.5% od mid` | 30 min/pair/side | Po OBI modulator |
+
+**Nowe class properties:**
+```typescript
+private discordAlertCooldowns: Map<string, number> = new Map()
+private prevSmDirection: Map<string, string | null> = new Map()
+```
+
+**Whale Wall implementation:** Czyta `l2BookCache` (top 10 levels bid+ask), sprawdza `sz * px > $100K` i `dist < 1.5%` od midPrice. Break po pierwszym wallu per side (nie spamuje gdy jest wiele leveli).
+
+**SM Flip implementation:** Porównuje `prevSmDirection` z aktualnym `smDir`. Alert tylko gdy oba non-null i różne (nie alertuje na null→SHORT, tylko na SHORT→LONG).
+
+**Pliki:** `src/mm_hl.ts` (+68 LOC, 5 edits)
+
 ### 122. Whale Discovery Script — automated scan for new large positions (10.03)
 
 **Problem:** Nowe wieloryby na kPEPE/VIRTUAL były odkrywane ad-hoc (ręczne sprawdzanie Nansen leaderboardów). whale_tracker.py trackuje ~53 adresów ręcznie kurowanych przez miesiące — brak automatyzacji discovery nowych dużych pozycji.
