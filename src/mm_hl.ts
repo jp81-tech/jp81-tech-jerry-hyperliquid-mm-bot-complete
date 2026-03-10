@@ -3703,6 +3703,8 @@ class HyperliquidMMBot {
   private srPrevPhases: Map<string, Set<string>> = new Map()  // S/R Phase tracking: pair → active phases last tick
   private static readonly SR_ALERT_COOLDOWN_MS = 60 * 60 * 1000  // 60 min per token per level type (first alert instant)
 
+  private discordAlertCooldowns: Map<string, number> = new Map()
+  private prevSmDirection: Map<string, string | null> = new Map()
   // 🔄 ANTI-CHURN — cooldown after direction change to prevent whipsaw losses
   private lastDirectionChange: Map<string, { direction: string; timestamp: number }> = new Map()
   private static readonly DIRECTION_CHANGE_COOLDOWN_MS = 30 * 60 * 1000  // 30 minutes
@@ -4929,6 +4931,18 @@ class HyperliquidMMBot {
         midPxForPair = Number(pairData?.midPx || 0);
       } catch (e) {
         // ignore fetch error
+      }
+
+      // === FUNDING RATE DISCORD ALERT ===
+      if (Math.abs(fundingRate) > 0.001) {
+        const coolKey = `funding:${pair}`
+        const lastSent = this.discordAlertCooldowns.get(coolKey) || 0
+        if (Date.now() - lastSent > 60 * 60 * 1000) {
+          this.discordAlertCooldowns.set(coolKey, Date.now())
+          const pct = (fundingRate * 100).toFixed(4)
+          const direction = fundingRate > 0 ? 'LONG pays SHORT' : 'SHORT pays LONG'
+          sendDiscordAlert(`📈 [FUNDING] ${pair}: ${pct}% (${direction}) — extreme funding rate`).catch(() => {})
+        }
       }
 
       // SmartRotationEngine expects its own NansenBias type; map our legacy bias values.
@@ -6833,6 +6847,21 @@ class HyperliquidMMBot {
           : (entryPriceForAlert - midPrice) * positionSizeForAlert)
       : 0
 
+
+    // === PROFIT GUARD DISCORD ALERT (+3% uPnL) ===
+    if (position && entryPriceForAlert > 0) {
+      const posNotional = Math.abs(position.size) * midPrice
+      const pnlPct = posNotional > 0 ? (unrealizedPnlForAlert / posNotional) * 100 : 0
+      if (pnlPct > 3.0) {
+        const coolKey = `profit_guard:${pair}`
+        const lastSent = this.discordAlertCooldowns.get(coolKey) || 0
+        if (Date.now() - lastSent > 30 * 60 * 1000) {
+          this.discordAlertCooldowns.set(coolKey, Date.now())
+          const side = position.size > 0 ? 'LONG' : 'SHORT'
+          sendDiscordAlert(`💰 [PROFIT GUARD] ${pair}: ${side} +${pnlPct.toFixed(1)}% ($${unrealizedPnlForAlert.toFixed(2)}) — position in deep profit`).catch(() => {})
+        }
+      }
+    }
     // Determine current mode based on SM direction and position alignment
     const currentMode: 'MM' | 'FOLLOW_SM' | 'HOLD_FOR_TP' =
       shouldHoldForTp(symbol, positionSideForAlert)
@@ -7768,6 +7797,18 @@ class HyperliquidMMBot {
         }
       }
       // If direction unchanged, do nothing (keep existing timestamp)
+    }
+
+    // === SM DIRECTION FLIP DISCORD ALERT ===
+    {
+      const prevDir = this.prevSmDirection.get(pair) ?? null
+      const curDir = smDir ?? null
+      if (prevDir !== null && curDir !== null && prevDir !== curDir) {
+        sendDiscordAlert(`🔄 [SM FLIP] ${pair}: ${prevDir} → ${curDir}`).catch(() => {})
+      }
+      if (curDir !== null) {
+        this.prevSmDirection.set(pair, curDir)
+      }
     }
 
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
@@ -8712,6 +8753,33 @@ class HyperliquidMMBot {
               )
             }
           }
+          // === WHALE WALL DISCORD ALERT (>$100K within 1.5%) ===
+          if (this.trading instanceof LiveTrading) {
+            const ltWall = this.trading as LiveTrading
+            const bookWall = ltWall.l2BookCache.get(pair)
+            if (bookWall?.levels) {
+              const wallAsks = bookWall.levels[0] || []
+              const wallBids = bookWall.levels[1] || []
+              for (const [levels, sideName] of [[wallBids, 'BID'], [wallAsks, 'ASK']] as const) {
+                for (let i = 0; i < Math.min(10, levels.length); i++) {
+                  const px = Number(levels[i][0])
+                  const sz = Number(levels[i][1])
+                  const val = sz * px
+                  const dist = Math.abs(px - midPrice) / midPrice
+                  if (val > 100_000 && dist < 0.015) {
+                    const coolKey = `whale_wall:${pair}:${sideName}`
+                    const lastSent = this.discordAlertCooldowns.get(coolKey) || 0
+                    if (Date.now() - lastSent > 30 * 60 * 1000) {
+                      this.discordAlertCooldowns.set(coolKey, Date.now())
+                      sendDiscordAlert(`🐳 [WHALE WALL] ${pair}: ${sideName} wall $${(val/1000).toFixed(0)}K @ $${px.toPrecision(6)} (${(dist*100).toFixed(2)}% from mid)`).catch(() => {})
+                    }
+                    break
+                  }
+                }
+              }
+            }
+          }
+
 
           // === 📉 S/R PROGRESSIVE REDUCTION (Take Profit at S/R) ===
           // When approaching S/R with a profitable position → progressively close
