@@ -2,6 +2,10 @@ import https from "https"
 import { URL } from "url"
 
 const discordWebhook = process.env.DISCORD_WEBHOOK_URL || ""
+const discordWebhooks = [
+  discordWebhook,
+  process.env.DISCORD_WEBHOOK_URL_2 || "",
+].filter(u => u.length > 0)
 
 function postJson(webhookUrl: string, body: unknown): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -43,15 +47,15 @@ function postJson(webhookUrl: string, body: unknown): Promise<void> {
 }
 
 export async function sendDiscordMessage(content: string): Promise<void> {
-  if (!discordWebhook) {
+  if (discordWebhooks.length === 0) {
     console.warn(`[discord_notifier] No DISCORD_WEBHOOK_URL configured`)
     return
   }
-  try {
-    await postJson(discordWebhook, { content })
-  } catch (e) {
-    console.error(`[discord_notifier] Failed to send:`, e)
-  }
+  await Promise.allSettled(
+    discordWebhooks.map(url => postJson(url, { content }).catch(e =>
+      console.error(`[discord_notifier] Failed to send to ${url.slice(-20)}:`, e)
+    ))
+  )
 }
 
 export async function sendDiscordEmbed(embed: {
@@ -62,13 +66,13 @@ export async function sendDiscordEmbed(embed: {
   footer?: { text: string }
   timestamp?: string
 }): Promise<void> {
-  if (!discordWebhook) {
+  if (discordWebhooks.length === 0) {
     console.warn(`[discord_notifier] No DISCORD_WEBHOOK_URL configured`)
     return
   }
-  try {
-    await postJson(discordWebhook, { embeds: [embed] })
-  } catch (e) {
-    console.error(`[discord_notifier] Failed to send embed:`, e)
-  }
+  await Promise.allSettled(
+    discordWebhooks.map(url => postJson(url, { embeds: [embed] }).catch(e =>
+      console.error(`[discord_notifier] Failed to send embed to ${url.slice(-20)}:`, e)
+    ))
+  )
 }
