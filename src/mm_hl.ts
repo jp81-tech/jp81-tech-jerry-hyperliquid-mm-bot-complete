@@ -9206,7 +9206,18 @@ class HyperliquidMMBot {
               const slThresholdPct = momGuardConfig.slAtrMultiplier * atrPct
 
               if (drawdownPct > 0 && drawdownPct > slThresholdPct) {
-                if (hasShortPos) {
+                // 💎 HOLD_FOR_TP BYPASS: when SM confirms our direction, don't panic close
+                const holdForTpActive = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, hasShortPos ? 'short' : 'long')
+                if (holdForTpActive && drawdownPct < 12) {
+                  // SM says hold — suppress panic up to 12% drawdown (hard SL)
+                  if (this.tickCount % 20 === 0) {
+                    console.log(
+                      `💎 [INVENTORY_SL_BYPASS] ${pair}: HOLD_FOR_TP suppresses panic — ` +
+                      `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                      `but SM confirms ${hasShortPos ? 'SHORT' : 'LONG'} → Diamond Hands (hard SL at 12%)`
+                    )
+                  }
+                } else if (hasShortPos) {
                   // SHORT underwater → block asks (stop adding), aggressive bids (close)
                   sizeMultipliers.ask = 0
                   sizeMultipliers.bid *= momGuardConfig.panicClosingMult
@@ -10272,7 +10283,16 @@ class HyperliquidMMBot {
             const slThresholdPct = momGuardConfig.slAtrMultiplier * atrPct
 
             if (drawdownPct > 0 && drawdownPct > slThresholdPct) {
-              if (hasShortPos) {
+              // 💎 HOLD_FOR_TP BYPASS: when SM confirms our direction, don't panic close
+              const holdForTpActiveV = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, hasShortPos ? 'short' : 'long')
+              if (holdForTpActiveV && drawdownPct < 12) {
+                if (this.tickCount % 20 === 0) {
+                  console.log(
+                    `💎 [INVENTORY_SL_BYPASS] ${pair}: HOLD_FOR_TP suppresses panic — ` +
+                    `drawdown=${drawdownPct.toFixed(1)}% > ${slThresholdPct.toFixed(1)}% (${momGuardConfig.slAtrMultiplier}×ATR) ` +
+                    `but SM confirms ${hasShortPos ? 'SHORT' : 'LONG'} → Diamond Hands (hard SL at 12%)`)
+                }
+              } else if (hasShortPos) {
                 sizeMultipliers.ask = 0
                 sizeMultipliers.bid *= momGuardConfig.panicClosingMult
                 inventorySlPanic = true

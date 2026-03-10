@@ -374,6 +374,8 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
   'kPEPE': {
     pumpThresholdPct: 3.0,       // Memecoin: wider pump threshold (higher normal vol)
     atrThresholdMult: 2.0,       // 2× ATR for pump/dump detection
+    slAtrMultiplier: 5.0,        // 5× ATR (~6% drawdown) — Diamond Hands: SM is SHORT, don't panic on pumps
+    maxSkewSlThreshold: 0.60,    // 60% skew threshold (was 40%) — wider tolerance when HOLD_FOR_TP active
     moderateThreshold: 0.28,     // Lower than default 0.4 — proximity signal alone can trigger MODERATE
                                  // At support (prox=-0.80): score=-0.29 → MODERATE → bid×1.15 ask×0.40
                                  // Default 0.4 required momentum+RSI help → stuck in LIGHT at support
