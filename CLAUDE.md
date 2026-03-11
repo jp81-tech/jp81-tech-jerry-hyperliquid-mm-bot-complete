@@ -53,6 +53,21 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 11 marca 2026
 
+### 126. Fix Nansen dex-trades spot 422 — remove value_usd filter (11.03)
+
+**Problem:** Po fixie #124, `/tgm/dex-trades` spot branch nadal wysyłał `filters: { value_usd: { min: minUsd } }` — pole usunięte przez Nansen. mm-virtual logował 422 co ~10 min (`Field 'value_usd' is not recognized`).
+
+**Fix w `src/integrations/nansen_pro.ts`:**
+
+| Ścieżka | Linia | Zmiana |
+|---------|-------|--------|
+| Primary spot payload | ~1163 | Usunięto `filters: { value_usd: ... }` |
+| Fallback spot payload | ~1414 | Usunięto `filters: { value_usd: ... }` |
+
+**Uwaga:** Fix #124 naprawił perps branch i inne endpointy, ale pominął spot branch `dex-trades` — ten sam pattern `value_usd` w dwóch miejscach.
+
+**Pliki:** `src/integrations/nansen_pro.ts` (+1 / -2 LOC)
+
 ### 125. Oracle allMids Cache — eliminate 429 rate limiting (11.03)
 
 **Problem:** Oracle's `fetchCurrentPrice()` wywoływał `allMids` API **per coin** (13 razy na cykl), a `checkPredictionAccuracy()` wywoływał to samo per wygasłą predykcję. Dwa boty (`mm-pure` + `mm-virtual`) razem generowały 24-40+ zbędnych API callów/min. Efekt kaskadowy: 429 blokował nie tylko Oracle ale też order placement i position queries w mainLoop.

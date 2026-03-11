@@ -47,6 +47,7 @@
 39. [VIRTUAL S/R Pipeline — Daj drugiemu botowi oczy](#virtual-sr-pipeline--daj-drugiemu-botowi-oczy)
 40. [HLP Vault Tracking — Sledzenie Wieloryba Gieldy](#hlp-vault-tracking--sledzenie-wieloryba-gieldy)
 41. [Oracle allMids Cache — Jeden telefon zamiast trzynastu](#oracle-allmids-cache--jeden-telefon-zamiast-trzynastu)
+42. [Dex-Trades 422 — Niedokonczona robota](#dex-trades-422--niedokonczona-robota)
 
 ---
 
@@ -10610,3 +10611,54 @@ To wazne: jesli siec chwilowo padnie, bot nadal ma ostatnie znane ceny. Nie idea
 4. **Kaskada bledow (error cascade) to najgorszy typ bugu.** Oracle 429 → order placement 429 → position query 429 → bot nie tradeuje → tracisz pieniadze. Jeden komponent zjadajacy rate limit psuje WSZYSTKIE inne komponenty. Dlatego rate limit powinien byc budzetem wspoldzielonym, nie per-component free-for-all.
 
 5. **Publiczne API zachowuj nawet przy wewnetrznym refactorze.** `fetchCurrentPrice()` moze byc uzywane gdzie indziej w kodzie. Zamiast usuwac je i laczyc wszedzie, zamienilismy je w thin wrapper nad `fetchAllMids()`. Zewnetrzny interface bez zmian, wewnetrzna implementacja radykalnie lepsza. To klasyczny Facade pattern.
+
+---
+
+## Rozdzial 58: Dex-Trades 422 — Niedokonczona Robota (11.03.2026)
+
+### Problem: Fix #124 naprawil 7 rzeczy, ale zapominal o osmej
+
+Pamietasz rozdzial 56? Naprawilismy 7 endpointow Nansena ktore zwracaly 422. Swietna robota. Poszlismy spac z poczuciem spelnienia.
+
+Nastepnego dnia w logach mm-virtual:
+```
+[Nansen Pro] /tgm/dex-trades skipped (status=422)
+body={"error":"Unknown field","message":"Field 'value_usd' is not recognized"}
+```
+
+Ups. Endpoint `/tgm/dex-trades` mial **dwie sciezki**: perps i spot. Fix #124 naprawil perps branch (usuniety `valueUsd`), ale spot branch nadal wysylal `filters: { value_usd: { min: minUsd } }`. I co gorsza — ten sam blad byl w **dwoch miejscach**: primary payload (linia ~1163) i fallback payload (linia ~1414).
+
+### Dlaczego to przegapilismy?
+
+```typescript
+if (mode === 'perps') {
+  // ✅ FIX 2026-03-11: Removed valueUsd filter
+  payload = { /* ... naprawiony ... */ }
+} else {
+  // ❌ Standard Spot TGM — nadal ma value_usd!
+  payload = {
+    filters: { value_usd: { min: minUsd } },  // BOOM → 422
+    // ...
+  }
+}
+```
+
+Klasyczny blad if/else — naprawiles jedna galaz, zapominajac o drugiej. Jeszcze gorsze: fallback path (linia 1414) to osobna metoda ktora robi to samo zapytanie inaczej sformatowane. Zeby znalezc wszystkie wystapienia, trzeba bylo `grep -n "value_usd"` na calym pliku.
+
+### Fix
+
+Dwie linie do usuniecia:
+```diff
+- filters: { value_usd: { min: minUsd } },   // primary (linia ~1163)
+- filters: { value_usd: { min: minUsd } },   // fallback (linia ~1414)
+```
+
+### Lekcje
+
+1. **Gdy naprawiasz pole API, `grep` po calym pliku.** Fix #124 naprawil `valueUsd` (camelCase) w perps, ale `value_usd` (snake_case) w spot to inna zmienna. Nansen usunal OBA — ale my szukalismy tylko jednego. Zawsze: `grep -n "nazwa_pola" plik.ts` zanim uznasz ze "gotowe".
+
+2. **if/else to pulapka na czesciowe fixy.** Gdy naprawiasz blad w jednej galezi warunku, pytanie "czy ta sama logika jest w else?" powinno byc automatyczne. Jeszcze lepiej: wyciagnij wspolna czesc do zmiennej/funkcji, wtedy naprawiasz w jednym miejscu.
+
+3. **Fallback paths to ciemna strona kodu.** Primary path jest oczywisty, testujesz go, naprawiasz. Fallback path (`catch → retry with different format`) jest ukryty, rzadko sie odpala, i latwiej go przegapic. A gdy sie odpali — ma ten sam bug. Traktuj fallbacki jak rownoprawny kod, nie jak "plan B ktory pewnie nigdy nie ruszy".
+
+4. **"Gotowe" to nie "commitnalem".** "Gotowe" to "sprawdzilem logi po restarcie i zero bledow 4xx". Fix #124 byl "commitniety i pushowany" ale nie byl "gotowy" — bo nikt nie zgrepowal logow na 422 po restarcie. Weryfikacja jest czescia fixa, nie opcjonalnym dodatkiem.
