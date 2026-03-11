@@ -250,8 +250,8 @@ export const NANSEN_TOKENS: Record<string, { chain: string; address: string; spr
     spreadCaps: { min: 0.9, max: 1.5 },
     tuning: {
       enabled: true,
-      baseSpreadBps: 25,       // 0.25% base — wider to survive grid re-centering (kPEPE moves 20-30bps/min)
-      minSpreadBps: 12,        // 0.12% floor — prevents adverse selection on L1
+      baseSpreadBps: 10,       // 0.10% base — tight kPEPE book (market spread ~3bps)
+      minSpreadBps: 5,         // 0.05% floor — allow tight quoting near mid
       maxSpreadBps: 60,        // 0.60% cap — allows L4 sweep layer
       smFlowSpreadMult: 1.0,   // No SM adjustment (PURE_MM)
       smPositionSpreadMult: 1.0,

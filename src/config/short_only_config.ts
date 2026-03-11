@@ -501,12 +501,12 @@ export const DYNAMIC_SPREAD_DEFAULTS: DynamicSpreadConfig = {
 
 export const DYNAMIC_SPREAD_OVERRIDES: Record<string, Partial<DynamicSpreadConfig>> = {
   'kPEPE': {
-    // Memecoin with 5-10% hourly swings needs WIDER spread in high vol
-    // to avoid adverse selection (filling on every micro-move)
-    lowVolL1Bps: 22,              // kPEPE even in low vol = wider than majors
-    highVolL1Bps: 32,             // In high vol WIDEN (not tighten!) for memecoins
+    // kPEPE: tight quoting to land in top 5 book levels
+    // Onchain cancel prio (GTC) reduces stale order risk
+    lowVolL1Bps: 8,               // Low vol: tight spread to get fills (market spread ~3bps)
+    highVolL1Bps: 14,             // High vol: widen slightly but stay in top 5 book levels
     highVolAtrPctThreshold: 1.20, // kPEPE "high vol" threshold is higher (normally more volatile)
-    minProfitBps: 20,             // 20bps min profit — reduce micro-scalping, ensure each fill covers accumulation fees
+    minProfitBps: 10,             // 10bps min profit (covers 3.5bps round-trip fee + safety)
   },
 }
 

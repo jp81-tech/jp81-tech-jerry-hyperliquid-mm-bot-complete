@@ -325,7 +325,7 @@ const INSTITUTIONAL_SIZE_CONFIG: Record<string, InstitutionalSizeConfig> = {
 // FIX 26.02: Dynamic Spread — ATR-based L1 scaling to prevent fee-eating in choppy markets.
 // ─────────────────────────────────────────────────────────────────────────────
 const KPEPE_GRID_LAYERS_DEFAULT: GridLayer[] = [
-  { level: 1, offsetBps: 18, capitalPct: 5, ordersPerSide: 3, isActive: true },   // Core — smallest (noise)
+  { level: 1, offsetBps: 8, capitalPct: 5, ordersPerSide: 3, isActive: true },   // Core — smallest (noise)
   { level: 2, offsetBps: 30, capitalPct: 10, ordersPerSide: 3, isActive: true },  // Buffer
   { level: 3, offsetBps: 45, capitalPct: 20, ordersPerSide: 3, isActive: true },  // Wide
   { level: 4, offsetBps: 65, capitalPct: 30, ordersPerSide: 3, isActive: true },  // Sweep — big
