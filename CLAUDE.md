@@ -53,6 +53,28 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 11 marca 2026
 
+### 125. Oracle allMids Cache — eliminate 429 rate limiting (11.03)
+
+**Problem:** Oracle's `fetchCurrentPrice()` wywoływał `allMids` API **per coin** (13 razy na cykl), a `checkPredictionAccuracy()` wywoływał to samo per wygasłą predykcję. Dwa boty (`mm-pure` + `mm-virtual`) razem generowały 24-40+ zbędnych API callów/min. Efekt kaskadowy: 429 blokował nie tylko Oracle ale też order placement i position queries w mainLoop.
+
+**Fix w `src/oracle/prediction-engine.ts`:**
+
+| Zmiana | Co | Efekt |
+|--------|----|-------|
+| `allMidsCache` + `allMidsCacheTime` | 3 nowe class properties z TTL 5s | Cache współdzielony między coinami |
+| `fetchAllMids()` | Nowa prywatna metoda z cache | 1 HTTP call per 5s zamiast 13+ |
+| `fetchCurrentPrice()` | Thin wrapper nad `fetchAllMids()` | Publiczne API zachowane |
+| `checkPredictionAccuracy()` | Pre-fetch mids przed loop | Jawny batch zamiast implicit cache |
+
+**Redukcja API callów:**
+- Przed: **13 + N** `allMids` callów per Oracle cycle (60s) × 2 boty
+- Po: **1** call per 5s = max 12/min × 2 boty
+- Oszczędność: ~24-40 fewer calls/min
+
+**Cache strategy:** TTL 5s oznacza że w jednym Oracle cycle (~8-20s) fetchuje max 2-4 razy zamiast 13+. Na error zwraca stale cache zamiast null (graceful degradation).
+
+**Pliki:** `src/oracle/prediction-engine.ts` (+20 / -8 LOC)
+
 ### 124. Fix Nansen Pro API 422 Errors — 6268 daily errors eliminated (11.03)
 
 **Problem:** Nansen zmienił nazwy pól w API. `nansen_pro.ts` wysyłał payloady ze starymi nazwami pól, powodując **6,268 błędów 422 dziennie** (2,389 mm-virtual + 3,879 mm-pure). Efekt: `getTgmPerpPositions()` zawsze zwracał `[]`, whale tracker polegał tylko na snapshot danych z `whale_tracker.py`.

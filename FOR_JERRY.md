@@ -46,6 +46,7 @@
 38. [S/R Pipeline — Zestawienie faz w zaleznosci od progresu](#sr-pipeline--zestawienie-faz-w-zaleznosci-od-progresu)
 39. [VIRTUAL S/R Pipeline — Daj drugiemu botowi oczy](#virtual-sr-pipeline--daj-drugiemu-botowi-oczy)
 40. [HLP Vault Tracking — Sledzenie Wieloryba Gieldy](#hlp-vault-tracking--sledzenie-wieloryba-gieldy)
+41. [Oracle allMids Cache — Jeden telefon zamiast trzynastu](#oracle-allmids-cache--jeden-telefon-zamiast-trzynastu)
 
 ---
 
@@ -10515,3 +10516,97 @@ To jest bezpieczniejsze niz `sed` bo: widzisz dokladnie co zastapisz (wielolinio
 4. **API contract drift jest nieunikniony.** Zewnetrzne API zmieniaja sie bez ostrzezenia. Nansen nie wyslal maila "zmienilismy nazwy pol". Jedyna obrona: monitoruj bledy 4xx per endpoint i reaguj gdy rosna. Nasz bot mial 6268 bledow dziennie i nikt nie zauwazyl.
 
 5. **`TS_NODE_TRANSPILE_ONLY=1` oznacza "type errors nie istnieja w runtime".** Bot uzywa ts-node z transpile-only — TypeScript kompiluje sie do JS bez sprawdzania typow. To dlatego pre-existing type errors (np. `holders_fallback` not assignable) nie crashowaly bota. Szybsze starty, ale zero type safety w produkcji.
+
+---
+
+## Rozdzial 57: Oracle allMids Cache — Jeden Telefon Zamiast Trzynastu (11.03.2026)
+
+### Problem: Bot dzwonil 13 razy zeby zapytac o to samo
+
+Wyobraz sobie, ze pracujesz na gieldzie. Masz jednego kumpla (Hyperliquid API) ktory zna ceny WSZYSTKICH coinow. Ale zamiast zapytac go raz "hej, jakie sa ceny?", dzwonisz do niego 13 razy pod rzad:
+
+```
+"Ile kosztuje kPEPE?"    → API odpowiada cenami WSZYSTKICH coinow
+"Ile kosztuje VIRTUAL?"  → API odpowiada cenami WSZYSTKICH coinow (te same!)
+"Ile kosztuje HYPE?"     → API odpowiada cenami WSZYSTKICH coinow (te same!)
+... x13 razy
+```
+
+Kazdy call do `allMids` zwraca ceny **wszystkich** coinow — ale nasz Oracle pytal o kazdy coin osobno. 13 identycznych HTTP requestow, 13 identycznych odpowiedzi. Co 60 sekund. Na dwoch botach.
+
+### Efekt kaskadowy: 429 Too Many Requests
+
+Hyperliquid ma rate limit. Gdy Oracle zjadal 26+ requestow/minute (13 × 2 boty) samymi cenami, brakowalo "budżetu" na wazniejsze rzeczy:
+
+```
+Oracle: 13 × allMids        → 429! 🚫
+mainLoop: place orders       → 429! 🚫 (nie moze zlozyc zlecen!)
+mainLoop: get positions      → 429! 🚫 (nie wie jakie ma pozycje!)
+mainLoop: cancel old orders  → 429! 🚫
+```
+
+To jak DDOSowanie samego siebie. Oracle, ktory mial pomagac predykcjami, faktycznie **blokowal botowi mozliwosc tradowania**.
+
+### Rozwiazanie: Cache z 5-sekundowym TTL
+
+Prosta idea: zapytaj raz, zapamietaj na 5 sekund.
+
+```typescript
+private async fetchAllMids(): Promise<Record<string, string>> {
+  const now = Date.now()
+  // Mamy swieze dane? Uzyj cache!
+  if (this.allMidsCache && now - this.allMidsCacheTime < 5000) {
+    return this.allMidsCache  // zero HTTP, instant
+  }
+  // Nie mamy? Pobierz i zapamietaj
+  const response = await axios.post(HL_API_URL, { type: 'allMids' })
+  this.allMidsCache = response.data
+  this.allMidsCacheTime = now
+  return this.allMidsCache
+}
+```
+
+Teraz `fetchCurrentPrice('kPEPE')` wywoluje `fetchAllMids()` — ktora robi HTTP tylko jesli cache starszy niz 5s. Nastepne 12 callów w tym samym cyklu dostaje odpowiedz natychmiast z pamieci.
+
+Bonus: w `checkPredictionAccuracy()` tez byl loop wywolujacy `fetchCurrentPrice()` per wygasla predykcje. Dodalismy jawny pre-fetch:
+
+```typescript
+const mids = await this.fetchAllMids()  // 1 call
+for (const prediction of expired) {
+  const actualPrice = mids[prediction.coin] ? parseFloat(mids[prediction.coin]) : null
+  // ... zero dodatkowych HTTP callów
+}
+```
+
+### Liczby
+
+| Metryka | Przed | Po |
+|---------|-------|----|
+| allMids calls per Oracle cycle | 13 + N | 1 |
+| allMids calls per minute (2 boty) | ~26-40+ | ~4-8 |
+| Oracle cycle time | ~8-20s (13 round-trips) | ~3-10s (1 round-trip) |
+| 429 errors od Oracle | czeste | zero |
+
+### Graceful degradation
+
+Gdy `fetchAllMids()` dostanie blad sieciowy, zwraca **stale dane z cache** zamiast `null`:
+
+```typescript
+catch (error) {
+  return this.allMidsCache || {}  // lepsze stare ceny niz zadne ceny
+}
+```
+
+To wazne: jesli siec chwilowo padnie, bot nadal ma ostatnie znane ceny. Nie idealne, ale 5-sekundowe opoznienie jest akceptowalne dla predykcji na horyzoncie 5m-1d.
+
+### Lekcje
+
+1. **Czytaj odpowiedz API zanim zdecydujesz jak go uzywac.** `allMids` zwraca slownik ALL coinow w jednym response. Gdyby oryginalny developer to zauwazyl, nigdy by nie pisal `fetchCurrentPrice()` z osobnym HTTP per coin. Czasem najlepszy fix to po prostu przeczytanie dokumentacji.
+
+2. **Self-DDoS jest realny i cichy.** Bot nie logowal "robie 13 requestow do allMids". Nie bylo metryki. Jedynym symptomem byly losowe 429 na order placement — ktore wygladaly jak "Hyperliquid ma problemy", a nie "nasz Oracle zjada rate limit". Monitoruj swoje wlasne API usage, nie tylko bledy.
+
+3. **Cache TTL powinien odpowiadac use case.** 5 sekund to sweet spot: Oracle cycle trwa 8-20s, wiec w jednym cyklu fetchuje 1-4 razy zamiast 13+. Gdybysmy ustawili 60s, ceny bylyby zbyt stale. Gdyby 100ms, cache nie mialby sensu. TTL = "jak czesto NAPRAWDE potrzebuje swiezych danych?".
+
+4. **Kaskada bledow (error cascade) to najgorszy typ bugu.** Oracle 429 → order placement 429 → position query 429 → bot nie tradeuje → tracisz pieniadze. Jeden komponent zjadajacy rate limit psuje WSZYSTKIE inne komponenty. Dlatego rate limit powinien byc budzetem wspoldzielonym, nie per-component free-for-all.
+
+5. **Publiczne API zachowuj nawet przy wewnetrznym refactorze.** `fetchCurrentPrice()` moze byc uzywane gdzie indziej w kodzie. Zamiast usuwac je i laczyc wszedzie, zamienilismy je w thin wrapper nad `fetchAllMids()`. Zewnetrzny interface bez zmian, wewnetrzna implementacja radykalnie lepsza. To klasyczny Facade pattern.
