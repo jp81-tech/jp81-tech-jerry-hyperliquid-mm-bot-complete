@@ -1157,11 +1157,11 @@ export class NansenProAPI {
         };
       } else {
         // Standard Spot TGM
+        // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
         payload = {
           chain,
           token_address: tokenAddress,
           date: { from: hourAgo.toISOString(), to: now.toISOString() },
-          filters: { value_usd: { min: minUsd } },
           order_by: [{ field: 'block_time', direction: 'DESC' }],
           pagination: { page: 1, per_page: 20 }
         };
@@ -1414,7 +1414,6 @@ export class NansenProAPI {
           chain: chain,
           token_address: tokenAddress,
           date: { from: '1H_AGO', to: 'NOW' },
-          filters: { value_usd: { min: minUsd } },
           order_by: [{ field: 'block_timestamp', direction: 'DESC' }],
           pagination: { page: 1, per_page: 50 }
         },
