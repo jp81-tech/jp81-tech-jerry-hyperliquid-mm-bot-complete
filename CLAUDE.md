@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-10
+- Data: 2026-03-11
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -48,6 +48,33 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `/tmp/whale_discovery_seen.json` - seen addresses for whale discovery dedup (30-day TTL)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 11 marca 2026
+
+### 124. Fix Nansen Pro API 422 Errors — 6268 daily errors eliminated (11.03)
+
+**Problem:** Nansen zmienił nazwy pól w API. `nansen_pro.ts` wysyłał payloady ze starymi nazwami pól, powodując **6,268 błędów 422 dziennie** (2,389 mm-virtual + 3,879 mm-pure). Efekt: `getTgmPerpPositions()` zawsze zwracał `[]`, whale tracker polegał tylko na snapshot danych z `whale_tracker.py`.
+
+**Root causes i fixy (7 zmian w `src/integrations/nansen_pro.ts`):**
+
+| # | Endpoint | Problem | Fix |
+|---|----------|---------|-----|
+| 1 | `/tgm/perp-positions` | `Required field 'body -> token_symbol' is missing` | Dodano `token_symbol: token` na top level payloadu |
+| 2 | `/tgm/dex-trades` (perps) | `Field 'valueUsd' is not recognized` | Usunięto `valueUsd` filter |
+| 3a | `/tgm/who-bought-sold` (standalone) | `Field 'value_usd' is not recognized` | Usunięto `value_usd` filter, zmieniono order_by na `block_time` |
+| 3b | `/tgm/who-bought-sold` (fallback) | j.w. | j.w. |
+| 4 | `/tgm/flow-intelligence` | `Invalid value 'hyperliquid' for body -> chain` | Early-return guard dla `chain === 'hyperliquid'` |
+| 5a | `/tgm/holders` (standalone) | `Field 'value_usd' is not recognized` | Usunięto `value_usd` filter |
+| 5b | `/tgm/holders` (fallback) | j.w. | j.w. |
+| bonus | `/smart-money/perp-trades` | j.w. | j.w. |
+
+**Wzorzec:** Działający endpoint `perp-pnl-leaderboard` (linia 448) już miał `token_symbol` na top level — ten sam pattern zastosowano do `perp-positions`.
+
+**Weryfikacja:** Zero 422 po restarcie obu botów. Flow Intelligence poprawnie skipuje hyperliquid z logiem.
+
+**Pliki:** `src/integrations/nansen_pro.ts` (+17 / -12 LOC)
 
 ---
 

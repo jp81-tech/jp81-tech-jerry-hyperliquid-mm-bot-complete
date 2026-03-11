@@ -10456,3 +10456,62 @@ Cooldown jest per `pair:side` (np. `whale_wall:kPEPE:BID` i `whale_wall:kPEPE:AS
 4. **Nie buduj dashboardu gdy wystarczy push notification.** Discord alert dociera do Ciebie sam — na telefon, na desktop, o kazdej porze. Dashboard wymaga zeby Ty do niego przyszedl. Dla krytycznych eventow (SM flip, whale wall) push > pull. Dla analytics (wykresy PnL, historia fills) — dashboard wygrywa.
 
 5. **`sed` na produkcji jest jak operacja na otwartym sercu.** 5 edycji `sed -i` na pliku z 12,447 liniami, na produkcyjnym serwerze, bez type-checkera (transpile-only). Zadzialalo, ale kazdy edit mogl zepsuc caly bot. Backup (`cp mm_hl.ts mm_hl.ts.bak`) to absolutne minimum. Lepsze podejscie: edit lokalnie → push → pull na serwerze. Ale gdy serwer nie ma push access do GitHub (jak w naszym przypadku — SSH key `jaroslawpostument-sys` bez dostepu), trzeba byc kreatywnym: `git format-patch` na serwerze → `git am` lokalnie → push z lokala.
+
+---
+
+## Rozdzial 56: Cichy Zabojca — 6268 Bledow 422 Dziennie (11.03.2026)
+
+### Problem: API mowi "nie rozumiem", bot mowi "ok, pusty wynik"
+
+Wyobraz sobie, ze masz informatora w mafii (Nansen API). Dzwonisz do niego codziennie 6268 razy, ale za kazdym razem podajesz zle haslo. Informator mowi "nie znam cie" (HTTP 422), a Ty notujesz: "informator nie mial zadnych informacji". Tymczasem informator ma pelno danych — po prostu nie rozumie Twojego formatu pytania.
+
+Dokladnie to robil nasz bot. `nansen_pro.ts` wysylal zapytania ze starymi nazwami pol, a Nansen API odrzucal je z 422 Unprocessable Entity. Bot lapal blad, zwracal `[]`, i szedl dalej. **Zero crashy, zero alarmow** — po prostu cichy brak danych.
+
+### Dlaczego to bylo ciche?
+
+```typescript
+} catch (error: any) {
+  this.logError(error, `TGM Perp Positions failed for ${token}`)
+  this.setCache(cacheKey, [])  // Cachuj PUSTY wynik na 15 min!
+  return []
+}
+```
+
+Ten pattern — `catch → cache empty → return []` — jest swietny do resilience (bot nie crashuje), ale fatalny do observability. **Cachowanie pustego wyniku na 15 minut** oznaczalo, ze nawet gdybys naprawil blad, musisz czekac na wygasniecie cache zeby zobaczyc efekt.
+
+### 7 fixow, jeden pattern
+
+Wszystkie bledy mialy wspolny mianownik: **Nansen zmienil API contract, ale nie bylo walidacji po naszej stronie.**
+
+| Endpoint | Co wysylalismy | Czego API oczekiwalo |
+|----------|---------------|---------------------|
+| `perp-positions` | `parameters.tokenAddress` | `token_symbol` na top level |
+| `dex-trades` (perps) | `filters.valueUsd` | pole nie istnieje |
+| `who-bought-sold` | `filters.value_usd` | pole nie istnieje |
+| `flow-intelligence` | `chain: 'hyperliquid'` | ten endpoint nie wspiera HL |
+| `holders` | `filters.value_usd` | pole nie istnieje |
+
+**Klucz do rozwiazania:** Endpoint `perp-pnl-leaderboard` (linia 448) dzialal poprawnie — mial `token_symbol` na top level. To byl Rosetta Stone — dzialajacy przyklad, z ktorego mozna bylo odczytac poprawny format payloadu.
+
+### Technika naprawy: Python string replacement na serwerze
+
+Zamiast recznych `sed` edycji (ryzykowne na 1951-liniowym pliku), uzylem skryptu Python ktory:
+
+1. Wczytal caly plik do stringa
+2. Uzywal `str.replace()` z dokladnymi wieloliniowymi patternami
+3. Zliczal ile zmian zastosowal (walidacja)
+4. Zapisal wynik
+
+To jest bezpieczniejsze niz `sed` bo: widzisz dokladnie co zastapisz (wieloliniowy kontekst), Python nie ma problemow z escape'owaniem regexow w shell, i dostajesz raport ile zmian sie udalo.
+
+### Lekcje
+
+1. **HTTP 422 to nie "serwer nie dziala" — to "nie rozumiem Twojego zapytania".** 422 (Unprocessable Entity) oznacza, ze serwer odebral request, ale nie moze go przetworzyc bo payload jest niepoprawny. To roznica miedzy "telefon nie dziala" (500) a "mowisz do mnie po chinsku" (422). Zawsze loguj body requestu obok kodu bledu.
+
+2. **Cachowanie bledow jest mieczem obosiecznym.** `setCache(key, [])` po bledzie zapobiega hammering dead endpoint (dobre!), ale tez maskuje problem na czas cache TTL (zle!). Lepsze podejscie: cache z krotszym TTL dla bledow (np. 2 min vs 15 min dla sukcesu), i osobny counter bledow per endpoint ktory triggeruje alert po N failach.
+
+3. **Jeden dzialajacy endpoint to Twoj Rosetta Stone.** Gdy 5 endpointow zwraca 422 a 1 dziala, porownaj payloady. Dzialajacy `perp-pnl-leaderboard` z `token_symbol` na top level powiedzial nam dokladnie czego brakuje w `perp-positions`.
+
+4. **API contract drift jest nieunikniony.** Zewnetrzne API zmieniaja sie bez ostrzezenia. Nansen nie wyslal maila "zmienilismy nazwy pol". Jedyna obrona: monitoruj bledy 4xx per endpoint i reaguj gdy rosna. Nasz bot mial 6268 bledow dziennie i nikt nie zauwazyl.
+
+5. **`TS_NODE_TRANSPILE_ONLY=1` oznacza "type errors nie istnieja w runtime".** Bot uzywa ts-node z transpile-only — TypeScript kompiluje sie do JS bez sprawdzania typow. To dlatego pre-existing type errors (np. `holders_fallback` not assignable) nie crashowaly bota. Szybsze starty, ale zero type safety w produkcji.
