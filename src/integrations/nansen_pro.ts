@@ -923,6 +923,11 @@ export class NansenProAPI {
 
   async getFlowIntelligence(tokens: string[], chain: string = 'ethereum'): Promise<NansenFlowIntelligence[]> {
     if (!this.isEnabled() || tokens.length === 0) return []
+    // 🔧 FIX 2026-03-11: flow-intelligence does not support hyperliquid chain
+    if (chain === 'hyperliquid') {
+      console.debug(`[Nansen Pro] Flow Intelligence skipped for chain=hyperliquid (not supported)`)
+      return []
+    }
     if (this.isChainUnsupported(chain)) {
       console.debug(`[Nansen Pro] Flow intelligence skipped for unsupported chain=${chain}`)
       return []
@@ -1048,7 +1053,7 @@ export class NansenProAPI {
           chain,
           token_address: tokenAddress,
           label_type: 'smart_money',
-          filters: { value_usd: { min: 1000 } },  // Lower min to capture small SM holders
+          // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
           order_by: [{ field: 'balance_change_24h', direction: 'DESC' }],
           pagination: { page: 1, per_page: 50 }
         },
@@ -1082,10 +1087,10 @@ export class NansenProAPI {
           token_address: tokenAddress,
           date: { from: dayAgo.toISOString(), to: now.toISOString() },
           filters: {
-            include_smart_money_labels: ["Fund", "30D Smart Trader", "Smart Trader"],
-            value_usd: { min: 1000 }  // Lower min to capture more
+            include_smart_money_labels: ["Fund", "30D Smart Trader", "Smart Trader"]
+            // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
           },
-          order_by: [{ field: 'value_usd', direction: 'DESC' }]
+          order_by: [{ field: 'block_time', direction: 'DESC' }]
         },
         chain
       )
@@ -1139,14 +1144,12 @@ export class NansenProAPI {
 
       if (mode === 'perps') {
         // Structure for Perps TGM
+        // 🔧 FIX 2026-03-11: Removed valueUsd filter (not recognized by API)
         payload = {
           parameters: {
             mode: "perps",
             tokenAddress: tokenAddress,
             dateRange: { from: hourAgo.toISOString(), to: now.toISOString() }
-          },
-          filters: {
-            valueUsd: { min: minUsd }
           },
           order_by: "block_timestamp",
           order_by_direction: "desc",
@@ -1201,7 +1204,7 @@ export class NansenProAPI {
           chain,
           token_address: tokenAddress,
           label_type: 'smart_money',
-          filters: { value_usd: { min: 50000 } },
+          // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
           order_by: [{ field: 'balance_change_24h', direction: 'DESC' }],
           pagination: { page: 1, per_page: 25 }
         },
@@ -1239,11 +1242,11 @@ export class NansenProAPI {
           chain,
           token_address: tokenAddress,
           date: { from: dayAgo.toISOString(), to: now.toISOString() },
+          // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
           filters: {
-            include_smart_money_labels: ["Fund", "30D Smart Trader"],
-            value_usd: { min: 50000 }
+            include_smart_money_labels: ["Fund", "30D Smart Trader"]
           },
-          order_by: [{ field: 'value_usd', direction: 'DESC' }]
+          order_by: [{ field: 'block_time', direction: 'DESC' }]
         },
         chain
       )
@@ -1271,7 +1274,9 @@ export class NansenProAPI {
 
     try {
       // Structure based on provided Python script for Perps mode
+      // 🔧 FIX 2026-03-11: Added token_symbol at top level (API requires it)
       const payload = {
+        token_symbol: token,
         parameters: {
           mode: "perps",
           tokenAddress: token,
@@ -1325,7 +1330,7 @@ export class NansenProAPI {
           chain,
           symbol,
           date: { from: dayAgo.toISOString(), to: now.toISOString() },
-          filters: { value_usd: { min: 50000 } },
+          // 🔧 FIX 2026-03-11: Removed value_usd filter (not recognized by API)
           order_by: [{ field: 'block_time', direction: 'DESC' }]
         },
         chain
