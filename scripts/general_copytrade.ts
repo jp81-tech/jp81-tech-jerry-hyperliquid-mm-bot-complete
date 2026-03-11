@@ -721,7 +721,7 @@ async function main() {
       } catch { /* some coins may not support the leverage level */ }
     }
     // xyz dex coins: onlyIsolated, max leverage varies
-    const xyzCoins = [{ name: 'xyz:GOLD', leverage: 2 }]
+    const xyzCoins = [{ name: 'xyz:GOLD', leverage: 2 }, { name: 'xyz:CL', leverage: 2 }]
     for (const xyzCoin of xyzCoins) {
       const idx = assetMap.get(xyzCoin.name)
       if (idx === undefined) continue
