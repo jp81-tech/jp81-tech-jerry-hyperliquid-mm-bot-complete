@@ -85,7 +85,7 @@ await this.orders.init()
 ```javascript
 args: "--live",
 env: {
-    BREAKOUT_PRIVATE_KEY: "0x488d...",  // Dedicated wallet
+    BREAKOUT_PRIVATE_KEY: process.env.BREAKOUT_PRIVATE_KEY,  // From .env (never hardcode)
     BREAKOUT_TOKENS: "BTC,ETH,SOL,HYPE",
     BREAKOUT_DEFAULT_LEVERAGE: "5",
     // ...
@@ -5422,3 +5422,31 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **HLP Vault Tracking (10.03)**: HLP address `0x010461C14e146ac35Fe42271BDC1134Ee31C703a`, equity $121.5M, 189 pozycji. Polling co 120s via HL API (`clearinghouseState`). Moon Dev API endpointy HLP zwracały 404 — pominięte. kPEPE LONG $195K (4x > całe SM!), VIRTUAL LONG $56K. Discord alerts via `sendDiscordAlert()` z 60min cooldown. Output w `moonGuard.getOutput().hlpKpepe/.hlpVirtual`. HLP to dominujący gracz na kPEPE — większa pozycja niż wszystkie SM razem.
 - **Breakout Bot (12.03)**: `scripts/breakout_bot.ts` + `src/breakout/` (BreakoutBot, BreakoutDataEngine, BreakoutSignalEngine, BreakoutRiskEngine, BreakoutOrderEngine, config, types). Donchian Channel breakout strategy: 20-period 1m candles, EMA200 trend filter (5m candles), volume confirmation (3x avg), trailing SL via Donchian opposite band. Tokens: BTC/ETH/SOL/HYPE. 15s tick interval, 5x cross leverage, 1% risk per trade, max 3 positions, TP=3R. Dedicated wallet `0x8cc8151919Eb3293e434dddab1CB76e10118C730` ($325 equity). Live order execution via `@nktkas/hyperliquid` SDK — IOC orders with 30bps slippage, size quantization via `szDecimals`, asset index from `meta` API. State persistence `/tmp/breakout_bot_state.json`. Discord alerts via `DISCORD_BREAKOUT_WEBHOOK`. PM2: `breakout-bot`. Config in `ecosystem.config.cjs`.
 - **Whale Discovery (10.03)**: `scripts/whale_discovery.ts` — weekly cron (Sunday 10:00 UTC) skanujący Nansen perp leaderboardy + HL API dla nowych dużych pozycji na kPEPE/VIRTUAL. 57 KNOWN_ADDRESSES (synced z whale-changes-report.ts) filtrowanych. Seen file `/tmp/whale_discovery_seen.json` z 30-day TTL. Nansen CLI via `execSync()` z `--format csv`. **CSV parser bug fix:** `Number('0x...')` parsuje hex adresy jako valid numbers — dodano `val.startsWith('0x')` guard. Progi: kPEPE PnL>$10K lub pos>$50K, VIRTUAL PnL>$20K lub pos>$100K. `--dry-run` flag. Wymaga nansen-cli na serwerze (`npm i -g nansen-cli`).
+- **Security: git history cleanup (12.03)**: Stary breakout wallet key `0x488df3...` został wyczyszczony z historii git via `git-filter-repo --replace-text`. Force push na origin + server. Wallet spalony (drainer zabrał środki), nowy wallet `0x8cc815...` czysty.
+
+---
+
+## Security Scan (2026-03-12)
+
+| Co | Status | Szczegóły |
+|---|---|---|
+| Główny klucz MM (`PRIVATE_KEY` w `.env`) | BEZPIECZNY | Nigdy nie commitowany, `.env` w `.gitignore` |
+| Nansen API key (`.env`) | BEZPIECZNY | Nigdy nie commitowany |
+| Breakout wallet key (`.env`) | BEZPIECZNY | Nigdy nie commitowany |
+| Stary breakout key (`0x488df3...`) | WYCZYSZCZONY | Był w commit `0ba0fce` — usunięty via `git-filter-repo` (12.03). Wallet spalony i pusty. |
+| Pliki źródłowe (`.ts`, `.js`, `.cjs`) | CZYSTE | Żadnych hardcoded kluczy, wszystko z `process.env` |
+| `.env` / `.env.remote` | W `.gitignore` | Usunięte z historii git wcześniej (styczeń 2026) |
+
+**Procedura czyszczenia historii git:**
+```bash
+# 1. Stwórz plik replacement
+echo 'LEAKED_KEY==>REDACTED_LEAKED_KEY' > /tmp/filter_replacements.txt
+# 2. Uruchom git-filter-repo
+git-filter-repo --replace-text /tmp/filter_replacements.txt --force
+# 3. Przywróć remote (filter-repo usuwa origin)
+git remote add origin <URL>
+# 4. Force push
+git push origin --force --all --tags
+# 5. Zaktualizuj serwer
+ssh server 'cd ~/repo && git fetch origin --force && git reset --hard origin/<branch>'
+```
