@@ -34,6 +34,7 @@ const CLUSTER_MAX_DISTANCE_PCT = 25;  // Max distance from current price
 
 // ── Cooldown ────────────────────────────────────────────────
 const WARNING_COOLDOWN_MS = 5 * 60 * 1000;
+const IMB_CONFIRM_MIN_LIQ_USD = 5_000;  // Imbalance-only trigger requires min liq to confirm
 
 // ── Interfaces ──────────────────────────────────────────────
 
@@ -212,7 +213,8 @@ export class MoonStreamGuard {
         kpepeTriggered = true;
         reasons.push(`kPEPE liq=$${kpepeLiq.toFixed(0)}>${KPEPE_LIQ_THRESHOLD_USD}`);
       }
-      if (kpepeImb1h < KPEPE_IMBALANCE_THRESHOLD) {
+      // Imbalance alone requires min liq confirmation (prevents false positives from noise)
+      if (kpepeImb1h < KPEPE_IMBALANCE_THRESHOLD && kpepeLiq >= IMB_CONFIRM_MIN_LIQ_USD) {
         kpepeTriggered = true;
         reasons.push(`kPEPE imb=${kpepeImb1h.toFixed(2)}<${KPEPE_IMBALANCE_THRESHOLD}`);
       }
@@ -238,7 +240,8 @@ export class MoonStreamGuard {
         virtualTriggered = true;
         reasons.push(`VIRTUAL liq=$${virtualLiq.toFixed(0)}>${VIRTUAL_LIQ_THRESHOLD_USD}`);
       }
-      if (virtualImb1h < VIRTUAL_IMBALANCE_THRESHOLD) {
+      // Imbalance alone requires min liq confirmation (prevents false positives from noise)
+      if (virtualImb1h < VIRTUAL_IMBALANCE_THRESHOLD && virtualLiq >= IMB_CONFIRM_MIN_LIQ_USD) {
         virtualTriggered = true;
         reasons.push(`VIRTUAL imb=${virtualImb1h.toFixed(2)}<${VIRTUAL_IMBALANCE_THRESHOLD}`);
       }

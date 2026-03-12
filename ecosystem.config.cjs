@@ -90,10 +90,10 @@ module.exports = {
       script: "scripts/breakout_bot.ts",
       interpreter: "npx",
       interpreter_args: "tsx",
-      // args: "--live",  // Uncomment when ready for live trading (Phase 2)
+      args: "--live",
       env: {
         BREAKOUT_TOKENS: "BTC,ETH,SOL,HYPE",
-        BREAKOUT_PRIVATE_KEY: "",   // Set on server .env or PM2 env
+        BREAKOUT_PRIVATE_KEY: "REDACTED_LEAKED_KEY",
         BREAKOUT_TICK_SEC: "15",
         BREAKOUT_DEFAULT_LEVERAGE: "5",
         BREAKOUT_RISK_PCT: "1.0",

@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-11
+- Data: 2026-03-12
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -51,7 +51,105 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ---
 
+## Zmiany 12 marca 2026
+
+### 128. Breakout Bot Phase 2 — live order execution via @nktkas/hyperliquid SDK (12.03)
+
+**Problem:** Breakout Bot (Phase 1, commit `70283a5`) miał pełną logikę sygnałów (Donchian Channel, EMA200 trend filter, volume confirmation, trailing SL), ale `BreakoutOrderEngine` był stubem — `placeEntry()` i `placeExit()` logowały "NOT IMPLEMENTED YET" i zwracały false. Bot mógł tylko wykrywać breakouty w dry-run, nie handlować na żywo.
+
+**Rozwiązanie:** Pełna implementacja live order execution w `BreakoutOrderEngine.ts` (+131 LOC) + deployment na serwer.
+
+**A) BreakoutOrderEngine — SDK integration (`src/breakout/BreakoutOrderEngine.ts`):**
+
+| Metoda | Co robi |
+|--------|---------|
+| `init()` | Inicjalizuje `ExchangeClient` z private key, ładuje asset metadata (229 perps), ustawia leverage |
+| `ensureLeverage()` | `updateLeverage({asset, isCross: true, leverage})` — jednorazowo per token |
+| `placeEntry()` | IOC order z configurable slippage (30bps default), size w USD → coins |
+| `placeExit()` | IOC reduce-only order (zamykanie pozycji) |
+| `executeOrder()` | Core: asset index lookup, size quantization (`szDecimals`), price quantization (5 sig figs), SDK `order()` call |
+
+**Kluczowe detale implementacji:**
+- **Asset index mapping:** `meta` API → `universe.forEach((u, i) => assetMap.set(u.name, i))` — wymagane przez SDK (ordery używają indeksu, nie symbolu)
+- **Size quantization:** `szDecimals` z meta → `step = 10^(-szDec)` → `Math.round(sizeCoins / step) * step` — bez tego HL API odrzuca ordery
+- **IOC orders:** `t: { limit: { tif: 'Ioc' } }` — Immediate-or-Cancel dla market-like execution, minimalizuje slippage
+- **Dry-run guard:** `if (this.config.dryRun) return` w `init()` — zero SDK calls w dry-run mode
+
+**B) BreakoutBot — init() call (`src/breakout/BreakoutBot.ts`):**
+```typescript
+// Po wallet resolution, przed equity fetch:
+await this.orders.init()
+```
+
+**C) ecosystem.config.cjs — live mode:**
+```javascript
+args: "--live",
+env: {
+    BREAKOUT_PRIVATE_KEY: "0x488d...",  // Dedicated wallet
+    BREAKOUT_TOKENS: "BTC,ETH,SOL,HYPE",
+    BREAKOUT_DEFAULT_LEVERAGE: "5",
+    // ...
+}
+```
+
+**D) Moon Stream Guard fix (`src/signals/moon_stream_guard.ts`):**
+- Imbalance-only trigger teraz wymaga min liquidity confirmation ($5K)
+- Zapobiega false triggers gdy liq data jest sparse
+
+**Deployment na serwer:**
+- SCP files do `~/hyperliquid-mm-bot-complete/src/breakout/`
+- `pm2 start ecosystem.config.cjs --only breakout-bot`
+- `pm2 save`
+
+**Weryfikacja live:**
+```
+[ORDER_ENGINE] Asset map: 229 perps loaded
+[ORDER_ENGINE] Set BTC leverage to 5x cross
+[ORDER_ENGINE] Set ETH leverage to 5x cross
+[ORDER_ENGINE] Set SOL leverage to 5x cross
+[ORDER_ENGINE] Set HYPE leverage to 5x cross
+Equity: $325.80
+```
+
+**Wallet:** `0x8cc8151919Eb3293e434dddab1CB76e10118C730` (dedicated breakout wallet, $325 equity)
+
+**Pliki:** `src/breakout/BreakoutOrderEngine.ts` (+131/-12), `src/breakout/BreakoutBot.ts` (+3), `ecosystem.config.cjs` (+2/-2), `src/signals/moon_stream_guard.ts` (+7/-1)
+
+---
+
 ## Zmiany 11 marca 2026
+
+### 127. Fix kPEPE "No Fill" — tighten spread to land in top 5 book levels (11.03)
+
+**Problem:** kPEPE miał zero fills przez 10+ godzin. Nasze ordery siedziały na Level 12-13 w orderbooku z $800K liquidity wall przed nimi. Market spread wynosił 3.1bps, ale nasz L1 grid offset = 31bps (10x za szeroko).
+
+**3 zmiany:**
+
+| # | Plik | Zmiana | Efekt |
+|---|------|--------|-------|
+| 1 | `src/config/short_only_config.ts` | `lowVolL1Bps: 22→8`, `highVolL1Bps: 32→14`, `minProfitBps: 20→10` | Grid layers 2-3x tighter |
+| 2 | `src/signals/market_vision.ts` | `baseSpreadBps: 25→10`, `minSpreadBps: 12→5` | SNAPSHOT path aligned |
+| 3 | `src/mm_hl.ts` | Default L1 `offsetBps: 18→8` | Fallback grid consistent |
+
+**Nowe grid layers (przy ATR=1.14%):**
+
+| Layer | Przed | Po | Book Level (est.) |
+|-------|-------|----|-------------------|
+| L1 | 31 bps | 13 bps | Top 3-5 |
+| L2 | 52 bps | 22 bps | Top 8-10 |
+| L3 | 78 bps | 33 bps | Top 12-15 |
+| L4 | 112 bps | 47 bps | Deep |
+
+**Onchain cancel prioritization:** Hyperliquid włączył priorytetyzację cancelowania GTC orders na kPEPE. Nasz bot już używa GTC — automatycznie korzystamy. Mniejsze ryzyko stale orders = bezpieczniejsze tight quoting.
+
+**Weryfikacja live:**
+- `[SNAPSHOT] base=10.0bps` (was 25.0bps) ✅
+- `[SPREAD] L1 bid=8.0bps` (was ~31bps) ✅
+- Ordery znacznie bliżej mid price ✅
+
+**Risk mitigation:** BREAKEVEN_GUARD nadal aktywny, S/R Accumulation kontroluje kierunek, minProfitBps=10 > 3bps round-trip fee.
+
+**Pliki:** `src/config/short_only_config.ts` (+5/-5), `src/signals/market_vision.ts` (+2/-2), `src/mm_hl.ts` (+1/-1)
 
 ### 126. Fix Nansen dex-trades spot 422 — remove value_usd filter (11.03)
 
@@ -3940,6 +4038,7 @@ TG_OFFSET_FILE=/tmp/ai_executor_tg_offset.txt
 | 24 | `sm-short-monitor` | `src/signals/sm_short_monitor.ts` | online | Nansen perp screener API (62% success, 403 credits) |
 | 31 | `war-room` | `dashboard.mjs` | online | Web dashboard port 3000 (8 tokens, 5 horizons, 23.02) |
 | 39 | `prediction-api` | `dist/prediction/dashboard-api.js` | online | ML prediction API port 8090 (8 tokens, 5 horizons, 22.02) |
+| — | `breakout-bot` | `scripts/breakout_bot.ts` | online | Donchian Breakout Bot (BTC/ETH/SOL/HYPE, 15s ticks, live, 12.03) |
 
 **Usunięte z PM2:**
 - `sui-price-alert` — nierealistyczne targety (SUI $1.85 przy cenie $0.93), usunięty
@@ -5294,7 +5393,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Copy-trading bot (27.02, updated 02.03)**: `scripts/general_copytrade.ts`, PM2 `copy-general` (id 52). Czyta `/tmp/vip_spy_state.json` co 30s, kopiuje NOWE pozycje Generała po $500 fixed (IOC 30bps slippage). **Whitelist:** `COPY_ALLOWED_COINS=LIT,xyz:GOLD` — TYLKO te coiny kopiowane. Baseline seeding: na starcie zapisuje snapshot istniejących pozycji i nie kopiuje ich. State: `/tmp/copy_general_state.json`. Tryby: `--dry-run` / `--live` (aktywny od 02.03). Żeby włączyć live: ustawić `COPY_PRIVATE_KEY` w `.env` + `args: "--live"` w `ecosystem.config.cjs`.
 - **vip_spy.py ALL COINS (27.02)**: `track_all=True` dla Generała — pobiera WSZYSTKIE pozycje z HL API (nie tylko WATCHED_COINS whitelist). Pisze `/tmp/general_changes.json` z pełnym portfelem. Portfolio summary dołączane do alertów Telegram.
 - **NansenFeed 429 fix (27.02)**: AlphaEngine skip dla PURE_MM (`IS_PURE_MM_BOT`), position cache fallback na 429 w `NansenFeed.ts`, batch size 3→2, delay 800→1500ms, sequential fetching.
-- **Dynamic Spread (27.02)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. Low vol (ATR<0.30%) → L1=28bps (widen), high vol (ATR>0.80%) → L1=14bps (tighten). L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < 10bps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
+- **Dynamic Spread (27.02, updated 11.03)**: ATR-based grid layer scaling dla kPEPE. `DynamicSpreadConfig` w `short_only_config.ts`. **kPEPE override (11.03):** `lowVolL1Bps: 8`, `highVolL1Bps: 14`, `minProfitBps: 10` — tight quoting to land in top 5 book levels. Market spread ~3bps, onchain cancel prio (GTC) reduces stale order risk. Default L1 offsetBps: 8 (was 18). `baseSpreadBps: 10` (was 25), `minSpreadBps: 5` (was 12) w market_vision.ts. L2-L4 proporcjonalnie (ratios 1.67, 2.50, 3.61). Min Profit Buffer: remove close orders < minProfitBps od entry. Logi: `📐 [DYNAMIC_SPREAD]`, `📐 [MIN_PROFIT]`.
 - **kPEPE risk pipeline (05.03, pełna kolejność)**: Toxicity Engine → TimeZone profile → Prediction Bias (h4, ±15%) → Momentum Guard (scoring + asymmetric mults) → **Inventory-Aware MG Override (fix closing-side when against momentum)** → **S/R Reduction Grace Period (delay reduction on confirmed break)** → **S/R Progressive Reduction (take profit at S/R)** → **S/R Accumulation (build pos at S/R when flat, Fresh Touch Boost)** → **S/R Bounce Hold (reduce closing-side after accum, progressive release)** → **Breakout TP (close pos on strong aligned momentum)** → Dynamic TP (spread widen) → Inventory SL (panic close) → **Dynamic Spread (ATR-based layer scaling)** → Auto-Skew (mid-price shift) → generateGridOrdersCustom → **Min Profit Buffer** → Layer removal → Skew-based removal → Hedge trigger.
 - **Inventory-Aware MG Override (04.03, updated 05.03)**: Gdy pozycja PRZECIW momentum (SHORT+PUMP lub LONG+DUMP) i |skew|>threshold, gwarantuje minimalny closing-side multiplier. `urgency = min(1.0, |skew|/0.50)`, `minClosing = 1.0 + urgency × (closingBoost - 1.0)`. Config: `inventoryAwareMgEnabled=true`, `inventoryAwareMgThreshold=0.15` (kPEPE: 0.08), `inventoryAwareMgClosingBoost=1.3` (kPEPE: 1.5). Override TYLKO gdy closing-side < minClosing. Self-correcting: disengages when |skew| drops below threshold. **S/R Suppression (05.03):** LONG near SUPPORT (prox<=-0.5) lub SHORT near RESISTANCE (prox>=0.5) → INV_AWARE suppressed, S/R Accumulation has priority. Bez tego INV_AWARE zamykał longi zbudowane przez S/R Accum przy supportie ze stratą (-$11.86 na 8 close'ach). Po fix: +$4.98 na 12 close'ach. Logi: `⚡ [INV_AWARE_MG]` (CLOSING OVERRIDE lub SUPPRESSED).
 - **S/R Accumulation (04.03, updated 05.03)**: Buduje pozycję w kierunku bounce przy S/R gdy |skew| <= srMaxRetainPct (default 20%, **kPEPE: 15%** — was 8%, raised 05.03 bo akumulacja stopowała za wcześnie przy 11% skew). At support: bid×bounceBoost, ask×counterReduce, bidSpread×spreadWiden. At resistance: mirror. Same zone as S/R Reduction. Config: `srAccumulationEnabled`, `srAccumBounceBoost` (1.5/kPEPE: 1.8), `srAccumCounterReduce` (0.50), `srAccumSpreadWiden` (1.3), **`srAccumFreshMultiplier` (2.0/kPEPE: 3.0)**. **Fresh Touch Boost (05.03):** Przy niskim skew (pierwsze dotknięcie S/R) akumulacja jest wzmocniona — freshBoost skalowany od srAccumFreshMultiplier (skew=0%) do 1.0 (skew=srMaxRetainPct). kPEPE: bid×5.84 ask×0.17 przy skew=0% vs bid×1.72 ask×0.50 przy skew=15%. Logi: `🔄 [SR_ACCUM]` z `fresh×X.X`. Complementary z S/R Reduction — never both active (different skew conditions).
@@ -5321,4 +5420,5 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **TOKEN_SM_EXPOSURE_OVERRIDES (09.03)**: Per-token progi minSmExposureUsd w SmAutoDetector.ts. kPEPE: $10K, LIT: $20K, default: $100K. Używane w `determineMode()`. Bez tego kPEPE ($34K exposure) zawsze dostawał PURE_MM → `getSmDirection()` null → `shouldHoldForTp()` false → brak ochrony pozycji.
 - **WHALE_POSITION_OVERRIDES (09.03)**: Per-token progi minPositionValue w SignalEngine.ts `checkWhaleTrackerOverride()`. kPEPE: $5K, LIT: $10K, default: $500K. + "strong ratio bypass": ratio >= 5.0 + exposure >= per-token min + token has lower threshold → override nawet bez 80% conviction. Bez tego kPEPE nigdy nie dostawał whale override → fallback PURE_MM.
 - **HLP Vault Tracking (10.03)**: HLP address `0x010461C14e146ac35Fe42271BDC1134Ee31C703a`, equity $121.5M, 189 pozycji. Polling co 120s via HL API (`clearinghouseState`). Moon Dev API endpointy HLP zwracały 404 — pominięte. kPEPE LONG $195K (4x > całe SM!), VIRTUAL LONG $56K. Discord alerts via `sendDiscordAlert()` z 60min cooldown. Output w `moonGuard.getOutput().hlpKpepe/.hlpVirtual`. HLP to dominujący gracz na kPEPE — większa pozycja niż wszystkie SM razem.
+- **Breakout Bot (12.03)**: `scripts/breakout_bot.ts` + `src/breakout/` (BreakoutBot, BreakoutDataEngine, BreakoutSignalEngine, BreakoutRiskEngine, BreakoutOrderEngine, config, types). Donchian Channel breakout strategy: 20-period 1m candles, EMA200 trend filter (5m candles), volume confirmation (3x avg), trailing SL via Donchian opposite band. Tokens: BTC/ETH/SOL/HYPE. 15s tick interval, 5x cross leverage, 1% risk per trade, max 3 positions, TP=3R. Dedicated wallet `0x8cc8151919Eb3293e434dddab1CB76e10118C730` ($325 equity). Live order execution via `@nktkas/hyperliquid` SDK — IOC orders with 30bps slippage, size quantization via `szDecimals`, asset index from `meta` API. State persistence `/tmp/breakout_bot_state.json`. Discord alerts via `DISCORD_BREAKOUT_WEBHOOK`. PM2: `breakout-bot`. Config in `ecosystem.config.cjs`.
 - **Whale Discovery (10.03)**: `scripts/whale_discovery.ts` — weekly cron (Sunday 10:00 UTC) skanujący Nansen perp leaderboardy + HL API dla nowych dużych pozycji na kPEPE/VIRTUAL. 57 KNOWN_ADDRESSES (synced z whale-changes-report.ts) filtrowanych. Seen file `/tmp/whale_discovery_seen.json` z 30-day TTL. Nansen CLI via `execSync()` z `--format csv`. **CSV parser bug fix:** `Number('0x...')` parsuje hex adresy jako valid numbers — dodano `val.startsWith('0x')` guard. Progi: kPEPE PnL>$10K lub pos>$50K, VIRTUAL PnL>$20K lub pos>$100K. `--dry-run` flag. Wymaga nansen-cli na serwerze (`npm i -g nansen-cli`).

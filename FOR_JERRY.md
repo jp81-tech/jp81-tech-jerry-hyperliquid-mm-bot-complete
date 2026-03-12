@@ -10662,3 +10662,367 @@ Dwie linie do usuniecia:
 3. **Fallback paths to ciemna strona kodu.** Primary path jest oczywisty, testujesz go, naprawiasz. Fallback path (`catch → retry with different format`) jest ukryty, rzadko sie odpala, i latwiej go przegapic. A gdy sie odpali — ma ten sam bug. Traktuj fallbacki jak rownoprawny kod, nie jak "plan B ktory pewnie nigdy nie ruszy".
 
 4. **"Gotowe" to nie "commitnalem".** "Gotowe" to "sprawdzilem logi po restarcie i zero bledow 4xx". Fix #124 byl "commitniety i pushowany" ale nie byl "gotowy" — bo nikt nie zgrepowal logow na 422 po restarcie. Weryfikacja jest czescia fixa, nie opcjonalnym dodatkiem.
+
+---
+
+## Rozdzial 59: kPEPE "No Fill" — Kiedy Twoje Ordery Sa Niewidzialne (11.03.2026)
+
+### Problem: 10 godzin bez jednego filla
+
+Wyobraz sobie ze otwierasz lemonade stand, ale ustawiasz go 3 kilometry od drogi. Ludzie chodza ulica, kupuja lemoniade od staniskow BLIZEJ — a ty stoisz daleko i czekasz. Dokladnie to robil nasz bot na kPEPE.
+
+kPEPE mial **zero fills przez 10+ godzin**. Nie dlatego ze rynek nie mial volume. Nie dlatego ze bot byl zepsuty. Bot dzialal idealnie — skladal ordery, aktualizowal ceny, logowal snapshot co minute. Problem? Nasze ordery byly na **Level 12-13** w orderbooku, z **$800K liquidity wall** przed nimi.
+
+### Diagnoza: 10x za szeroko
+
+Market spread na kPEPE wynosil **3.1 bps** (0.031%). To znaczy ze najlepszy bid i najlepszy ask byly odlegle o 3.1 bps od siebie. Ultra-tight.
+
+Nasz bot? L1 grid offset = **31 bps**. Dziesiec razy szerzej niz rynek.
+
+```
+RYNEK:
+  Best Bid:  $0.003500  (0 bps od mid)
+  Best Ask:  $0.003501  (3.1 bps od mid)
+
+NASZ BOT:
+  Nasz Bid:  $0.003489  (31 bps od mid)  <-- Level 12 w orderbooku
+  Nasz Ask:  $0.003515  (43 bps od mid)  <-- Level 13 w orderbooku
+```
+
+Przed naszymi orderami bylo $791K w bidach i $796K w askach. Zeby ktos dostal sie do NASZYCH orderow, musialby najpierw zjesc prawie milion dolarow liquidnosci. Na kPEPE z daily volume kilka milionow — to sie nie zdarzalo.
+
+### Dlaczego tak sie stalo?
+
+To wynik akumulacji decyzji z poprzednich tygodni. Pamietasz rozdzial 44 (Grid Widen)? Rozszerzylismy L1 z 5bps do 18bps bo stary spread powodowal adverse selection — bot tracil na kazdym round-tripie. Potem w rozdziale 87 (Timing Fix) ustawilismy `lowVolL1Bps: 22`, `highVolL1Bps: 32` — bo kPEPE to memecoin z wysokim ATR, potrzebuje szerszego spreadu.
+
+Problem w tym ze **rynek sie zmienil**. kPEPE przeszedl z okresu wysokiej zmiennosci (ATR 3-5%) do okresu niskiej zmiennosci (ATR ~1.14%). Market spread scisnal sie do 3 bps. Nasz bot nadal kotowal jak gdyby zmiennosc byla wysoka.
+
+To jak nosic parasol sloneczny w deszczu — kiedys mial sens, ale warunki sie zmenily.
+
+### Dwa niezalezne systemy spreadowe
+
+Kluczowe odkrycie: kPEPE ma **dwa oddzielne systemy** ktore kontroluja spread. To jak miec dwa termostaty w jednym pokoju — jesli nie sa zsynchronizowane, jest chaos.
+
+**System 1: DYNAMIC_SPREAD_OVERRIDES** (w `short_only_config.ts`)
+To jest **prawdziwy** system ustawiania orderow dla kPEPE. Funkcja `getKpepeGridLayers(atrPct)` interpoluje miedzy `lowVolL1Bps` i `highVolL1Bps` na podstawie aktualnego ATR, i tworzy 5 warstw gridu:
+
+```
+L1: bazowy (core)
+L2: L1 x 1.67
+L3: L1 x 2.50
+L4: L1 x 3.61
+L5: L1 x 8.33
+```
+
+**System 2: NANSEN_TOKENS tuning** (w `market_vision.ts`)
+To jest `baseSpreadBps` i `minSpreadBps` uzywane w SNAPSHOT logging i alternatywnej sciezce bid/ask. Nie kontroluje bezposrednio gridu kPEPE, ale wplywa na inne czesci pipeline'u.
+
+Oba systemy musialy byc zsynchronizowane. Przed fixem System 1 mowil "L1=31bps" a System 2 mowil "base=25bps". Oba za szerokie.
+
+### Fix: Trzy precyzyjne zmiany
+
+**Zmiana 1 — Scisniecie DYNAMIC_SPREAD_OVERRIDES:**
+
+```typescript
+// PRZED:
+'kPEPE': {
+    lowVolL1Bps: 22,    // Nawet w low vol = szerokie
+    highVolL1Bps: 32,   // W high vol jeszcze szersze
+    minProfitBps: 20,   // 20bps min profit
+},
+
+// PO:
+'kPEPE': {
+    lowVolL1Bps: 8,     // Low vol: tight (market spread ~3bps)
+    highVolL1Bps: 14,   // High vol: troche szersze ale w top 5
+    minProfitBps: 10,   // 10bps (pokrywa 3.5bps round-trip fee)
+},
+```
+
+Efekt na grid layers przy ATR=1.14%:
+
+| Layer | Przed | Po | Szacowana pozycja w orderbooku |
+|-------|-------|----|-------------------------------|
+| L1 | 31 bps | 13 bps | Top 3-5 |
+| L2 | 52 bps | 22 bps | Top 8-10 |
+| L3 | 78 bps | 33 bps | Top 12-15 |
+| L4 | 112 bps | 47 bps | Deep |
+
+**Zmiana 2 — Zsynchronizowanie NANSEN_TOKENS:**
+
+```typescript
+baseSpreadBps: 25 -> 10    // Aligned z tight kPEPE book
+minSpreadBps: 12 -> 5      // Pozwala na quoting blisko mid
+```
+
+**Zmiana 3 — Default fallback grid:**
+
+```typescript
+// mm_hl.ts, KPEPE_GRID_LAYERS_DEFAULT
+{ level: 1, offsetBps: 18 -> 8, ... }  // Konsystentne z nowym configiem
+```
+
+### Onchain Cancel Prioritization — wiatr w plecy
+
+W tym samym czasie Hyperliquid wlaczyl **priorytetyzacje cancelowania** dla kPEPE. Co to znaczy?
+
+Na blockchainowym DEX-ie, kazda operacja (zlozenie orderu, cancel, modyfikacja) musi byc przetworzona przez blockchain. Gdy rynek sie rusza szybko, chcesz moc SZYBKO anulowac stare ordery zeby nie zostaly zrealizowane po niekorzystnej cenie.
+
+Hyperliquid powiedzial: "ordery GTC (Good-Till-Cancelled, nie ALO/Post-Only) na kPEPE dostana priorytet w cancelowaniu". Nasz bot juz uzywal GTC — wiec automatycznie korzystamy.
+
+To jest wazne dla tight quotingu: z bardziej niezawodnym cancelowaniem, mozemy quotowac blizej mid price z mniejszym ryzykiem ze stary order zostanie zrealizowany po zlej cenie. To jak miec lepsze hamulce w samochodzie — mozesz jechac szybciej bo wiesz ze zatrzymasz sie w pore.
+
+**Zero zmian w kodzie** — to ulepszenie na poziomie protokolu.
+
+### Weryfikacja
+
+Po restarcie bota sprawdzilismy logi:
+
+```
+[SNAPSHOT] base=10.0bps     (bylo 25.0bps) -- OK
+[SPREAD] L1 bid=8.0bps      (bylo ~31bps)  -- OK
+kPEPE Multi-Layer: 24 orders              -- Bot quotuje
+```
+
+Ordery teraz sa znacznie blizej mid price. Zamiast Level 12-13, powinny byc w Top 3-5.
+
+### Lekcje
+
+1. **Config rot jest realny.** Parametry ktore byly optymalne w lutym (L1=22bps przy ATR 3-5%) sa katastrofalne w marcu (ATR 1.14%, market spread 3bps). Rynek sie zmienia, config musi sie zmieniac razem z nim. Nie ma "ustaw i zapomnij" w market makingu.
+
+2. **Dwa systemy kontrolujace to samo = bug waiting to happen.** kPEPE mial DYNAMIC_SPREAD_OVERRIDES (grid) i NANSEN_TOKENS tuning (SNAPSHOT path) — oba wplywaly na spread, ale byly ustawiane niezaleznie. Gdy zmieniales jeden, musiales pamietac o drugim. To klasyczny problem "single source of truth" — lepiej miec jeden config ktory oba systemy czytaja.
+
+3. **"Bot dziala" != "bot zarabia".** Przez 10 godzin bot logowal snapshot co minute, aktualizowal ceny, robil wszystko "poprawnie". Zero bledow. Zero crashy. I zero fills. Watchdog sprawdzal czy bot zyje — ale nie sprawdzal czy bot HANDLUJE. Monitoring powinien alarmowac na "zero fills przez N godzin", nie tylko na crashe.
+
+4. **Position in book > spread width.** Nie ma znaczenia jak madry jest twoj pricing model jesli twoje ordery sa na Level 12. Lepiej miec "glupie" ordery na Level 2 niz "smart" ordery na Level 12 — bo Level 2 dostaje fille, Level 12 nie. Market making to gra o BYCIE WIDOCZNYM, nie o bycie "poprawnym".
+
+5. **Tight spread + reliable cancel = safe.** Normalna reakcja na "ordery za daleko" to "a co jesli bede za blisko i dostane adverse selection?". Odpowiedz: (a) BREAKEVEN_GUARD nadal chroni przed zamykaniem na stracie, (b) S/R Accumulation kontroluje kierunek, (c) minProfitBps=10 > 3bps round-trip fee, (d) onchain cancel prio zmniejsza ryzyko stale orders. Wiele warstw ochrony pozwala na tight quoting.
+
+6. **Fee math musi sie zgadzac.** minProfitBps zmienione z 20 na 10. Dlaczego nie nizej? Bo maker fee na HL = 1.5bps na strone, round-trip = 3bps. Z safety margin: 10bps > 3bps. Gdybysmy ustawili minProfitBps=3, bot by tracowal na fees. Gdybysmy zostawili 20, za duzo orderow byloby odfiltrowanych. 10bps = sweet spot.
+
+---
+
+## Rozdzial 60: Breakout Bot Phase 2 — Od Stubow do Live Tradingu
+
+*12 marca 2026*
+
+### Kontekst — co mielismy
+
+W Phase 1 (rozdzial wczesniejszy) zbudowalismy kompletnego bota do handlu na breakoutach — Donchian Channel, EMA200 trend filter, volume confirmation, trailing stop loss. Bot potrafil:
+- Pobierac swieczki z Hyperliquid API
+- Obliczac kanaly Donchiana (20-okresowy lookback na 1m candles)
+- Filtrowac sygnaly przez EMA200 (trend) i volume spike (3x srednia)
+- Zarzadzac pozycjami z trailing SL i take profit (3R)
+
+Ale byl jeden problem: `BreakoutOrderEngine` byl **stubem**. Metody `placeEntry()` i `placeExit()` logowaly "NOT IMPLEMENTED YET" i zwracaly `false`. Bot wykrywal breakouty, ale nie mogl na nich zarobic — jak radar bez rakiet.
+
+### Problem — jak skladac ordery na Hyperliquid?
+
+Hyperliquid to zdecentralizowana gielda (DEX) — nie ma tradycyjnego REST API z endpointem `/place-order`. Zamiast tego, kazdy order to **podpisana transakcja** na blockchainie. Potrzebujesz:
+
+1. **Private key** — do podpisywania transakcji
+2. **Asset index** — Hyperliquid identyfikuje rynki po NUMERZE, nie po nazwie. BTC to `0`, ETH to `1`, SOL to `4`, itd. Musisz pobrac te indeksy z API `meta`.
+3. **Size quantization** — kazdy rynek ma `szDecimals` (ile miejsc po przecinku w ilosci). BTC ma szDecimals=5 (0.00001 BTC minimum), kPEPE ma szDecimals=0 (cale jednostki). Jesli wyslesz order z nieprawidlowa precyzja — API go odrzuci.
+4. **Order type** — IOC (Immediate-or-Cancel) dla market-like execution.
+
+To duzo boilerplate'u. Na szczescie istnieje SDK `@nktkas/hyperliquid` ktory opakowuje to w ladne TypeScriptowe API.
+
+### Rozwiazanie — pelna implementacja BreakoutOrderEngine
+
+#### Krok 1: Inicjalizacja SDK
+
+```typescript
+import * as hl from '@nktkas/hyperliquid'
+import axios from 'axios'
+
+async init(): Promise<void> {
+  if (this.config.dryRun) return  // Zero SDK calls w dry-run
+
+  // Klient do skladania orderow
+  this.exchClient = new hl.ExchangeClient({
+    wallet: this.config.privateKey,
+    transport: new hl.HttpTransport(),
+  })
+
+  // Ladowanie metadanych rynkow
+  const resp = await axios.post(HL_API_URL, { type: 'meta' })
+  const universe = resp.data?.universe || []
+  universe.forEach((market: any, index: number) => {
+    this.assetMap.set(market.name, index)     // BTC -> 0, ETH -> 1, ...
+    this.szDecMap.set(market.name, market.szDecimals || 0)
+  })
+  // 229 perps loaded!
+}
+```
+
+Dlaczego `axios.post` zamiast SDK do pobierania meta? Bo SDK `InfoClient` **nie ma timeout** — jesli HL API zawiesi polaczenie, Node.js event loop jest zablokowany na zawsze. Nauczylismy sie tego bolesnie z copy-general botem (rozdzial wczesniejszy). Axios z `timeout: 10000` jest bezpieczniejszy.
+
+#### Krok 2: Ustawianie leverage
+
+```typescript
+private async ensureLeverage(token: string, leverage: number): Promise<void> {
+  if (this.leverageSet.has(token)) return  // Jednorazowo per token
+  const idx = this.assetMap.get(token)
+  await this.exchClient.updateLeverage({
+    asset: idx,
+    isCross: true,
+    leverage
+  })
+  this.leverageSet.add(token)
+}
+```
+
+Leverage na Hyperliquid ustawia sie **per asset**, nie per order. I raz ustawiony, zostaje az go zmienisz. Dlatego `leverageSet` — nie chcemy wysylac tego samego requesta 100 razy.
+
+`isCross: true` oznacza cross margin — caly portfel jako zabezpieczenie. Alternatywa to isolated margin (tylko ta pozycja jako zabezpieczenie) — bezpieczniejsze ale mniej efektywne kapitalowo.
+
+#### Krok 3: Size quantization — najwazniejszy detal
+
+```typescript
+// Ile coinow za $500?
+const sizeCoins = sizeUsd / midPrice  // np. $500 / $85000 = 0.005882 BTC
+
+// Zaokraglij do dozwolonej precyzji
+const szDec = this.szDecMap.get(token) || 0  // BTC: 5
+const step = Math.pow(10, -szDec)             // 0.00001
+const quantizedSize = Math.max(step, Math.round(sizeCoins / step) * step)
+// 0.005882 -> 0.00588
+```
+
+To jest **krytyczne**. Bez quantization, Hyperliquid API odrzuci order z bledem "invalid size". Kazdy rynek ma inna precyzje:
+
+| Token | szDecimals | Step | Min order |
+|-------|-----------|------|-----------|
+| BTC | 5 | 0.00001 | ~$0.85 |
+| ETH | 4 | 0.0001 | ~$0.20 |
+| SOL | 2 | 0.01 | ~$1.30 |
+| HYPE | 1 | 0.1 | ~$1.50 |
+| kPEPE | 0 | 1 | ~$0.003 |
+
+#### Krok 4: IOC order — "kup teraz albo nic"
+
+```typescript
+const result = await this.exchClient.order({
+  orders: [{
+    a: assetIndex,          // Asset index (number, nie string!)
+    b: side === 'buy',      // true = buy, false = sell
+    p: priceStr,            // Limit price (string, 5 sig figs)
+    s: quantizedSize.toFixed(szDec),  // Size (string)
+    r: reduceOnly,          // true = tylko zamykanie pozycji
+    t: { limit: { tif: 'Ioc' } }  // Immediate-or-Cancel
+  }],
+  grouping: 'na',
+})
+```
+
+**IOC (Immediate-or-Cancel)** = "wykonaj natychmiast po tej cenie lub lepszej, a co nie wypelni — anuluj". Nie zostawia otwartych orderow w orderbooku. Idealne do breakout tradingu gdzie chcesz wejsc TERAZ, nie czekac.
+
+Slippage: 30bps (0.3%) od mid price. Przy kupnie (LONG): `limitPrice = mid * 1.003`. Przy sprzedazy (SHORT): `limitPrice = mid * 0.997`. Daje 0.3% "luzu" zeby order sie wypelnil nawet jesli cena sie przesunie.
+
+#### Krok 5: Dry-run guard
+
+```typescript
+async placeEntry(token, side, sizeUsd, midPrice, leverage): Promise<boolean> {
+  if (this.config.dryRun) {
+    console.log(`[DRY] ENTRY ${side} ${token} | $${sizeUsd} @ ${limitPrice}`)
+    return true  // Symuluj sukces
+  }
+  // ... real order execution
+}
+```
+
+Prosta ale wazna zasada: `init()` robi `if (this.config.dryRun) return` — zero polaczen z SDK w dry-run mode. `placeEntry()` i `placeExit()` loguja zamiast handlowac. Bot moze testowac strategie bez ryzyka.
+
+### Deployment na serwer
+
+```bash
+# 1. Upload plikow
+scp src/breakout/BreakoutOrderEngine.ts hl-mm:~/hyperliquid-mm-bot-complete/src/breakout/
+scp src/breakout/BreakoutBot.ts hl-mm:~/hyperliquid-mm-bot-complete/src/breakout/
+
+# 2. Start bota
+ssh hl-mm 'cd ~/hyperliquid-mm-bot-complete && pm2 start ecosystem.config.cjs --only breakout-bot'
+
+# 3. Weryfikacja
+ssh hl-mm 'pm2 logs breakout-bot --lines 20'
+```
+
+Output potwierdzajacy:
+```
+[ORDER_ENGINE] Asset map: 229 perps loaded
+[ORDER_ENGINE] Set BTC leverage to 5x cross
+[ORDER_ENGINE] Set ETH leverage to 5x cross
+[ORDER_ENGINE] Set SOL leverage to 5x cross
+[ORDER_ENGINE] Set HYPE leverage to 5x cross
+Equity: $325.80
+Starting tick loop (15s interval)...
+```
+
+Bot dziala! 229 rynkow zaladowanych, leverage ustawiony na 4 tokenach, equity $325.80 gotowe do handlu.
+
+### Moon Stream Guard fix — bonus
+
+Przy okazji naprawilismy bug w `moon_stream_guard.ts` — imbalance-only trigger (order flow bez liquidation clusters) wymaga teraz minimum $5K liquidity confirmation. Bez tego, gdy dane o liquidacjach byly sparse (malo danych), sam stosunek bid/ask imbalance mogl triggerowac falszywe sygnaly.
+
+```typescript
+const IMB_CONFIRM_MIN_LIQ_USD = 5_000
+
+// Przed: if (imbalanceStrong) { ... }
+// Po:    if (imbalanceStrong && liquidity >= IMB_CONFIRM_MIN_LIQ_USD) { ... }
+```
+
+Prosta zmiana, ale wazna — falszywe sygnaly z Moon Guard moga zmieniac multipliers grida i powodowac nieoczekiwane zachowanie bota.
+
+### Architektura calego Breakout Bota
+
+```
+ecosystem.config.cjs
+  |-- breakout-bot (PM2)
+        |-- scripts/breakout_bot.ts (entry point, --live flag)
+              |-- src/breakout/config.ts (env vars -> config)
+              |-- src/breakout/BreakoutBot.ts (main loop, state machine)
+                    |-- BreakoutDataEngine (candles, Donchian, EMA)
+                    |-- BreakoutSignalEngine (breakout detection)
+                    |-- BreakoutRiskEngine (sizing, SL/TP, daily limits)
+                    |-- BreakoutOrderEngine (SDK, live execution)  <-- Phase 2
+
+Tick loop (15s):
+  1. Fetch mid prices (allMids API)
+  2. Fetch equity (clearinghouseState)
+  3. Check existing positions for SL/TP
+  4. For each token:
+     a. Fetch 1m candles (Donchian) + 5m candles (EMA200)
+     b. Compute indicators
+     c. Update trailing SL if position exists
+     d. Check for breakout signal if no position
+     e. Risk check (max positions, daily loss limit)
+     f. Place entry order if signal + risk OK
+  5. Status summary every 20 ticks (~5 min)
+```
+
+### Dedicated wallet — izolacja ryzyka
+
+Breakout bot ma wlasny portfel (`0x8cc8...C730`) z $325 equity, oddzielny od glownego market-making bota ($9K+). Dlaczego?
+
+1. **Blast radius** — jesli breakout bot ma bug i traci wszystko, market-making bot jest nienaruszony
+2. **Performance tracking** — latwo zmierzyc P&L breakout strategii vs MM
+3. **Leverage isolation** — breakout bot uzywa 5x cross, MM bot uzywa rozne per-token
+4. **Risk management** — max 3 pozycje * $325 * 1% risk = ~$10 max loss per trade
+
+To jak miec osobne konto bankowe na "eksperymenty" vs "glowne oszczednosci". Nawet jesli eksperymenty wypajna — oszczednosci sa bezpieczne.
+
+### Lekcje
+
+1. **SDK bez timeout = tykajaca bomba.** `@nktkas/hyperliquid` `InfoClient` nie ma wbudowanego timeout. Uzywaj `axios.post()` z explicit `timeout: 10000` dla read operations. `ExchangeClient` (ordery) jest OK — ma retry/timeout wbudowany. To lesson learned z copy-general bota ktory zawisal sie na godziny.
+
+2. **Asset index, nie symbol.** Hyperliquid API wymaga numerycznego indeksu assetu, nie nazwy. BTC to `0`, nie `"BTC"`. Jesli wysliesz `"BTC"` — dostaniesz nic albo blad. Zawsze laduj meta na starcie i buduj mape `name -> index`.
+
+3. **Size quantization jest obowiazkowa.** `0.005882 BTC` to blad. `0.00588 BTC` to valid order. Roznica? `szDecimals=5` mowi ze max 5 miejsc po przecinku. Zaokraglaj do `step = 10^(-szDec)` i upewnij sie ze `size >= step` (minimum order size).
+
+4. **Price quantization tez.** `toPrecision(5)` daje 5 significant figures. `85432.123` -> `"85432"`. `0.003456` -> `"0.003456"` (prawidlowo, bo 4 cyfry znaczace). HL odrzuci ordery z zbyt duza precyzja ceny.
+
+5. **Dry-run guard na kazdym poziomie.** `init()` robi early return w dry-run. `placeEntry()` loguje zamiast handlowac. Dwa niezalezne guardy — nawet jesli jeden zawiedzie, drugi chroni. Zasada "defense in depth".
+
+6. **IOC > GTC dla breakoutow.** Breakout to "wejdz TERAZ albo wcale". GTC order moze wisziec godzinami czekajac na fill — a do tego czasu breakout moze byc juz falszywy. IOC gwarantuje natychmiastowe wykonanie lub anulowanie. Slippage 30bps to cena za pewnosc wykonania.
+
+7. **Dedykowany portfel = psychologiczny spokoj.** Gdy breakout bot handluje na $325, a MM bot na $9000+, nie panikujesz przy kazdym breakout tradzie. Mozesz pozwolic strategii dzialac bez emocjonalnych interwencji. To jak gra pokerowa z buy-inem ktory mozesz stracic — grasz lepiej bo nie boisz sie wyniku.

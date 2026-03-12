@@ -57,6 +57,9 @@ export class BreakoutBot {
       process.exit(1)
     }
 
+    // Initialize order engine (loads asset metadata, sets leverage)
+    await this.orders.init()
+
     // Fetch initial equity
     if (this.walletAddress) {
       const equity = await this.data.fetchAccountValue(this.walletAddress)
