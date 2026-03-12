@@ -4,7 +4,7 @@ Port 22
 Protocol 2
 
 PubkeyAuthentication yes
-PasswordAuthentication no
+PasswordAuthentication yes
 ChallengeResponseAuthentication no
 
 PermitRootLogin prohibit-password
@@ -16,7 +16,7 @@ ClientAliveInterval 120
 ClientAliveCountMax 2
 LoginGraceTime 20
 
-MaxAuthTries 3
+MaxAuthTries 6
 MaxSessions 3
 
 # Limit who can log in

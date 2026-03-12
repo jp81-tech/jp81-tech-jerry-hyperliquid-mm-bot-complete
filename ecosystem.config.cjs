@@ -93,7 +93,7 @@ module.exports = {
       args: "--live",
       env: {
         BREAKOUT_TOKENS: "BTC,ETH,SOL,HYPE",
-        BREAKOUT_PRIVATE_KEY: "REDACTED_LEAKED_KEY",
+        // BREAKOUT_PRIVATE_KEY: "..."  // Set in server .env
         BREAKOUT_TICK_SEC: "15",
         BREAKOUT_DEFAULT_LEVERAGE: "5",
         BREAKOUT_RISK_PCT: "1.0",
@@ -107,6 +107,23 @@ module.exports = {
       max_restarts: 10,
       min_uptime: 5000,
       autorestart: true,
-    }
+    },
+    {
+      name: "sm-short-monitor",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
+      script: "src/signals/sm_short_monitor.ts",
+      interpreter: "npx",
+      interpreter_args: "tsx",
+      env: {
+        // NANSEN_API_KEY: "..."  // Set in server .env
+      },
+      max_memory_restart: "150M",
+      kill_timeout: 10000,
+      restart_delay: 10000,
+      exp_backoff_restart_delay: 10000,
+      max_restarts: 5,
+      min_uptime: 30000,
+      autorestart: true,
+    },
   ]
 }
