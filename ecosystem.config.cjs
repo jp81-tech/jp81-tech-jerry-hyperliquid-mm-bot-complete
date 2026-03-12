@@ -74,7 +74,7 @@ module.exports = {
         COPY_MIN_VALUE_USD: "10000",
         COPY_SCALING_MODE: "fixed",
         COPY_BLOCKED_COINS: "PUMP",
-        COPY_ALLOWED_COINS: "LIT,xyz:GOLD",
+        COPY_ALLOWED_COINS: "LIT,xyz:CL,ASTER,APEX",
         // COPY_PRIVATE_KEY: "..."  // Set on server .env or PM2 env
       },
       max_memory_restart: "150M",
@@ -83,6 +83,47 @@ module.exports = {
       max_restarts: 10,
       min_uptime: 5000,
       autorestart: true,
-    }
+    },
+    {
+      name: "breakout-bot",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
+      script: "scripts/breakout_bot.ts",
+      interpreter: "npx",
+      interpreter_args: "tsx",
+      args: "--live",
+      env: {
+        BREAKOUT_TOKENS: "BTC,ETH,SOL,HYPE",
+        // BREAKOUT_PRIVATE_KEY: "..."  // Set in server .env
+        BREAKOUT_TICK_SEC: "15",
+        BREAKOUT_DEFAULT_LEVERAGE: "5",
+        BREAKOUT_RISK_PCT: "1.0",
+        BREAKOUT_MAX_POSITIONS: "3",
+        BREAKOUT_TP_R_MULT: "3.0",
+        // DISCORD_BREAKOUT_WEBHOOK: "",  // Set on server
+      },
+      max_memory_restart: "150M",
+      kill_timeout: 10000,
+      restart_delay: 5000,
+      max_restarts: 10,
+      min_uptime: 5000,
+      autorestart: true,
+    },
+    {
+      name: "sm-short-monitor",
+      cwd: "/home/jerry/hyperliquid-mm-bot-complete",
+      script: "src/signals/sm_short_monitor.ts",
+      interpreter: "npx",
+      interpreter_args: "tsx",
+      env: {
+        // NANSEN_API_KEY: "..."  // Set in server .env
+      },
+      max_memory_restart: "150M",
+      kill_timeout: 10000,
+      restart_delay: 10000,
+      exp_backoff_restart_delay: 10000,
+      max_restarts: 5,
+      min_uptime: 30000,
+      autorestart: true,
+    },
   ]
 }

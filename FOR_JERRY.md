@@ -10302,3 +10302,101 @@ Weekly, Sunday 10:00 UTC — pasuje do istniejacego cyklu raportow (hourly, dail
 4. **State file TTL chroni przed dwoma skrajnosciami.** Bez dedup = spam. Bez TTL = missed signals. 30-dniowy TTL to sweet spot — daje miesiac ciszy na adres, potem re-discovery jesli nadal aktywny. Inspiracja z DNS TTL, HTTP cache headers, i certificate validity periods — **wszystko w IT ma swoj optymalny czas zycia.**
 
 5. **Reuse > rewrite.** 6 patternow skopiowanych z istniejacych skryptow — `fmtUsd`, Discord embeds, HL API fetch, dry-run flag, dotenv, KNOWN_ADDRESSES. Kazdy zaoszczedzil 15-30 minut kodowania i testowania. Na skali calego projektu, konsystentny reuse to roznica miedzy "skrypt gotowy w 2 godziny" a "skrypt gotowy w 2 dni".
+
+
+---
+
+## Rozdzial 61: SM Short Monitor — Naprawa i Dashboard (12.03.2026)
+
+### Kontekst: Co sie zepsulo
+
+`sm-short-monitor` to proces PM2 ktory monitoruje pozycje Smart Money na Hyperliquid perpach przez Nansen Perp Screener API. Chodzil sobie spokojnie, az naraz dwie rzeczy sie staly:
+
+1. **Ktos skasoval `start_sm_monitor.sh`** — PM2 probowal uruchomic ten shell script, ale plik nie istnial. Klasyczny problem: konfiguracja PM2 wskazywala na plik, ktory ktos usunal nie myslac o konsekwencjach. PM2 probowal restartowac, dostawal "No such file or directory", i po 18 restartach dal spokoj → status: `errored`.
+
+2. **Nansen API: 403 "Insufficient credits"** — kredyty na perp-screener endpoint sie skonczyly. Ale skrypt nie mial zadnego backoff — hamerowal API co 5 minut, dostajac 403 w kolko. To jak pukanie do zamknietych drzwi co 5 minut zamiast sprawdzic czy sklep jutro jest otwarty.
+
+### Co naprawilismy
+
+#### Fix 1: Ecosystem Config
+
+Zamiast uruchamiac `start_sm_monitor.sh` (shell script wrapper), dodalismy `sm-short-monitor` bezposrednio do `ecosystem.config.cjs`:
+
+```javascript
+{
+  name: "sm-short-monitor",
+  script: "src/signals/sm_short_monitor.ts",
+  interpreter: "npx",
+  interpreter_args: "tsx",
+  env: { NANSEN_API_KEY: "..." },  // z .env serwera
+  max_restarts: 5,
+  min_uptime: 30000,  // 30s minimum
+}
+```
+
+**Lekcja:** Nigdy nie uzywaj shell script wrappera (`start_xxx.sh`) dla PM2 jezeli mozesz wskazac bezposrednio na plik zrodlowy. Shell script to dodatkowy punkt awarii — moze zostac usuniety, moze miec zle uprawnienia, moze miec zle srodowisko. `npx tsx` bezposrednio na `.ts` pliku = mniej czesci ruchomych.
+
+#### Fix 2: Exponential Backoff
+
+Dodalismy trzy rzeczy do `sm_short_monitor.ts`:
+
+```
+Blad 403 → consecutiveErrors++ → backoff = 5min × 2^errors (max 1h)
+Sukces   → consecutiveErrors = 0, backoff = 0
+Main loop → while(true) zamiast setInterval (zeby backoff dzialal)
+```
+
+**Analogia:** Wyobraz sobie ze dzwonisz do restauracji zeby zarezerwowac stolik. Zajete. Normalny czlowiek zadzwoni za 15 minut, potem za 30 minut, potem za godzine. Nasz stary skrypt dzwonil co 5 minut non-stop. Exponential backoff = zachowuj sie jak normalny czlowiek.
+
+**Dlaczego `while(true)` zamiast `setInterval`?**
+
+`setInterval` uruchamia callback co X ms, NIEZALEZNIE od tego co callback robi. Jezeli callback czeka 20 minut (backoff), `setInterval` i tak odpali kolejny callback po 5 minutach. Wiec masz dwa callbacki naraz, potem trzy, potem chaos.
+
+`while(true) { await poll(); await sleep(interval); }` gwarantuje ze nastepny poll zaczyna sie DOPIERO po zakonczeniu poprzedniego + interwal. Sekwencyjne, przewidywalne, bezpieczne.
+
+#### Fix 3: NANSEN_API_KEY w env
+
+Skrypt czytal `process.env.NANSEN_API_KEY`, ale PM2 nie laduje `.env` automatycznie. Wczesniej dzialalo bo shell script wrapper pewnie robil `source .env`. Dodalismy key bezposrednio do ecosystem config (z komentarzem "Set in server .env" w gicie — nie commitujemy sekretow!).
+
+**Lekcja:** PM2 env to NIE to samo co `.env` plik. PM2 `env: {}` w ecosystem config → wstrzykuje do `process.env`. Plik `.env` → czytany przez `dotenv` library (trzeba explicit import). To dwa rozne mechanizmy!
+
+### Mac Command Center Dashboard
+
+Stworzylismy `~/dashboard.py` — terminalowy dashboard ktory laczy sie z serwerem via SSH i wyswietla wszystko na jednym ekranie:
+
+```
+========================================================================
+   HYPERLIQUID MM BOT — COMMAND CENTER
+========================================================================
+
+[ PM2 PROCESSES ]
+  mm-virtual       online     15     22h 2m
+  mm-pure          online     27     17h 27m
+  sm-short-monitor online     0      7m       ← NAPRAWIONY!
+  ...
+
+[ SMART MONEY POSITIONS ]
+  BTC   FOLLOW_SM_SHORT  $14M longs  $121M shorts  S 8.7x  80%
+  ETH   FOLLOW_SM_SHORT  $7M longs   $73M shorts   S 10.7x 65%
+  ...
+
+[ NANSEN SIGNAL STATE ]
+  VIRTUAL   GREEN    46d ago
+  LIT       YELLOW   16d ago
+```
+
+**Architektura:** Kazda sekcja to osobna funkcja renderujaca (`render_pm2`, `render_signal_state`, `render_smart_money`, `render_telemetry`, `render_logs`). Dane pobierane via `ssh hl-mm 'command'` → JSON → parse → render. Auto-refresh co 30s.
+
+**Zero dependencies** — tylko stdlib Python 3. Zadnego pip install, zadnego virtualenv. ANSI escape codes dla kolorow (dziala w kazdym terminalu macOS/Linux). Celowo proste — dashboard ma byc narzedziem ktore odpalisz w 1 sekunde, nie aplikacja wymagajaca setupu.
+
+### Lekcje
+
+1. **PM2 error logs sa kumulatywne.** Stare bledy z poprzednich restartow mieszaja sie z nowymi. Patrz na ID procesu (np. `62|sm-shor`) zeby odroznic nowe logi od starych. Nasz monitor mial ID 24 (stary, errored), potem 61 (bez API key), potem 62 (dzialajacy). Czytajac `pm2 logs` widzisz WSZYSTKO naraz.
+
+2. **`pm2 delete + start` vs `pm2 restart`**: `restart` NIE przeladuje `ecosystem.config.cjs` env. Musisz `delete` + `start` zeby PM2 wczytal nowe zmienne srodowiskowe. To jest sprzeczne z intuicja — "restart" sugeruje "zacznij od nowa", ale w PM2 to "zabij + uruchom z TYM SAMYM env".
+
+3. **Sekrety w git = bomba zegarowa.** Breakout bot mial private key hardcoded w ecosystem config. Dashboard mial NANSEN_API_KEY. Przed commitem ZAWSZE: `git diff | grep -i "key\|secret\|password\|token\|private"`. Usunelismy oba przed pushem — w gicie zostaly komentarze `// Set in server .env`.
+
+4. **Exponential backoff to must-have dla kazdego pollingowego serwisu.** Bez niego: 403 co 5min = 288 zbednych requestow dziennie = mozliwy ban. Z nim: 403 → czeka coraz dluzej → max 1h → probuje ponownie. Jeden `if (status === 403)` + 3 zmienne = profesjonalny retry behavior.
+
+5. **Dashboard to twoj command center.** Zanim miales dashboard: `ssh → pm2 status → pm2 logs → cat /tmp/file.json → curl telemetry`. Teraz: `python3 dashboard.py` → wszystko na jednym ekranie. Inwestycja 200 linii kodu oszczedza 5 minut przy KAZDYM sprawdzeniu stanu bota. Przy 10 sprawdzeniach dziennie to 50 minut oszczednosci.

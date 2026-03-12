@@ -4630,11 +4630,15 @@ if (sizeMultipliers.bid === 0 && isHoldForTpGrid) {
 ## PM2 Management
 
 ```bash
-# Restart bota
-ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 restart mm-bot'
+# Restart bota (glowne instancje)
+ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 restart mm-virtual'
+ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 restart mm-pure'
+
+# SM Short Monitor
+ssh hl-mm 'cd ~/hyperliquid-mm-bot-complete && ~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 delete sm-short-monitor && ~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 start ecosystem.config.cjs --only sm-short-monitor'
 
 # Logi
-ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 logs mm-bot --lines 50'
+ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 logs mm-virtual --lines 50'
 
 # Status
 ssh hl-mm '~/.npm/_npx/5f7878ce38f1eb13/node_modules/pm2/bin/pm2 status'
@@ -5108,6 +5112,9 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - [x] Fasanara Capital reklasyfikacja — MARKET_MAKER, weight 0.0, usunięty z agregatu (~$64M phantom SHORT) (DONE 24.02)
 - [x] Dormant decay — `/tmp/whale_activity.json`, 4-tier decay (7d/14d/21d+), logi `💤 [DORMANT]` (DONE 24.02)
 - [x] Manual trader boost — OG Shorter 0.13→0.81 (6x), Kapitan fce0 0.80→0.85 (DONE 24.02)
+
+- **sm-short-monitor fix (12.03)**: PM2 wskazywal na nieistniejacy `start_sm_monitor.sh` → errored. Fix: dodano do `ecosystem.config.cjs` z `interpreter: npx tsx`, `NANSEN_API_KEY` w env. Exponential backoff na 403 "Insufficient credits" (zamiast hammerowac API co 5min, czeka 10min→20min→40min→max 1h). `setInterval` → async `while(true)` loop (respektuje backoff). Plik: `src/signals/sm_short_monitor.ts`.
+- **Mac Command Center dashboard (12.03)**: `~/dashboard.py` — terminal dashboard laczacy sie z serwerem via SSH. Wyswietla: PM2 status (10 procesow), Nansen Signal State (GREEN/YELLOW/RED), Smart Money Positions z whale_tracker (8 tokenow, longs/shorts/ratio/uPnL/confidence), Telemetry, ostatnie logi mm-virtual. Auto-refresh co 30s. Kolorowe ANSI output. Zero dependencies (pure Python 3).
 
 ## Notatki
 - **Fib Guard**: Redukuje askMultiplier blisko Fib support levels (0.618, 0.786, 1.0). Trzy sygnały: fibProximity (50%), pseudo-RSI (25%), drawdown (25%). SM Override: conf>=70% → guard OFF, conf>=50% → guard×0.5. Per-token overrides: BTC/ETH tighter, LIT/FARTCOIN wider. Pipeline: po bounce filter, przed dip filter. Config w `short_only_config.ts`. Logi: `🏛️ [FIB_GUARD]`.
