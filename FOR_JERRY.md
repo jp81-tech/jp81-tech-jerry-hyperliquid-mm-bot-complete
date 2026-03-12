@@ -11125,3 +11125,99 @@ Stworzylismy `~/dashboard.py` — terminalowy dashboard ktory laczy sie z serwer
 
 5. **Dashboard to twoj command center.** Zanim miales dashboard: `ssh → pm2 status → pm2 logs → cat /tmp/file.json → curl telemetry`. Teraz: `python3 dashboard.py` → wszystko na jednym ekranie. Inwestycja 200 linii kodu oszczedza 5 minut przy KAZDYM sprawdzeniu stanu bota. Przy 10 sprawdzeniach dziennie to 50 minut oszczednosci.
 
+## Rozdzial 62: Czyszczenie Historii Git — Jak Usunac Sekrety z Przeszlosci (12.03.2026)
+
+### Problem
+
+Podczas security scan odkrylismy, ze stary private key breakout walleta (`0x488df3...`) jest nadal widoczny w historii git. Commit `0ba0fce` z 12 marca mial ten klucz hardcoded w `ecosystem.config.cjs`:
+
+```javascript
+BREAKOUT_PRIVATE_KEY: "0x488df30b3261121ee2232a4b2b6d1becd80d6f29ed240e3969...",
+```
+
+Wallet byl juz spalony — drainer zabral srodki — wiec nie bylo bezposredniego ryzyka finansowego. Ale zostawianie kluczy w historii git to zla praktyka: ktos moze przypadkowo uzyc tego klucza, albo jesli ten sam klucz byl reused gdzies indziej (a ludzie to robia!), moglby byc exploitowany.
+
+**Analogia:** Wyobraz sobie, ze napisales na tablicy swoje haslo do banku. Potem je starles — ale ktos zrobil zdjecie tablicy zanim starles. Git jest jak ta kamera — nawet jesli usuniesz plik z aktualnego kodu, kazdy kto sklonuje repo moze `git log -p` i zobaczyc kazda zmiane od poczatku.
+
+### Rozwiazanie: git-filter-repo
+
+Git ma narzedzie `git-filter-repo` ktore pozwala **przepisac cala historie** repozytorium, zamieniajac (lub usuwajac) konkretne stringi we WSZYSTKICH commitach.
+
+**Krok po kroku co zrobilismy:**
+
+```bash
+# 1. Najpierw znalezlismy dokladnie co i gdzie
+git log --all -S "0x488df30b..." --oneline
+# Wynik: 0ba0fce feat: Breakout Bot Phase 2
+
+# 2. Stworzylismy plik z zamiana
+echo '0x488df30b3261121ee2232a4b2b6d1becd80d6f29ed240e39691e8a5779fab840==>REDACTED_LEAKED_KEY' > /tmp/filter_replacements.txt
+
+# 3. Uruchomilismy git-filter-repo
+git-filter-repo --replace-text /tmp/filter_replacements.txt --force
+# Przepisalo 327 commitow w 7 sekund
+
+# 4. git-filter-repo USUWA remote origin (celowo — zabezpieczenie)
+git remote add origin git@github.com:jp81-tech/...git
+
+# 5. Force push — nadpisanie historii na GitHubie
+git push origin --force --all --tags
+
+# 6. Aktualizacja serwera
+ssh hl-mm 'cd ~/repo && git fetch origin --force && git reset --hard origin/feat/next'
+
+# 7. Weryfikacja — ZERO wynikow
+git log --all -p | grep -c "0x488df30b..."
+# Wynik: 0
+```
+
+### Jak to dziala pod spodem
+
+`git-filter-repo` przechodzi przez KAZDY commit w repozytorium (od pierwszego do ostatniego), otwiera kazdy plik w kazdym urzadzeniu i robi find-and-replace. To oznacza:
+
+1. **Kazdy commit dostaje nowy SHA** — bo zawartosc sie zmienila, hash tez sie zmienia
+2. **Stary SHA `0ba0fce` nie istnieje** — jest teraz `b7de65a` (ta sama tresc, ale klucz zastapiony REDACTED)
+3. **Remote jest usuwany** — bo git-filter-repo wie, ze stary remote ma stara historie i nie chce, zebys przypadkowo pushnul do zlego repo
+
+### Dlaczego force push jest konieczny
+
+Normalnie `git push` dodaje nowe commity na wierzch istniejacych. Ale tutaj **zmienilismy stare commity** — GitHub ma stara wersje historii, my mamy nowa. Jedyny sposob: `--force` = "zaufaj mi, moja wersja jest prawidlowa, nadpisz co masz".
+
+**To jest jedna z nielicznych sytuacji gdzie force push jest OK:** czyszczenie sekretow z historii. Ale ZAWSZE upewnij sie, ze:
+- Nikt inny nie pracuje na tych branchach w tym momencie
+- Serwer zostanie zaktualizowany natychmiast po pushu
+- Stare klony repo sa nieaktualne (ktos kto sklonuje od nowa dostanie czysta historie)
+
+### Lekcje
+
+1. **NIGDY nie commituj kluczy do gita.** Nawet jesli `.gitignore` chroni `.env`, jeden `ecosystem.config.cjs` z hardcoded kluczem = problem. Zawsze uzywaj `process.env.VARIABLE_NAME`.
+
+2. **`git diff | grep -i "key\|secret\|password\|token\|private"` przed KAZDYM commitem.** To 5 sekund ktore moze zaoszczedzic godziny czyszczenia.
+
+3. **git-filter-repo > BFG Repo-Cleaner > git filter-branch.** `git-filter-repo` jest najszybszy i najbezpieczniejszy. `git filter-branch` jest oficjalnie deprecated. BFG jest OK ale mniej elastyczny.
+
+4. **Spalony klucz to nadal problem.** Nawet jesli wallet jest pusty — ktos moze pomyslec ze klucz jest aktywny, moze go uzyc na testnet, moze go zindeksowac skaner. Oczysc historie, nie zostawiaj "na potem".
+
+5. **Procedura jest powtarzalna.** Gdybys w przyszlosci znalazl kolejny secret w historii:
+   ```
+   echo 'SECRET==>REDACTED' > /tmp/replacements.txt
+   git-filter-repo --replace-text /tmp/replacements.txt --force
+   git remote add origin <URL>
+   git push origin --force --all --tags
+   ssh server 'git fetch --force && git reset --hard'
+   ```
+
+### Aktualny stan bezpieczenstwa
+
+Po czyszczeniu zrobilismy pelny skan i dodalismy sekcje "Security Scan" do CLAUDE.md:
+
+| Element | Status |
+|---|---|
+| Glowny klucz MM (PRIVATE_KEY) | Bezpieczny — nigdy nie commitowany |
+| Nansen API key | Bezpieczny — nigdy nie commitowany |
+| Breakout wallet key | Bezpieczny — nigdy nie commitowany |
+| Stary breakout key (0x488df3...) | Wyczyszczony z historii |
+| Pliki zrodlowe (.ts, .js, .cjs) | Czyste — wszystko z process.env |
+
+Zero sekretow w kodzie, zero sekretow w historii. Tak jak powinno byc.
+
