@@ -3698,7 +3698,6 @@ class HyperliquidMMBot {
 
   // 📍 S/R DISCORD ALERTS — cooldown tracking (token:level_type → last alert timestamp)
   private srAlertCooldowns: Map<string, number> = new Map()
-  private srBreakGraceStart: Map<string, number> = new Map()  // S/R break grace period: pair → timestamp when break first detected
   private srBounceHoldState: Map<string, { timestamp: number; srLevel: number; side: 'long' | 'short' }> = new Map()  // S/R Bounce Hold: track when S/R Accum built position
   private srPrevPhases: Map<string, Set<string>> = new Map()  // S/R Phase tracking: pair → active phases last tick
   private static readonly SR_ALERT_COOLDOWN_MS = 60 * 60 * 1000  // 60 min per token per level type (first alert instant)
@@ -8871,72 +8870,13 @@ class HyperliquidMMBot {
           // LONG approaching resistance (profitable) → reduce bids (stop building), boost asks (close longs)
           // At S/R with position <= maxRetainPct → disengage → normal MM (MG proximity handles bounce/break)
           let srReductionApplied = false
-          let srGraceActive = false
           let srAccumApplied = false
           if (momGuardConfig.srReductionEnabled && position && mgAtr > 0) {
             const absSkewSr = Math.abs(actualSkew)
             const reductionZone = mgStrongZone * momGuardConfig.srReductionStartAtr
 
-            // === Grace Period: delay reduction after S/R break AGAINST position ===
-            // LONG + price breaks below support → wait N candles before reducing (fakeout assessment)
-            // SHORT + price breaks above resistance → mirror
-            const graceMs = momGuardConfig.srReductionGraceCandles * 15 * 60 * 1000  // candles × 15min
-            const graceLongKey = `${pair}:LONG_BREAK_SUPPORT`
-            const graceShortKey = `${pair}:SHORT_BREAK_RESIST`
-
-            // LONG + BROKEN SUPPORT (candle close confirmed, prox <= -1.2) → start/check grace
-            if (hasLongPos && mgSupportBody > 0 && mgProxSignal <= -1.2) {
-              if (!this.srBreakGraceStart.has(graceLongKey)) {
-                this.srBreakGraceStart.set(graceLongKey, Date.now())
-                console.log(`⏳ [SR_GRACE] ${pair}: LONG + BROKEN SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
-              }
-              const elapsed = Date.now() - this.srBreakGraceStart.get(graceLongKey)!
-              if (elapsed < graceMs) {
-                srGraceActive = true
-                srPipelineStatus.phase = 'GRACE'
-                srPipelineStatus.detail = `grace LONG ${((graceMs - elapsed)/60000).toFixed(0)}min left`
-                if (this.tickCount % 10 === 0) {
-                  console.log(`⏳ [SR_GRACE] ${pair}: LONG grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
-                }
-              } else {
-                if (this.tickCount % 20 === 0) {
-                  console.log(`⏳ [SR_GRACE] ${pair}: LONG grace EXPIRED — breakdown confirmed, allowing reduction`)
-                }
-              }
-            } else if (hasLongPos && mgProxSignal > -1.2 && this.srBreakGraceStart.has(graceLongKey)) {
-              // Price recovered (prox no longer BROKEN) → clear grace, resume accumulation
-              console.log(`✅ [SR_GRACE] ${pair}: Price recovered above SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
-              this.srBreakGraceStart.delete(graceLongKey)
-            }
-
-            // SHORT + BROKEN RESISTANCE (candle close confirmed, prox >= 1.2) → start/check grace
-            if (hasShortPos && mgResistBody > 0 && mgProxSignal >= 1.2) {
-              if (!this.srBreakGraceStart.has(graceShortKey)) {
-                this.srBreakGraceStart.set(graceShortKey, Date.now())
-                console.log(`⏳ [SR_GRACE] ${pair}: SHORT + BROKEN RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
-              }
-              const elapsed = Date.now() - this.srBreakGraceStart.get(graceShortKey)!
-              if (elapsed < graceMs) {
-                srGraceActive = true
-                srPipelineStatus.phase = 'GRACE'
-                srPipelineStatus.detail = `grace SHORT ${((graceMs - elapsed)/60000).toFixed(0)}min left`
-                if (this.tickCount % 10 === 0) {
-                  console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
-                }
-              } else {
-                if (this.tickCount % 20 === 0) {
-                  console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace EXPIRED — breakout confirmed, allowing reduction`)
-                }
-              }
-            } else if (hasShortPos && mgProxSignal < 1.2 && this.srBreakGraceStart.has(graceShortKey)) {
-              // Price recovered (prox no longer BROKEN) → clear grace
-              console.log(`✅ [SR_GRACE] ${pair}: Price recovered below RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
-              this.srBreakGraceStart.delete(graceShortKey)
-            }
-
             // SHORT approaching SUPPORT (profitable move down)
-            // Grace period suppresses reduction when SHORT broke ABOVE resistance (fakeout assessment)
-            if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone && !srGraceActive) {
+            if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone) {
               const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / reductionZone) * 100))
 
               const srReductionMinSkewShort = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
@@ -8975,7 +8915,7 @@ class HyperliquidMMBot {
 
             // LONG approaching RESISTANCE (profitable move up)
             // Grace period suppresses reduction when LONG broke BELOW support (fakeout assessment)
-            if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone && !srGraceActive) {
+            if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone) {
               const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / reductionZone) * 100))
 
               const srReductionMinSkewLong = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
@@ -9259,7 +9199,7 @@ class HyperliquidMMBot {
 
           // === Send pending S/R Discord alert with pipeline status ===
           if (srAlertPending && srAlertData) {
-            const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', GRACE: '⏳', INV_AWARE: '⚡' }
+            const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', INV_AWARE: '⚡' }
             const fields = [
               { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
               { name: srAlertData.levelLabel, value: `$${srAlertData.level.toFixed(6)}`, inline: true },
@@ -9301,7 +9241,7 @@ class HyperliquidMMBot {
             if (srReductionApplied) currentPhases.add('SR_REDUCTION')
             if (this.srBounceHoldState.has(pair) && !srAccumApplied && srPipelineStatus.phase === 'BOUNCE_HOLD') currentPhases.add('BOUNCE_HOLD')
             if (breakoutApplied) currentPhases.add('BREAKOUT_TP')
-            if (srGraceActive) currentPhases.add('GRACE')
+
 
             const prevPhases = this.srPrevPhases.get(pair) || new Set()
 
@@ -9309,13 +9249,11 @@ class HyperliquidMMBot {
               SR_ACCUM:     { emoji: '🔄', color: 0x3498db, startLabel: 'SR_ACCUM START', endLabel: 'SR_ACCUM END' },
               SR_REDUCTION: { emoji: '📉', color: 0x9b59b6, startLabel: 'SR_REDUCTION START', endLabel: 'SR_REDUCTION END' },
               BOUNCE_HOLD:  { emoji: '🔒', color: 0x1abc9c, startLabel: 'BOUNCE_HOLD START', endLabel: 'BOUNCE_HOLD RELEASED' },
-              GRACE:        { emoji: '⏳', color: 0xf1c40f, startLabel: 'GRACE START', endLabel: 'GRACE EXPIRED' },
+  
               BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
             }
 
-            const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {
-              GRACE: 60 * 60 * 1000,  // 60min — GRACE toggles frequently, not actionable
-            }
+            const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {}
 
             const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
               const cfg = phaseAlertConfig[phase]
@@ -10073,7 +10011,6 @@ class HyperliquidMMBot {
 
         // === 📉 S/R PROGRESSIVE REDUCTION ===
         let srReductionApplied = false
-        let srGraceActive = false
         let srAccumApplied = false
         if (momGuardConfig.srReductionEnabled && position && mgAtr > 0) {
           const absSkewSr = Math.abs(actualSkew)
@@ -10113,7 +10050,7 @@ class HyperliquidMMBot {
           }
 
           // LONG near RESISTANCE → progressive reduction
-          if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone && !srGraceActive) {
+          if (hasLongPos && mgResistBody > 0 && mgResistDist < reductionZone) {
             const progressPct = Math.max(0, Math.min(100, (1.0 - mgResistDist / reductionZone) * 100))
             const srReductionMinSkewLong = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
             if (absSkewSr > srReductionMinSkewLong) {
@@ -10331,7 +10268,7 @@ class HyperliquidMMBot {
 
         // === Send pending S/R Discord alert with pipeline status ===
         if (srAlertPending && srAlertData) {
-          const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', GRACE: '⏳', INV_AWARE: '⚡' }
+          const phaseEmojiMap: Record<string, string> = { ACCUM: '🔄', REDUCTION: '📉', BOUNCE_HOLD: '🔒', BREAKOUT_TP: '🚀', INV_AWARE: '⚡' }
           const fields = [
             { name: 'Price', value: `$${midPrice.toFixed(6)}`, inline: true },
             { name: srAlertData.levelLabel, value: `$${srAlertData.level.toFixed(6)}`, inline: true },
@@ -10371,19 +10308,17 @@ class HyperliquidMMBot {
           if (srReductionApplied) currentPhases.add('SR_REDUCTION')
           if (this.srBounceHoldState.has(pair) && !srAccumApplied && srPipelineStatus.phase === 'BOUNCE_HOLD') currentPhases.add('BOUNCE_HOLD')
           if (breakoutApplied) currentPhases.add('BREAKOUT_TP')
-          if (srGraceActive) currentPhases.add('GRACE')
+
 
           const prevPhases = this.srPrevPhases.get(pair) || new Set()
           const phaseAlertConfig: Record<string, { emoji: string; color: number; startLabel: string; endLabel: string }> = {
             SR_ACCUM:     { emoji: '🔄', color: 0x3498db, startLabel: 'SR_ACCUM START', endLabel: 'SR_ACCUM END' },
             SR_REDUCTION: { emoji: '📉', color: 0x9b59b6, startLabel: 'SR_REDUCTION START', endLabel: 'SR_REDUCTION END' },
             BOUNCE_HOLD:  { emoji: '🔒', color: 0x1abc9c, startLabel: 'BOUNCE_HOLD START', endLabel: 'BOUNCE_HOLD RELEASED' },
-            GRACE:        { emoji: '⏳', color: 0xf1c40f, startLabel: 'GRACE START', endLabel: 'GRACE EXPIRED' },
+
             BREAKOUT_TP:  { emoji: '🚀', color: 0xf39c12, startLabel: 'BREAKOUT_TP ACTIVE', endLabel: 'BREAKOUT_TP END' },
           }
-          const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {
-            GRACE: 60 * 60 * 1000,  // 60min — GRACE toggles frequently, not actionable
-          }
+          const PHASE_COOLDOWN_OVERRIDES: Record<string, number> = {}
 
           const sendPhaseAlert = (phase: string, transition: 'START' | 'END') => {
             const cfg = phaseAlertConfig[phase]
