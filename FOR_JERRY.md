@@ -48,6 +48,7 @@
 40. [HLP Vault Tracking — Sledzenie Wieloryba Gieldy](#hlp-vault-tracking--sledzenie-wieloryba-gieldy)
 41. [Oracle allMids Cache — Jeden telefon zamiast trzynastu](#oracle-allmids-cache--jeden-telefon-zamiast-trzynastu)
 42. [Dex-Trades 422 — Niedokonczona robota](#dex-trades-422--niedokonczona-robota)
+43. [S/R Flip Detection — gdy opor staje sie wsparciem](#sr-flip-detection--gdy-opor-staje-sie-wsparciem)
 
 ---
 
@@ -11435,4 +11436,168 @@ Ratio 4:1 znaczy ze bot sklada 4x wiecej orderow na closing side niz na opening 
 3. **Systemy nie znaja siebie nawzajem.** HOLD_FOR_TP nie wie o SR_REDUCTION. SR_REDUCTION nie wie o HOLD_FOR_TP. Kazdy robi swoje. Dlatego interakcje miedzy nimi moga tworzyc edge cases (jak `0 * boost = 0`). Warto patrzec na pipeline holistically — "co sie stanie gdy modul A wyzeruje cos, a modul B sprobuje to pomnoz?"
 
 4. **Testuj przejscia stanow.** Bot w HOLD to inny stan niz bot w normalnym MM. Przejscie miedzy nimi (HOLD → active) to moment gdzie bugi sie chowaja. Warto miec osobne testy dla kazdego przejscia.
+
+## Rozdzial 65: S/R Flip Detection — gdy opor staje sie wsparciem (13.03.2026)
+
+### Problem: pamiec goldfish
+
+Bot uzywa rolling min/max z 50 swiec 1h do wyznaczania Support i Resistance. To dziala, ale ma fundamentalna wade — **rolling window nie ma pamieci**.
+
+Wyobraz sobie: kPEPE ma resistance na $0.00376. Cena przebija go, idzie na $0.00390. Stary resistance powinien teraz stac sie nowym supportem — to klasyczny "S/R flip" z analizy technicznej. Kazdy trader manualny to wie.
+
+Ale rolling min/max po kilku swieczach "zapomina" o $0.00376. Nowe minimum z okna 50 swiec to teraz $0.00382 (bo cena juz nie wraca tak nisko). Stary level znika. Gdy cena robi pullback do $0.00377, bot widzi to jako "zblizanie sie do resistance" zamiast "retest nowego supportu". **Dokladnie odwrotnie.**
+
+To jak rybka ktora co 3 sekundy zapomina co widziala. Rolling window jest goldfish.
+
+### Analogia: Sciany w budynku
+
+Wyobraz sobie budynek z betonowym sufitem (resistance) na 3 pietrze. Pewnego dnia sufit zostaje przebity — ktos zrobil dziure i poszedl wyzej. Teraz ten sufit jest **podloga** 4 pietra. Fizycznie to ten sam kawalek betonu, ale jego rola sie zmienila.
+
+S/R Flip to dokladnie to — ten sam level cenowy, ale po przebiciu zmienia role:
+- **Resistance → Support**: sufit staje sie podloga
+- **Support → Resistance**: podloga staje sie sufitem
+
+### Jak to dziala: 4 fazy
+
+```
+Faza 1: BREAKOUT CANDIDATE
+   Cena przebija resistance + margin (minExtATR * ATR)
+   + Volume confirmation (v2): ostatnia swieca >= 1.5x srednia
+   → Tworzymy FlipCandidate (R→S)
+
+Faza 2: CONFIRMATION
+   Cena utrzymuje sie nad levelem przez N swiec (default 3, kPEPE: 2)
+   → FlipCandidate awansuje do FlippedLevel (strength=1.0)
+   Log: "SR_FLIP kPEPE: resistance_to_support confirmed vol=2.3x"
+
+Faza 3: TRACKING
+   - Retesty refreshuja strength (+0.10, lub +0.15 z rejection candle)
+   - Time decay: -0.02/h (~50h do zera)
+   - Rolling drift: 3x decay gdy raw S/R "dogania" flipped level
+   - Max age: 48h (kPEPE: 24h)
+
+Faza 4: EFFECTIVE S/R
+   Flipped R→S POMIEDZY raw support a cena
+   → effectiveSupport = flipped.level
+   (9 konsumentow automatycznie uzywa nowej wartosci)
+```
+
+### Volume confirmation — filtr na fakeouty (v2)
+
+Breakout bez volume to jak wlamanie do banku przez nikogo nie strzezone drzwi — prawdopodobnie pulapka.
+
+Prawdziwy breakout ma **volume spike**. Smart Money kupuja/sprzedaja w duzych ilosciach zeby przebic level. Fakeout ma slaby volume — cena "wychyla sie" ponad resistance, ale nie ma za tym silnego interest kupujacych.
+
+```typescript
+// Ostatnie 6 swiec 1h
+const volumes = analysis.recentVolumes1h;        // [100, 120, 90, 110, 95, 280]
+const avg = srednia(pierwsze 5);                  // (100+120+90+110+95)/5 = 103
+const last = ostatnia;                            // 280
+const ratio = last / avg;                         // 2.7x ← SILNY breakout
+
+// Default: potrzebujemy >= 1.5x
+// kPEPE: >= 1.3x (chaotyczny volume, nizszy prog)
+if (ratio < minVolMult) → candidate NIE powstaje
+```
+
+Bez danych o volume? Gate przepuszcza (`hasVolume = true`). Zero ryska backward compatibility.
+
+To jak dodatkowy zamek na drzwiach. Nie zmienia fundamentalnego mechanizmu — po prostu odrzuca slabe breakouty zanim zaczniemy je sledzic.
+
+### Retest quality — pin bar to lepszy dowod (v2)
+
+Nie kazdy retest jest rowny. Wyobraz sobie dwa scenariusze:
+
+**Scenariusz A:** Cena spada do starego resistance (teraz support), dotyka go, i idzie dalej w dol. To slab retest — moze nie trzyma.
+
+**Scenariusz B:** Cena spada do starego resistance, tworzy **bullish pin bar** (dlugi dolny cien, male cialo na gorze) i odbija ostro w gore. To SILNY retest — rynek powiedzial "ten level trzyma, kupujacy sa tu agresywni."
+
+```
+Scenariusz A (zwykly):     Scenariusz B (rejection):
+
+    |                           |
+    |                          |||  ← male cialo
+    |------ level ------       |
+    |                          |    ← dlugi dolny cien
+                               |      (pin bar = rejection)
+
+    strength += 0.10           strength += 0.15
+```
+
+Roznica jest niewielka (+0.05), ale kumuluje sie. Po 3 retestach z pin barami masz 0.45 refreshu zamiast 0.30. Level zyje dluzej, bot bardziej mu ufa.
+
+Implementacja jest banalna bo `activeCandlePattern` JUZ ISTNIEJE w `PairAnalysis`:
+
+```typescript
+private checkRetestRejection(analysis: PairAnalysis, fl: FlippedLevel): boolean {
+  const pattern = analysis.activeCandlePattern;
+  if (fl.type === 'resistance_to_support') {
+    // R→S: bullish rejection = odbicie W GORE od nowego supportu
+    return pattern === 'bullish_pinbar' || pattern === 'bullish_engulfing';
+  } else {
+    // S→R: bearish rejection = odbicie W DOL od nowego resistance
+    return pattern === 'bearish_pinbar' || pattern === 'bearish_engulfing';
+  }
+}
+```
+
+Zero nowych API calls. Zero nowych danych. Uzywa tego co juz mamy.
+
+### Punkt integracji — sprytny design
+
+Caly S/R Flip wplywa na reszte bota przez **dwa pola** na `PairAnalysis`:
+
+```typescript
+effectiveSupport?: number;     // Flipped R→S level (jesli istnieje)
+effectiveResistance?: number;  // Flipped S→R level (jesli istnieje)
+```
+
+W `mm_hl.ts` dwie linie:
+```typescript
+const mgResistBody = mvAnalysis?.effectiveResistance ?? mgResistBodyRaw
+const mgSupportBody = mvAnalysis?.effectiveSupport ?? mgSupportBodyRaw
+```
+
+`??` (nullish coalescing) — jesli nie ma flipped levela, uzyj raw S/R. Jesli jest — uzyj go. Jedna linia, zero ryzyka, 9 konsumentow automatycznie uzywa nowej wartosci:
+
+1. Proximity Signal (Discord alert)
+2. SR_REDUCTION (zmniejsz pozycje przy S/R)
+3. SR_Accumulation (buduj pozycje przy S/R)
+4. Bounce Hold (trzymaj po odbiciu)
+5. Breakout TP (take profit po breakout)
+6. BREAKEVEN_BLOCK (blokuj zamykanie pod BE)
+7. Grace Period (daj czas po wejsciu)
+8. SMA Crossover (crossover blisko S/R)
+9. Discord proximity alert (powiadomienia)
+
+To jest przyklad **single integration point** — zamiast modyfikowac 9 miejsc w kodzie, modyfikujesz jedno. Kazdy z konsumentow nie wie (i nie musi wiedziec) czy dostaje raw S/R czy flipped level.
+
+### Config per token
+
+| Parametr | Default | kPEPE | Dlaczego |
+|----------|---------|-------|----------|
+| `srFlipConfirmCandles` | 3 | 2 | Volatile → szybszy confirm |
+| `srFlipMaxAgeHours` | 48 | 24 | Volatile → krotszy czas zycia |
+| `srFlipMinVolumeMult` | 1.5 | 1.3 | Chaotyczny volume → nizszy prog |
+
+kPEPE jest szybki i chaotyczny — breakouty potwierdza szybciej (2 swiece vs 3), ale flipped levels wygasaja szybciej (24h vs 48h). Volume jest mniej przewidywalny, wiec prog 1.3x zamiast 1.5x.
+
+### Decay — cztery sposoby smierci flipped levela
+
+1. **Time decay**: -0.02 strength/h. Przy startowej sile 1.0, level umiera po ~50h bez retestow.
+2. **Rolling drift**: gdy raw S/R "dogoni" flipped level (np. rolling min podnosi sie powyzej flipped support), decay jest 3x szybszy (~16.7h). Level staje sie irrelevant bo rynek ma juz nowy, wyzszy support.
+3. **Max age**: hard limit (48h / 24h). Niezaleznie od retestow.
+4. **Strength <= 0**: level usuwany. Zwolniony slot na nowy flip.
+
+### Lekcje
+
+1. **Additive filters > destructive changes.** Volume gate i retest quality to filtry ktore mozna dodac BEZ ryzyka. Worst case = identyczne zachowanie jak wczesniej (brak danych → gate przepuszcza, brak pin bara → standard +0.10). To najlepszy pattern na rozszerzanie systemow produkcyjnych — dodaj, nie zmieniaj.
+
+2. **Reuse existing data.** `activeCandlePattern` juz istnial. `candles` (1h) juz byly fetchowane. `recentVolumes15m` juz pokazywal pattern. Zero nowych API calls — tylko nowe UZYCIE istniejacych danych. Zanim dodasz nowe zrodlo danych, sprawdz czy nie masz juz tego co potrzebujesz.
+
+3. **Nullish coalescing (`??`) to twoj przyjaciel.** `effectiveSupport ?? rawSupport` to jedno z najpiekniejszych wyrazen w TypeScript. Mowi: "uzyj lepszej wersji jesli jest, inaczej uzyj starej." Zero ryzyka, zero migration path, zero feature flags. Stary kod nawet nie wie ze cos sie zmienilo.
+
+4. **Per-token config zamiast uniwersalnych stalych.** kPEPE z volume multiplier 1.5 blokowalby zbyt duzo breakoutow (chaotyczny volume). 1.3 jest lepsze. Ale dla VIRTUAL 1.5 jest OK. Jeden config object z overrides per token daje elastycznosc bez komplikacji kodu.
+
+5. **Gemini jako Code Reviewer.** Plan v2 powstal po porownaniu naszej implementacji z sugestiami Gemini. Z 5 sugestii wzialismy 2 (volume + candle quality), odrzucilismy 3 (level registry, touch-count, state machine). Umiejetnosc OCENY sugestii AI — co dodac, co zignorowac — jest wazniejsza niz sama implementacja. Nie kazda sugestia AI jest dobra. Ale te ktore filtruja false positives (volume) i wykorzystuja istniejace dane (candle patterns) sa prawie zawsze warte dodania.
 
