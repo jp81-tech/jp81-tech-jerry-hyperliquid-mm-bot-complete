@@ -326,6 +326,7 @@ export type PairAnalysis = {
   nansenPressure: number; // Net Buy/Sell Pressure in USD
   nansenScore: number; // Contribution to bias
   recentVolumes15m: number[]; // Last 9 candle volumes for spike detection (sniper mode)
+  recentVolumes1h: number[]; // Last 6 candle volumes for S/R flip breakout volume confirmation
   effectiveSupport?: number;     // Flipped R→S level if between raw support and price
   effectiveResistance?: number;  // Flipped S→R level if between raw resistance and price
 };
@@ -480,6 +481,11 @@ export class MarketVisionService {
         let sma20 = 0;
         let sma60 = 0;
         let smaCrossover: 'golden' | 'death' | 'none' = 'none';
+
+        // Recent 1h volumes for S/R flip breakout volume confirmation
+        const recentVolumes1h = (candles && candles.length >= 6)
+          ? candles.slice(-6).map(c => Number(c.v || 0))
+          : [];
 
         // C. STF Context: 15m Candles for "Golden Ticket" Entry
         // We fetch last 2 days (48h) of 15m candles
@@ -827,6 +833,7 @@ export class MarketVisionService {
           nansenScore,
           biasScore: Math.max(-100, Math.min(100, score)),
           recentVolumes15m,
+          recentVolumes1h,
         };
 
         this.pairAnalysis.set(pair, analysis);
@@ -881,12 +888,22 @@ export class MarketVisionService {
 
     if (!price || !atr || !rawSupport || !rawResistance) return;
 
+    // Volume confirmation for breakout
+    const minVolMult = config.srFlipMinVolumeMult ?? 1.5;
+    const volumes = analysis.recentVolumes1h || [];
+    const avgVol = volumes.length >= 3
+      ? volumes.slice(0, -1).reduce((a, b) => a + b, 0) / (volumes.length - 1)
+      : 0;
+    const lastVol = volumes.length > 0 ? volumes[volumes.length - 1] : 0;
+    const hasVolume = avgVol > 0 ? (lastVol >= avgVol * minVolMult) : true;
+    const volRatioStr = avgVol > 0 && lastVol > 0 ? `${(lastVol / avgVol).toFixed(1)}x` : 'n/a';
+
     // --- 1. Check for new breakout candidates ---
     const candidateKey = pair;
     let candidate = this.flipCandidates.get(candidateKey);
 
-    // Resistance breakout: candle closed ABOVE resistance + minExtATR
-    if (price > rawResistance + minExtATR * atr) {
+    // Resistance breakout: candle closed ABOVE resistance + minExtATR + volume confirmed
+    if (price > rawResistance + minExtATR * atr && hasVolume) {
       if (!candidate || candidate.type !== 'resistance_to_support') {
         candidate = {
           level: rawResistance,
@@ -901,8 +918,8 @@ export class MarketVisionService {
         candidate.maxExtension = Math.max(candidate.maxExtension, (price - rawResistance) / atr);
       }
     }
-    // Support breakdown: candle closed BELOW support - minExtATR
-    else if (price < rawSupport - minExtATR * atr) {
+    // Support breakdown: candle closed BELOW support - minExtATR + volume confirmed
+    else if (price < rawSupport - minExtATR * atr && hasVolume) {
       if (!candidate || candidate.type !== 'support_to_resistance') {
         candidate = {
           level: rawSupport,
@@ -945,7 +962,7 @@ export class MarketVisionService {
       this.flippedLevels.set(pair, levels);
       this.flipCandidates.delete(candidateKey);
 
-      console.log(`🔄 [SR_FLIP] ${pair}: ${candidate.type} confirmed — level=${candidate.level.toPrecision(5)} ext=${candidate.maxExtension.toFixed(2)}ATR confirms=${candidate.confirmationCount}`);
+      console.log(`🔄 [SR_FLIP] ${pair}: ${candidate.type} confirmed — level=${candidate.level.toPrecision(5)} ext=${candidate.maxExtension.toFixed(2)}ATR confirms=${candidate.confirmationCount} vol=${volRatioStr}`);
     }
 
     // --- 3. Update flipped levels: retests, decay, expiry ---
@@ -958,7 +975,10 @@ export class MarketVisionService {
         const distToFlipped = Math.abs(price - fl.level) / atr;
         if (distToFlipped <= retestZoneATR) {
           fl.retestCount++;
-          fl.strength = Math.min(1.0, fl.strength + 0.1); // refresh on retest
+          // Retest quality: rejection candle pattern gives stronger refresh
+          const hasRejection = this.checkRetestRejection(analysis, fl);
+          const refreshAmount = hasRejection ? 0.15 : 0.10;
+          fl.strength = Math.min(1.0, fl.strength + refreshAmount);
           fl.lastRetestAt = now;
         }
 
@@ -1004,6 +1024,17 @@ export class MarketVisionService {
     );
     if (flippedResist) {
       analysis.effectiveResistance = flippedResist.level;
+    }
+  }
+
+  private checkRetestRejection(analysis: PairAnalysis, fl: FlippedLevel): boolean {
+    const pattern = analysis.activeCandlePattern;
+    if (fl.type === 'resistance_to_support') {
+      // R→S retest: bullish rejection = price bouncing UP from flipped support
+      return pattern === 'bullish_pinbar' || pattern === 'bullish_engulfing';
+    } else {
+      // S→R retest: bearish rejection = price bouncing DOWN from flipped resistance
+      return pattern === 'bearish_pinbar' || pattern === 'bearish_engulfing';
     }
   }
 

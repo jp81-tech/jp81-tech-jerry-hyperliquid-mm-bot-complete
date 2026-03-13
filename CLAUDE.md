@@ -53,6 +53,59 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 13 marca 2026
 
+### 131. S/R Flip Detection — track broken levels that flip role after breakout (13.03)
+
+**Problem:** Bot używa rolling min/max z 50 świec 1h do S/R. Po breakoucie (np. cena przebija resistance), stary resistance powinien stać się nowym supportem. Ale rolling min/max "zapomina" — po kilku świecach stary level znika z okna. Bot nie rozpoznaje retestów (pullback do starego resistance jako nowy support) i może błędnie traktować je jako "zbliżanie się do resistance".
+
+**Rozwiązanie:** `updateFlipDetection()` w `market_vision.ts` — po raw S/R computation, wykrywa breakouty, potwierdza flipy, śledzi retesty, i ustawia `effectiveSupport`/`effectiveResistance` na `PairAnalysis`.
+
+**Algorytm (4 fazy):**
+1. **Breakout candidate** — cena zamknęła POWYŻEJ `resistance + minExtATR × ATR` → candidate `R→S`. Lustrzanie dla support.
+2. **Confirm flip** — `confirmationCount >= confirmCandles` (default 3, kPEPE: 2) → promote to `FlippedLevel`
+3. **Track retests + decay** — retesty refreshują strength (+0.1), time-proportional decay (`decayPerHour × hoursSinceLastDecay`), rolling drift (3x decay gdy raw S/R overtakes flipped level)
+4. **Effective S/R** — flipped R→S POMIĘDZY raw support a ceną → `effectiveSupport = flipped.level`
+
+**Struktury danych (`market_vision.ts`):**
+```typescript
+interface FlipCandidate {
+  level: number; type: 'resistance_to_support' | 'support_to_resistance'
+  breakCandle: number; confirmationCount: number; maxExtension: number
+}
+interface FlippedLevel {
+  level: number; type: ...; confirmedAt: number; retestCount: number
+  strength: number; lastRetestAt: number; lastDecayAt: number
+}
+// PairAnalysis:
+effectiveSupport?: number; effectiveResistance?: number
+```
+
+**Punkt integracji (`mm_hl.ts`, 2 lokalizacje):**
+```typescript
+const mgResistBodyRaw = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+const mgSupportBodyRaw = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+const mgResistBody = mvAnalysis?.effectiveResistance ?? mgResistBodyRaw
+const mgSupportBody = mvAnalysis?.effectiveSupport ?? mgSupportBodyRaw
+```
+Propaguje do WSZYSTKICH 9 konsumentów: Proximity Signal, Discord alerts, SR_REDUCTION, SR_Accumulation, Bounce Hold, Breakout TP, BREAKEVEN_BLOCK, Grace Period, SMA Crossover.
+
+**Config (`short_only_config.ts`):**
+
+| Parametr | Default | kPEPE |
+|----------|---------|-------|
+| `srFlipConfirmCandles` | 3 | **2** (volatile → faster confirm) |
+| `srFlipMinExtensionATR` | 0.3 | 0.3 |
+| `srFlipRetestZoneATR` | 0.5 | 0.5 |
+| `srFlipDecayPerHour` | 0.02 (50h to zero) | 0.02 |
+| `srFlipMaxAgeHours` | 48 | **24** (volatile → expire faster) |
+
+**Decay timing:** `lastDecayAt` field tracks when decay was last applied. Decay proportional to elapsed time (`decayPerHour × hoursSinceLastDecay`). Normal: ~50h to zero. Rolling drift (3x): ~16.7h. Max 1 active flipped support + 1 flipped resistance per token.
+
+**Bezpieczeństwo:** `effectiveS/R` jest opcjonalny (`??` fallback) — bez flipów zachowanie identyczne jak dotychczas.
+
+**Logi:** `🔄 [SR_FLIP] kPEPE: resistance_to_support confirmed — level=0.003760 ext=0.45ATR confirms=3`
+
+**Pliki:** `src/signals/market_vision.ts` (+173 LOC), `src/config/short_only_config.ts` (+9), `src/mm_hl.ts` (+10/-4)
+
 ### 130. SR_REDUCTION × HOLD_FOR_TP — minimum floor for SET-if-zero closing side (13.03)
 
 **Problem:** Gdy HOLD_FOR_TP zeruje closing-side (`bid=0` dla SHORT, `ask=0` dla LONG) i cena wchodzi w strefę S/R, SET-if-zero dawał `closingSide = progressBoost` (np. 1.2 przy 20% progress). Bot przechodzący z HOLD dostawał delikatny boost — za mało żeby płynnie przejść w market making z preferencją nowego kierunku.

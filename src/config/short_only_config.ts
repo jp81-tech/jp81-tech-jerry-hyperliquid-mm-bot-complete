@@ -319,6 +319,7 @@ export interface MomentumGuardConfig {
   srFlipRetestZoneATR?: number           // Distance from flipped level to count as retest (default 0.5)
   srFlipDecayPerHour?: number            // Strength decay per hour (default 0.02 → 50h to zero)
   srFlipMaxAgeHours?: number             // Max age of flipped level in hours (default 48)
+  srFlipMinVolumeMult?: number           // Min volume multiplier vs avg for breakout confirmation (default 1.5)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -409,6 +410,7 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     // S/R Flip: volatile → faster confirm, shorter lifespan
     srFlipConfirmCandles: 2,            // 2 candles (kPEPE moves fast, confirm earlier)
     srFlipMaxAgeHours: 24,              // 24h max (volatile → flipped levels expire faster)
+    srFlipMinVolumeMult: 1.3,           // kPEPE: lower volume threshold (chaotic volume)
   },
   'VIRTUAL': {
     // Full S/R awareness — same pipeline as kPEPE but tuned for VIRTUAL's characteristics
