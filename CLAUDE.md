@@ -53,6 +53,21 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 13 marca 2026
 
+### 132. S/R Flip Detection v2 — volume confirmation + retest candle quality (13.03)
+
+**Problem:** Breakout detection sprawdza TYLKO cenę. Breakout na niskim volume to fakeout. Retest detection nie rozróżnia jakości — retest z rejection candle (pin bar) jest silniejszy niż zwykły dotyk.
+
+**Zmiany:**
+1. **Volume gate na breakout** — ostatni volume 1h musi być ≥ `srFlipMinVolumeMult × avg` (default 1.5x, kPEPE: 1.3x). Bez volume = candidate NIE powstaje. Backward compat: brak danych → gate przepuszcza.
+2. **Retest candle quality** — rejection pattern (bullish_pinbar/engulfing na R→S, bearish na S→R) daje +0.15 strength refresh vs standard +0.10. Używa istniejącego `activeCandlePattern`.
+3. **Enhanced log** — `vol=2.3x` w confirmation message.
+
+**Dane:** `recentVolumes1h: number[]` — last 6 candles z istniejącego `candles` (1h). Zero nowych API calls.
+
+**Config:** `srFlipMinVolumeMult?: number` (default 1.5). kPEPE override: 1.3 (chaotyczny volume).
+
+**Pliki:** `src/signals/market_vision.ts` (+35 LOC), `src/config/short_only_config.ts` (+2)
+
 ### 131. S/R Flip Detection — track broken levels that flip role after breakout (13.03)
 
 **Problem:** Bot używa rolling min/max z 50 świec 1h do S/R. Po breakoucie (np. cena przebija resistance), stary resistance powinien stać się nowym supportem. Ale rolling min/max "zapomina" — po kilku świecach stary level znika z okna. Bot nie rozpoznaje retestów (pullback do starego resistance jako nowy support) i może błędnie traktować je jako "zbliżanie się do resistance".
