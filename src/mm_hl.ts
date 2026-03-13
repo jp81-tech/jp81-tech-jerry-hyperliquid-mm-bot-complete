@@ -21,7 +21,7 @@ import { BIAS_CONFIGS } from './mm/bias_config.js'
 import { DynamicConfigManager } from './mm/dynamic_config.js'
 import { getAutoEmergencyOverrideSync, loadAndAnalyzeAllTokens, getTopSmPairs, MmMode, isFollowSmToken, shouldHoldForTp, getSmDirection, getTokenRiskParams, isForcedMmPair, hasSmAwareness } from './mm/SmAutoDetector.js'
 import { TokenRiskCalculator } from './mm/TokenRiskCalculator.js'
-import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig, getSniperModeConfig } from './config/short_only_config.js'
+import { getBounceFilterConfig, getDipFilterConfig, getFundingFilterConfig, getFibGuardConfig, getPumpShieldConfig, type PumpShieldConfig, getMomentumGuardConfig, getDynamicSpreadConfig, getSniperModeConfig, getFundingDirectionConfig } from './config/short_only_config.js'
 import { getHyperliquidDataFetcher } from './api/hyperliquid_data_fetcher.js'
 import { HyperliquidMarketDataProvider } from './mm/market_data.js'
 import { tryLoadNansenBiasIntoCache, type NansenBiasEntry } from './mm/nansen_bias_cache.js'
@@ -7811,6 +7811,29 @@ class HyperliquidMMBot {
       }
     }
 
+    // 💰 FUNDING DIRECTION: When SM is NEUTRAL, funding rate determines soft directional lean
+    // Funding > 0 = longs pay shorts = lean SHORT (earn funding)
+    // Funding < 0 = shorts pay longs = lean LONG (earn funding)
+    let fundingLeanDirection: 'SHORT' | 'LONG' | null = null
+    let fundingLeanStrong = false
+    if (!smDir) {
+      const fundingDirConfig = getFundingDirectionConfig(pair)
+      if (fundingDirConfig.enabled) {
+        const snapshot = getHyperliquidDataFetcher().getMarketSnapshotSync(pair)
+        const currentFunding = snapshot?.fundingRate ?? 0
+        const absFunding = Math.abs(currentFunding)
+
+        if (absFunding >= fundingDirConfig.minFundingThreshold) {
+          fundingLeanDirection = currentFunding > 0 ? 'SHORT' : 'LONG'
+          fundingLeanStrong = absFunding >= fundingDirConfig.strongThreshold
+
+          if (this.tickCount % 20 === 0) {
+            console.log(`💰 [FUNDING_DIRECTION] ${pair}: SM=NEUTRAL, funding=${(currentFunding * 100).toFixed(4)}% → lean ${fundingLeanDirection} (${fundingLeanStrong ? 'STRONG' : 'MILD'})`)
+          }
+        }
+      }
+    }
+
     // 🎯 FOLLOW SM MODE: OVERRIDE REGIME permissions when SM alignment is required
     // This is EMERGENCY priority and should bypass all other regime restrictions
     // 🔧 FIX 2026-01-22: BUT always allow position reduction (close shorts/longs)
@@ -8183,6 +8206,27 @@ class HyperliquidMMBot {
             console.log(`💰 [FUNDING_FILTER] ${pair}: OK LONG (funding: ${(funding * 100).toFixed(4)}%) → full bids`)
           }
         }
+      }
+    }
+
+    // 💰 FUNDING DIRECTION LEAN: Apply soft size multipliers when SM is NEUTRAL
+    if (fundingLeanDirection && !smDir) {
+      const cfg = getFundingDirectionConfig(pair)
+      const bidM = fundingLeanStrong ? cfg.strongBidMult : cfg.leanBidMult
+      const askM = fundingLeanStrong ? cfg.strongAskMult : cfg.leanAskMult
+
+      if (fundingLeanDirection === 'SHORT') {
+        // Lean SHORT: reduce buying (earn funding from shorts paying), increase selling
+        sizeMultipliers.bid *= askM   // askM < 1.0 = reduce
+        sizeMultipliers.ask *= bidM   // bidM > 1.0 = increase
+      } else {
+        // Lean LONG: increase buying (earn funding from longs paying), reduce selling
+        sizeMultipliers.bid *= bidM   // bidM > 1.0 = increase
+        sizeMultipliers.ask *= askM   // askM < 1.0 = reduce
+      }
+
+      if (this.tickCount % 20 === 0) {
+        console.log(`💰 [FUNDING_LEAN] ${pair}: ${fundingLeanDirection} (${fundingLeanStrong ? 'STRONG' : 'MILD'}) → bid×${sizeMultipliers.bid.toFixed(2)} ask×${sizeMultipliers.ask.toFixed(2)}`)
       }
     }
 

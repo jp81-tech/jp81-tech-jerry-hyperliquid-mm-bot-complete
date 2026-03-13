@@ -565,3 +565,40 @@ export const SNIPER_OVERRIDES: Record<string, Partial<SniperModeConfig>> = {
 export function getSniperModeConfig(token: string): SniperModeConfig {
   return { ...SNIPER_DEFAULTS, ...(SNIPER_OVERRIDES[token] || {}) }
 }
+
+// ============================================================
+// FUNDING DIRECTION — lean when SM is NEUTRAL
+// When SM gives no direction, funding rate determines a soft
+// directional lean. Positive funding = longs pay shorts =
+// lean SHORT (earn funding). Negative = lean LONG.
+// ============================================================
+
+export interface FundingDirectionConfig {
+  enabled: boolean
+  minFundingThreshold: number    // Min |funding| to activate (default 0.0001 = 0.01%/8h)
+  leanBidMult: number            // Earning side boost (default 1.20)
+  leanAskMult: number            // Paying side reduction (default 0.80)
+  strongThreshold: number        // Strong funding threshold (default 0.0005 = 0.05%/8h)
+  strongBidMult: number          // Strong earning side boost (default 1.40)
+  strongAskMult: number          // Strong paying side reduction (default 0.60)
+}
+
+export const FUNDING_DIRECTION_DEFAULTS: FundingDirectionConfig = {
+  enabled: true,
+  minFundingThreshold: 0.0001,   // 0.01%/8h
+  leanBidMult: 1.20,
+  leanAskMult: 0.80,
+  strongThreshold: 0.0005,       // 0.05%/8h
+  strongBidMult: 1.40,
+  strongAskMult: 0.60,
+}
+
+export const FUNDING_DIRECTION_OVERRIDES: Record<string, Partial<FundingDirectionConfig>> = {
+  'kPEPE': {
+    minFundingThreshold: 0.0002, // Memecoins have wilder funding — higher threshold
+  },
+}
+
+export function getFundingDirectionConfig(token: string): FundingDirectionConfig {
+  return { ...FUNDING_DIRECTION_DEFAULTS, ...(FUNDING_DIRECTION_OVERRIDES[token] || {}) }
+}
