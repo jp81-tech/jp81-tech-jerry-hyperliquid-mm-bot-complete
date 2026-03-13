@@ -8908,7 +8908,13 @@ class HyperliquidMMBot {
                 } else {
                   sizeMultipliers.ask *= (1.0 - progressPct / 100)  // Progressive: 0%→100%, 38%→62%, 60%→40%
                 }
-                sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+                const bidBoost = 1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0)
+                if (sizeMultipliers.bid === 0) {
+                  sizeMultipliers.bid = Math.max(bidBoost, momGuardConfig.srClosingBoostMult)
+                  console.log(`🔧 [SR_REDUCTION_FIX] ${pair}: bid was 0 (HOLD_FOR_TP) → SET to ${sizeMultipliers.bid.toFixed(2)} (floor=${momGuardConfig.srClosingBoostMult}) for TP at SUPPORT`)
+                } else {
+                  sizeMultipliers.bid *= bidBoost
+                }
                 srReductionApplied = true
                 srPipelineStatus.phase = 'REDUCTION'
                 srPipelineStatus.progress = progressPct
@@ -8940,7 +8946,13 @@ class HyperliquidMMBot {
                 } else {
                   sizeMultipliers.bid *= (1.0 - progressPct / 100)  // Progressive reduction
                 }
-                sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+                const askBoost = 1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0)
+                if (sizeMultipliers.ask === 0) {
+                  sizeMultipliers.ask = Math.max(askBoost, momGuardConfig.srClosingBoostMult)
+                  console.log(`🔧 [SR_REDUCTION_FIX] ${pair}: ask was 0 (HOLD_FOR_TP) → SET to ${sizeMultipliers.ask.toFixed(2)} (floor=${momGuardConfig.srClosingBoostMult}) for TP at RESISTANCE`)
+                } else {
+                  sizeMultipliers.ask *= askBoost
+                }
                 srReductionApplied = true
                 srPipelineStatus.phase = 'REDUCTION'
                 srPipelineStatus.progress = progressPct
@@ -10087,7 +10099,13 @@ class HyperliquidMMBot {
               } else {
                 sizeMultipliers.ask *= (1.0 - progressPct / 100)
               }
-              sizeMultipliers.bid *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+              const bidBoost = 1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0)
+              if (sizeMultipliers.bid === 0) {
+                sizeMultipliers.bid = Math.max(bidBoost, momGuardConfig.srClosingBoostMult)
+                console.log(`🔧 [SR_REDUCTION_FIX] ${pair}: bid was 0 (HOLD_FOR_TP) → SET to ${sizeMultipliers.bid.toFixed(2)} (floor=${momGuardConfig.srClosingBoostMult}) for TP at SUPPORT`)
+              } else {
+                sizeMultipliers.bid *= bidBoost
+              }
               srReductionApplied = true
               srPipelineStatus.phase = 'REDUCTION'
               srPipelineStatus.progress = progressPct
@@ -10114,7 +10132,13 @@ class HyperliquidMMBot {
               } else {
                 sizeMultipliers.bid *= (1.0 - progressPct / 100)
               }
-              sizeMultipliers.ask *= (1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0))
+              const askBoost = 1.0 + (progressPct / 100) * (momGuardConfig.srClosingBoostMult - 1.0)
+              if (sizeMultipliers.ask === 0) {
+                sizeMultipliers.ask = Math.max(askBoost, momGuardConfig.srClosingBoostMult)
+                console.log(`🔧 [SR_REDUCTION_FIX] ${pair}: ask was 0 (HOLD_FOR_TP) → SET to ${sizeMultipliers.ask.toFixed(2)} (floor=${momGuardConfig.srClosingBoostMult}) for TP at RESISTANCE`)
+              } else {
+                sizeMultipliers.ask *= askBoost
+              }
               srReductionApplied = true
               srPipelineStatus.phase = 'REDUCTION'
               srPipelineStatus.progress = progressPct
