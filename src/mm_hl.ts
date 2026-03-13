@@ -8736,13 +8736,50 @@ class HyperliquidMMBot {
           // 🚀 AGGRESSIVE_SHORT: when SM confirms SHORT and HOLD_FOR_TP active,
           // force ask multiplier to 1.2 to aggressively scale into short position.
           // Overrides all upstream reductions (dynamic_config, bounce, MG).
+          // GUARD: only activate when momentum is NOT strongly bullish (score <= 0.20)
+          // or micro-reversal detected. During active pumps, let MG's ask reduction
+          // protect us — don't short into a pump, wait for reversal confirmation.
           if (holdForTpBounceBypass) {
-            const prevAsk = sizeMultipliers.ask
-            sizeMultipliers.ask = Math.max(sizeMultipliers.ask, 1.2)
-            if (this.tickCount % 10 === 0 || prevAsk < 1.0) {
+            const aggressiveAllowed = momentumScore <= 0.20 || microReversal
+            if (aggressiveAllowed) {
+              const prevAsk = sizeMultipliers.ask
+              sizeMultipliers.ask = Math.max(sizeMultipliers.ask, 1.2)
+              if (this.tickCount % 10 === 0 || prevAsk < 1.0) {
+                console.log(
+                  `🚀 [AGGRESSIVE_SHORT] ${pair}: ask×${prevAsk.toFixed(2)} → ask×${sizeMultipliers.ask.toFixed(2)} ` +
+                  `(SM confirms SHORT, scaling into position${microReversal ? ' | MICRO_REVERSAL' : ''})`
+                )
+              }
+            } else if (this.tickCount % 10 === 0) {
               console.log(
-                `🚀 [AGGRESSIVE_SHORT] ${pair}: ask×${prevAsk.toFixed(2)} → ask×${sizeMultipliers.ask.toFixed(2)} ` +
-                `(SM confirms SHORT, scaling into position)`
+                `⏸️ [AGGRESSIVE_SHORT] ${pair}: PAUSED — momentum=${momentumScore.toFixed(2)} > 0.20 ` +
+                `(active pump, waiting for reversal) ask×${sizeMultipliers.ask.toFixed(2)}`
+              )
+            }
+          }
+
+          // 🚀 AGGRESSIVE_LONG: mirror of AGGRESSIVE_SHORT for SM LONG + HOLD_FOR_TP.
+          // When SM confirms LONG and HOLD_FOR_TP active, force bid multiplier to 1.2
+          // to aggressively scale into long position.
+          // GUARD: only activate when momentum is NOT strongly bearish (score >= -0.20)
+          // or micro-reversal detected. During active dumps, let MG's bid reduction
+          // protect us — don't buy into a dump, wait for reversal confirmation.
+          const holdForTpLongBypass = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, 'long')
+          if (holdForTpLongBypass) {
+            const aggressiveAllowed = momentumScore >= -0.20 || microReversal
+            if (aggressiveAllowed) {
+              const prevBid = sizeMultipliers.bid
+              sizeMultipliers.bid = Math.max(sizeMultipliers.bid, 1.2)
+              if (this.tickCount % 10 === 0 || prevBid < 1.0) {
+                console.log(
+                  `🚀 [AGGRESSIVE_LONG] ${pair}: bid×${prevBid.toFixed(2)} → bid×${sizeMultipliers.bid.toFixed(2)} ` +
+                  `(SM confirms LONG, scaling into position${microReversal ? ' | MICRO_REVERSAL' : ''})`
+                )
+              }
+            } else if (this.tickCount % 10 === 0) {
+              console.log(
+                `⏸️ [AGGRESSIVE_LONG] ${pair}: PAUSED — momentum=${momentumScore.toFixed(2)} < -0.20 ` +
+                `(active dump, waiting for reversal) bid×${sizeMultipliers.bid.toFixed(2)}`
               )
             }
           }
@@ -10042,61 +10079,8 @@ class HyperliquidMMBot {
           const absSkewSr = Math.abs(actualSkew)
           const reductionZone = mgStrongZone * momGuardConfig.srReductionStartAtr
 
-          // Grace Period: delay reduction after confirmed S/R break
-          const graceMs = momGuardConfig.srReductionGraceCandles * 15 * 60 * 1000
-          const graceLongKey = `${pair}:LONG_BREAK_SUPPORT`
-          const graceShortKey = `${pair}:SHORT_BREAK_RESIST`
-
-          // LONG + BROKEN SUPPORT → grace
-          if (hasLongPos && mgSupportBody > 0 && mgProxSignal <= -1.2) {
-            if (!this.srBreakGraceStart.has(graceLongKey)) {
-              this.srBreakGraceStart.set(graceLongKey, Date.now())
-              console.log(`⏳ [SR_GRACE] ${pair}: LONG + BROKEN SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
-            }
-            const elapsed = Date.now() - this.srBreakGraceStart.get(graceLongKey)!
-            if (elapsed < graceMs) {
-              srGraceActive = true
-              srPipelineStatus.phase = 'GRACE'
-              srPipelineStatus.detail = `grace LONG ${((graceMs - elapsed)/60000).toFixed(0)}min left`
-              if (this.tickCount % 10 === 0) {
-                console.log(`⏳ [SR_GRACE] ${pair}: LONG grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
-              }
-            } else {
-              if (this.tickCount % 20 === 0) {
-                console.log(`⏳ [SR_GRACE] ${pair}: LONG grace EXPIRED — breakdown confirmed, allowing reduction`)
-              }
-            }
-          } else if (hasLongPos && mgProxSignal > -1.2 && this.srBreakGraceStart.has(graceLongKey)) {
-            console.log(`✅ [SR_GRACE] ${pair}: Price recovered above SUPPORT ($${mgSupportBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
-            this.srBreakGraceStart.delete(graceLongKey)
-          }
-
-          // SHORT + BROKEN RESISTANCE → grace
-          if (hasShortPos && mgResistBody > 0 && mgProxSignal >= 1.2) {
-            if (!this.srBreakGraceStart.has(graceShortKey)) {
-              this.srBreakGraceStart.set(graceShortKey, Date.now())
-              console.log(`⏳ [SR_GRACE] ${pair}: SHORT + BROKEN RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace started (${momGuardConfig.srReductionGraceCandles} candles = ${(graceMs/60000).toFixed(0)}min)`)
-            }
-            const elapsed = Date.now() - this.srBreakGraceStart.get(graceShortKey)!
-            if (elapsed < graceMs) {
-              srGraceActive = true
-              srPipelineStatus.phase = 'GRACE'
-              srPipelineStatus.detail = `grace SHORT ${((graceMs - elapsed)/60000).toFixed(0)}min left`
-              if (this.tickCount % 10 === 0) {
-                console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace active — ${((graceMs - elapsed)/60000).toFixed(0)}min remaining | prox=${mgProxSignal.toFixed(1)}`)
-              }
-            } else {
-              if (this.tickCount % 20 === 0) {
-                console.log(`⏳ [SR_GRACE] ${pair}: SHORT grace EXPIRED — breakout confirmed, allowing reduction`)
-              }
-            }
-          } else if (hasShortPos && mgProxSignal < 1.2 && this.srBreakGraceStart.has(graceShortKey)) {
-            console.log(`✅ [SR_GRACE] ${pair}: Price recovered below RESISTANCE ($${mgResistBody.toPrecision(5)}) prox=${mgProxSignal.toFixed(1)} → grace cleared, accumulation continues`)
-            this.srBreakGraceStart.delete(graceShortKey)
-          }
-
           // SHORT near SUPPORT → progressive reduction
-          if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone && !srGraceActive) {
+          if (hasShortPos && mgSupportBody > 0 && mgSupportDist < reductionZone) {
             const progressPct = Math.max(0, Math.min(100, (1.0 - mgSupportDist / reductionZone) * 100))
             const srReductionMinSkewShort = momGuardConfig.srReductionMinSkew ?? momGuardConfig.srMaxRetainPct
             if (absSkewSr > srReductionMinSkewShort) {

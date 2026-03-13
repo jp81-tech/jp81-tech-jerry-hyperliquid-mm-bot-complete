@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-13
+- Data: 2026-03-14
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -48,6 +48,51 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `/tmp/whale_discovery_seen.json` - seen addresses for whale discovery dedup (30-day TTL)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 14 marca 2026
+
+### 135. AGGRESSIVE_LONG — mirror of AGGRESSIVE_SHORT for SM LONG + HOLD_FOR_TP (14.03)
+
+**Problem:** Brakowalo lustrzanej logiki AGGRESSIVE_SHORT dla longow. Gdy SM potwierdzal LONG i HOLD_FOR_TP byl aktywny, bot nie mial mechanizmu agresywnego skalowania bid multiplier — polegał tylko na standardowej logice grida.
+
+**Rozwiazanie:** `AGGRESSIVE_LONG` block w mm_hl.ts — lustrzane odbicie AGGRESSIVE_SHORT.
+
+**Logika:**
+```typescript
+const holdForTpLongBypass = (!IS_PURE_MM_BOT || hasSmAwareness(pair)) && shouldHoldForTp(pair, 'long')
+if (holdForTpLongBypass) {
+  const aggressiveAllowed = momentumScore >= -0.20 || microReversal
+  if (aggressiveAllowed) {
+    sizeMultipliers.bid = Math.max(sizeMultipliers.bid, 1.2)
+  }
+}
+```
+
+**Guard:** `momentumScore >= -0.20 || microReversal` — pauzuje podczas aktywnych dumpow (momentum < -0.20), pozwalajac MG's bid reduction chronic. Aktywuje gdy dump slabnie lub micro-reversal potwierdza zmiane.
+
+**Pliki:** `src/mm_hl.ts` (+25 LOC)
+
+### 134. AGGRESSIVE_SHORT momentum guard — don't short into active pumps (14.03)
+
+**Problem:** kPEPE bot "za szybko wyszedl z long i za szybko shortowal" podczas +4.8% pumpy. Root cause: `AGGRESSIVE_SHORT` override (`ask×1.20`) nadpisywal MG's protective ask reduction (`ask×0.12`) podczas aktywnych pump. Bot shortowal caly pump zamiast czekac na reversal.
+
+**Rozwiazanie:** Dodano momentum guard do AGGRESSIVE_SHORT block.
+
+**Logika:**
+```typescript
+if (holdForTpBounceBypass) {
+  const aggressiveAllowed = momentumScore <= 0.20 || microReversal
+  // Only force ask×1.2 when pump momentum is fading or micro-reversal confirmed
+}
+```
+
+**Guard:** `momentumScore <= 0.20 || microReversal` — 0.20 to dolna granica "LIGHT pump" w MG scoring. Ponizej = momentum slabnie → bezpiecznie shortowac agresywnie. Powyzej = aktywny pump → AGGRESSIVE_SHORT pauzuje, MG's ask reduction chroni.
+
+**Usunieto rowniez:** SR_GRACE period block (~53 LOC) — grace delays obnizaly reaktywnosc S/R reduction bez wyraznego benefitu.
+
+**Pliki:** `src/mm_hl.ts` (+43/-59 LOC net -16)
 
 ---
 

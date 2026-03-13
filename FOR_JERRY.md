@@ -49,6 +49,7 @@
 41. [Oracle allMids Cache — Jeden telefon zamiast trzynastu](#oracle-allmids-cache--jeden-telefon-zamiast-trzynastu)
 42. [Dex-Trades 422 — Niedokonczona robota](#dex-trades-422--niedokonczona-robota)
 43. [S/R Flip Detection — gdy opor staje sie wsparciem](#sr-flip-detection--gdy-opor-staje-sie-wsparciem)
+44. [AGGRESSIVE Override Guards — nie shortuj pumpy, nie kupuj dumpa](#aggressive-override-guards--nie-shortuj-pumpy-nie-kupuj-dumpa)
 
 ---
 
@@ -11690,4 +11691,84 @@ Jedno dodatkowe pole: `rng=1.4x`. Range ostatniej swiecze = 1.4x sredniej. Powye
 3. **Multiplicative gates > additive scores.** `hasVolume && hasRange` jest prostsze i bardziej czytelne niz "oblicz vol/range ratio, porownaj z progiem, wazony score..." Dwa osobne filtry, kazdy z jasnym znaczeniem. Debugowanie: "ktory gate zablokowal?" jest trywialne. Score-based: "czemu score wyszedl 0.47 zamiast 0.50?" to krolikowa nora.
 
 4. **Nie rob nic czego nie musisz.** Plan sugerowl tez vol/range RATIO jako osobna metryke, footprint chart data, trapped trader detection, snapback trade (fade fakeouts). Odrzucilismy wszystko. Dwa proste filtry robia 90% roboty. Remaining 10% to edge cases ktore nie sa warte dodatkowej zlozonosci. YAGNI — You Ain't Gonna Need It.
+
+---
+
+## Rozdzial 66: AGGRESSIVE Override Guards — nie shortuj pumpy, nie kupuj dumpa (14.03.2026)
+
+### Problem: Generał kazal strzelac do wlasnych zolnierzy
+
+Wyobraz sobie taka sytuacje: Momentum Guard (MG) widzi +4.8% pumpe na kPEPE i mowi "nie shortuj teraz, ask×0.12" — czyli praktycznie zerowe zlecenia sprzedazy. Madra decyzja.
+
+Ale wtedy przychodzi AGGRESSIVE_SHORT i mowi "SM jest short, HOLD_FOR_TP aktywny, wiec ask×1.20!" — i nadpisuje MG's ochrone. Efekt? Bot shortowal CALY pump od poczatku do konca. Wyszedl z longa za wczesnie i od razu zaczal budowac shorta — w najgorszym mozliwym momencie.
+
+To klasyczny blad w systemach z wieloma warstwami decyzyjnymi: **dwa systemy mowiace rozne rzeczy, ale jeden ma twarde override**.
+
+### Analogia: Generał i Zwiadowca
+
+```
+GENERAŁ (SmAutoDetector):  "Strategia jest SHORT. Shortuj."
+ZWIADOWCA (MomentumGuard): "Ale teraz trwa pump! Poczekaj na reversal!"
+KAPRAL (AGGRESSIVE_SHORT): "Generał kazal. Shortuj natychmiast!" ← BUG
+```
+
+Problem: Kapral slepо wykonuje rozkaz Generala, ignorujac zwiadowce ktory widzi pump na wlasne oczy. Madry general nie kazalby strzelac pod gore — czekalby na lepsza pozycje.
+
+### Fix: Momentum Guard jako veto
+
+```typescript
+if (holdForTpBounceBypass) {
+  const aggressiveAllowed = momentumScore <= 0.20 || microReversal
+  if (aggressiveAllowed) {
+    sizeMultipliers.ask = Math.max(sizeMultipliers.ask, 1.2)  // agresywne shorty
+  }
+  // else: PAUSED — MG's ask reduction chroni nas
+}
+```
+
+Prosta zmiana: **zanim AGGRESSIVE_SHORT nadpisze MG, sprawdz czy momentum jest neutralny** (score <= 0.20, czyli pump wygasa) **lub micro-reversal potwierdza odwrocenie**. Jesli pump jest aktywny (score > 0.20) — AGGRESSIVE_SHORT pauzuje i MG's ochrona zostaje.
+
+0.20 to dolna granica "LIGHT pump" w MG scoring:
+```
+ 1.00  ████████████  STRONG pump
+ 0.60  ████████      MODERATE pump
+ 0.20  ████          LIGHT pump    ← prog
+ 0.00  ──            NEUTRAL       ← AGGRESSIVE aktywny
+-0.20  ████          LIGHT dump    ← prog (LONG mirror)
+-0.60  ████████      MODERATE dump
+-1.00  ████████████  STRONG dump
+```
+
+### Lustrzana logika: AGGRESSIVE_LONG
+
+Jesli mamy AGGRESSIVE_SHORT na shorty, potrzebujemy tez AGGRESSIVE_LONG na longi. Dokladnie ta sama logika, odwrocona:
+
+```typescript
+const holdForTpLongBypass = (!IS_PURE_MM_BOT || hasSmAwareness(pair))
+  && shouldHoldForTp(pair, 'long')
+
+if (holdForTpLongBypass) {
+  const aggressiveAllowed = momentumScore >= -0.20 || microReversal
+  if (aggressiveAllowed) {
+    sizeMultipliers.bid = Math.max(sizeMultipliers.bid, 1.2)  // agresywne longi
+  }
+  // else: PAUSED — MG's bid reduction chroni nas
+}
+```
+
+Podczas aktywnego dumpa (momentum < -0.20) AGGRESSIVE_LONG pauzuje. Gdy dump wygasa lub micro-reversal potwierdza odbicie — wlacza sie i agresywnie buduje pozycje long.
+
+### Bonus: Usuniecie SR_GRACE
+
+Przy okazji usunalem ~53 linii kodu SR_GRACE period — grace delays ktore opoznialy S/R reduction po breakoutach. W teorii dawaly "czas na potwierdzenie", w praktyce obnizaly reaktywnosc bez wyraznego benefitu. Mniej kodu = mniej bugow.
+
+### Lekcje
+
+1. **Override hierarchia musi respektowac real-time dane.** Strategia (SM jest short) mowi CO robic. Taktyka (momentum) mowi KIEDY. AGGRESSIVE override zlamal te hierarchie — wymuszal "teraz" nawet gdy taktyka mowila "poczekaj". Fix: dodaj taktyczny veto do strategicznego override.
+
+2. **Lustrzane logiki pisze sie w 5 minut.** AGGRESSIVE_LONG to kopiuj-wklej AGGRESSIVE_SHORT z odwroconymi znakami: `ask→bid`, `SHORT→LONG`, `<= 0.20` → `>= -0.20`. Jeden pattern, dwa kierunki. Symetria jest twoim przyjacielem.
+
+3. **Micro-reversal jako "override override".** Nawet gdy momentum jest jeszcze silny (> 0.20), micro-reversal moze to nadpisac — bo cena juz odskoczyla >0.3% od szczytu, wiec pump prawdopodobnie sie konczy. To daje systemowi elastycznosc bez rezygnacji z bezpieczenstwa.
+
+4. **Usuwaj kod ktory nie przynosi wartosci.** SR_GRACE mial sens w teorii, ale w praktyce opoznial reakcje. 53 linie kodu mniej = 53 linie mniej do debugowania. Kazda linia kodu to potencjalny bug. Najlepszy kod to ten ktorego nie ma.
 
