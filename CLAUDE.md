@@ -1,7 +1,7 @@
 # Kontekst projektu
 
 ## Aktualny stan
-- Data: 2026-03-12
+- Data: 2026-03-13
 - Katalog roboczy: /Users/jerry
 - Główne repozytorium: `/Users/jerry/hyperliquid-mm-bot-complete`
 - Serwer: `hl-mm` (100.71.211.15 via Tailscale)
@@ -48,6 +48,62 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 - `/tmp/whale_activity.json` - activity tracker dla dormant decay (address → last_change_epoch)
 - `/tmp/whale_discovery_seen.json` - seen addresses for whale discovery dedup (30-day TTL)
 - `rotator.config.json` - config rotacji par
+
+---
+
+## Zmiany 13 marca 2026
+
+### 129. Funding Rate as Directional Lean when SM is NEUTRAL (13.03)
+
+**Problem:** Gdy SM nie daje wyraźnego kierunku (`smDir === null`, tryb PURE_MM/NEUTRAL), bot quotuje symetrycznie — zero preferencji kierunkowej. Ale funding rate zawiera informację o "crowdedness" rynku: funding > 0 = longs pay shorts (rynek crowded LONG), funding < 0 = shorts pay longs (rynek crowded SHORT). Bot mógłby zarabiać na funding payments lean'ując w stronę która **zarabia** na funding.
+
+**Rozwiązanie:** Soft directional lean via bid/ask size multipliers gdy SM jest NEUTRAL. NIE ustawia `smDir` — nie triggeruje Pump Shield, FibGuard, HOLD_FOR_TP ani żadnych SM-dependent systemów. Czysto multiplicative z innymi modułami.
+
+**A) Config — `FundingDirectionConfig` (`src/config/short_only_config.ts`):**
+
+| Parametr | Default | Opis |
+|----------|---------|------|
+| `enabled` | true | Feature toggle |
+| `minFundingThreshold` | 0.0001 (0.01%/8h) | Min |funding| do aktywacji |
+| `leanBidMult` | 1.20 | Earning side boost (+20%) |
+| `leanAskMult` | 0.80 | Paying side reduction (-20%) |
+| `strongThreshold` | 0.0005 (0.05%/8h) | Strong funding threshold |
+| `strongBidMult` | 1.40 | Strong earning side boost (+40%) |
+| `strongAskMult` | 0.60 | Strong paying side reduction (-40%) |
+
+Per-token override: kPEPE `minFundingThreshold: 0.0002` (memecoiny mają dzikszy funding, wyższy próg).
+
+**B) Detection block (`src/mm_hl.ts`, po anti-churn guard, przed FOLLOW SM MODE):**
+- Sprawdza `!smDir` (SM NEUTRAL) + `fundingDirConfig.enabled`
+- Funding > 0 → `fundingLeanDirection = 'SHORT'` (earn funding from longs)
+- Funding < 0 → `fundingLeanDirection = 'LONG'` (earn funding from shorts)
+- `fundingLeanStrong` = `|funding| >= strongThreshold`
+- Log co 20 ticków: `💰 [FUNDING_DIRECTION]`
+
+**C) Application block (`src/mm_hl.ts`, po FundingFilter, przed grid generation):**
+```typescript
+if (fundingLeanDirection === 'SHORT') {
+  sizeMultipliers.bid *= askM   // reduce buying (askM=0.80)
+  sizeMultipliers.ask *= bidM   // increase selling (bidM=1.20)
+} else {
+  sizeMultipliers.bid *= bidM   // increase buying
+  sizeMultipliers.ask *= askM   // reduce selling
+}
+```
+
+**Interakcje z istniejącymi systemami:**
+- **FundingFilter**: Komplementarne — FundingFilter wymaga `smDir` (SM-following), FundingDirection wymaga `!smDir` (NEUTRAL). Nigdy oba aktywne.
+- **Momentum Guard**: Multiplicative — MG daje asymetrię na momentum, funding lean na cost of carry. Mogą się wzmacniać lub neutralizować.
+- **S/R Accumulation**: Nie koliduje — S/R patrzy na proximity, funding na carry.
+- **Auto-Skew**: Komplementarne — Auto-Skew przesuwa midPrice (cena), funding lean zmienia rozmiar.
+- **HOLD_FOR_TP**: Nie koliduje — HOLD_FOR_TP wymaga SM direction.
+
+**Czego NIE robimy:**
+- NIE ustawiamy `smDir` z fundingu (nie triggeruje SM-dependent systemów)
+- NIE blokujemy żadnej strony (tylko soft lean ±20-40%)
+- NIE dodajemy nowych API calls (funding rate już fetchowany)
+
+**Pliki:** `src/config/short_only_config.ts` (+28 LOC), `src/mm_hl.ts` (+45 LOC, 3 edits: import, detection, application)
 
 ---
 
@@ -5430,6 +5486,7 @@ Tę samą funkcjonalność (podążanie za SM) realizują inne komponenty które
 - **Breakout Bot (12.03)**: `scripts/breakout_bot.ts` + `src/breakout/` (BreakoutBot, BreakoutDataEngine, BreakoutSignalEngine, BreakoutRiskEngine, BreakoutOrderEngine, config, types). Donchian Channel breakout strategy: 20-period 1m candles, EMA200 trend filter (5m candles), volume confirmation (3x avg), trailing SL via Donchian opposite band. Tokens: BTC/ETH/SOL/HYPE. 15s tick interval, 5x cross leverage, 1% risk per trade, max 3 positions, TP=3R. Dedicated wallet `0x8cc8151919Eb3293e434dddab1CB76e10118C730` ($325 equity). Live order execution via `@nktkas/hyperliquid` SDK — IOC orders with 30bps slippage, size quantization via `szDecimals`, asset index from `meta` API. State persistence `/tmp/breakout_bot_state.json`. Discord alerts via `DISCORD_BREAKOUT_WEBHOOK`. PM2: `breakout-bot`. Config in `ecosystem.config.cjs`.
 - **Whale Discovery (10.03)**: `scripts/whale_discovery.ts` — weekly cron (Sunday 10:00 UTC) skanujący Nansen perp leaderboardy + HL API dla nowych dużych pozycji na kPEPE/VIRTUAL. 57 KNOWN_ADDRESSES (synced z whale-changes-report.ts) filtrowanych. Seen file `/tmp/whale_discovery_seen.json` z 30-day TTL. Nansen CLI via `execSync()` z `--format csv`. **CSV parser bug fix:** `Number('0x...')` parsuje hex adresy jako valid numbers — dodano `val.startsWith('0x')` guard. Progi: kPEPE PnL>$10K lub pos>$50K, VIRTUAL PnL>$20K lub pos>$100K. `--dry-run` flag. Wymaga nansen-cli na serwerze (`npm i -g nansen-cli`).
 - **Security: git history cleanup (12.03)**: Stary breakout wallet key `0x488df3...` został wyczyszczony z historii git via `git-filter-repo --replace-text`. Force push na origin + server. Wallet spalony (drainer zabrał środki), nowy wallet `0x8cc815...` czysty.
+- **Funding Direction Lean (13.03)**: Gdy SM jest NEUTRAL, funding rate daje soft directional lean. Funding>0 → lean SHORT (earn funding), funding<0 → lean LONG. Mild ±20% (threshold 0.01%/8h), strong ±40% (0.05%/8h). kPEPE: wyższy próg 0.02% (wild funding). NIE ustawia `smDir` — nie triggeruje SM-dependent systemów. Komplementarne z FundingFilter (który wymaga `smDir`). Config: `FundingDirectionConfig` w `short_only_config.ts`, getter `getFundingDirectionConfig()`. Detection: po anti-churn guard, przed FOLLOW SM MODE. Application: po FundingFilter, przed grid generation. Logi: `💰 [FUNDING_DIRECTION]` (detection co 20 ticków), `💰 [FUNDING_LEAN]` (application co 20 ticków).
 
 ---
 

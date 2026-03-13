@@ -11221,3 +11221,130 @@ Po czyszczeniu zrobilismy pelny skan i dodalismy sekcje "Security Scan" do CLAUD
 
 Zero sekretow w kodzie, zero sekretow w historii. Tak jak powinno byc.
 
+---
+
+## Rozdzial 63: Funding Rate jako Kompas — Zarabianie na "Crowdedness" Rynku
+
+*13 marca 2026*
+
+### Problem: Bot bez opinii
+
+Wyobraz sobie market makera na bazarze. Stoi z towarem, kupuje i sprzedaje obie strony. Ale nie ma zadnej preferencji — sprzedaje tyle samo co kupuje, symetrycznie. To jest nasz bot gdy Smart Money nie daje kierunku (`smDir === null`).
+
+Problem? Bot ignoruje darmowa informacje ktora krzyczy mu prosto w twarz: **funding rate**.
+
+### Czym jest funding rate?
+
+Na Hyperliquid (i kazdym perps exchange) funding rate to mechanizm ktory utrzymuje cene perpa blisko ceny spot. Co 8 godzin:
+
+- **Funding > 0**: Longi placa shortom. To znaczy ze rynek jest "crowded LONG" — za duzo ludzi trzyma longi. Gielda musi ich zniechecic, wiec kazdego kaze im placic.
+- **Funding < 0**: Shorty placa longom. Rynek crowded SHORT.
+
+To jest jak podatek od bycia w tlumie. Im wiecej ludzi po jednej stronie, tym wiecej placa.
+
+### Analogia: Parking na lotnisku
+
+Wyobraz sobie parking na lotnisku. Gdy 90% miejsc jest zajetych (crowded), cena za godzine rosnie. Ludzie PLACU za bycie tam. Jesli mozesz zaparkowac na pustym parkingu obok (byc po drugiej stronie) — dostajesz doplaty.
+
+Funding rate to dokladnie to:
+- Crowded side (longi gdy funding>0) = placa
+- Other side (shorty gdy funding>0) = zarabiaja
+
+### Nasz pomysl: Lean w strone pieniedzy
+
+Gdy SM jest NEUTRAL (brak kierunku), zamiast quotowac symetrycznie, **lekko przechylamy sie w strone ktora ZARABIA na funding**:
+
+```
+Funding +0.03%/8h (longs pay shorts):
+  → Lean SHORT: wiecej askow (sprzedawanie), mniej bidow (kupowanie)
+  → Efekt: bot buduje lekka pozycje SHORT → zarabia na funding payments
+
+Funding -0.05%/8h (shorts pay longs):
+  → Lean LONG: wiecej bidow (kupowanie), mniej askow (sprzedawanie)
+  → Efekt: bot buduje lekka pozycje LONG → zarabia na funding payments
+```
+
+### Dwa poziomy leanu
+
+Nie jest to all-in. To **delikatne przechylenie**:
+
+| Level | Threshold | Bid/Ask adjustment |
+|-------|-----------|-------------------|
+| MILD | \|funding\| >= 0.01%/8h | ±20% (bid×1.20/ask×0.80 lub odwrotnie) |
+| STRONG | \|funding\| >= 0.05%/8h | ±40% (bid×1.40/ask×0.60 lub odwrotnie) |
+| OFF | \|funding\| < 0.01%/8h | Symetryczny MM (×1.0/×1.0) |
+
+kPEPE ma wyzszy prog (0.02%) bo memecoiny maja szalony funding — 0.01% to normalny szum na kPEPE, ale na BTC czy VIRTUAL to juz sygnal.
+
+### Kluczowa decyzja: NIE ustawiamy smDir
+
+To byla najwazniejsza decyzja architektoniczna. Moglibymy po prostu ustawic `smDir = 'SHORT'` gdy funding jest pozytywny. Ale to by triggerowalo:
+- Pump Shield (ochrona shortow przed pumpami)
+- FibGuard (nie shortuj dna)
+- HOLD_FOR_TP (trzymaj pozycje do Take Profit)
+- FundingFilter (nie wchodz gdy funding placi przeciwko)
+
+Te systemy sa zaprojektowane dla SILNYCH SM sygnalow, nie dla lekkiego leanu z fundingu. Gdybysmy ustawili smDir, bot zachowalby sie jakby mial strong conviction — a ma tylko "lekka preferencje".
+
+Zamiast tego stworzylimy NOWA zmienna `fundingLeanDirection` ktora zywje OBOK smDir:
+
+```typescript
+// To NIE jest SM sygnal — to cost-of-carry lean
+let fundingLeanDirection: 'SHORT' | 'LONG' | null = null
+let fundingLeanStrong = false
+
+// smDir nadal null — SM-dependent systemy nie reaguja
+// fundingLeanDirection = 'SHORT' — tylko size multipliers sie zmieniaja
+```
+
+### Implementacja: 3 miejsca w kodzie
+
+**1. Config (`short_only_config.ts`):**
+```typescript
+export interface FundingDirectionConfig {
+  enabled: boolean
+  minFundingThreshold: number    // 0.0001 = 0.01%/8h
+  leanBidMult: number            // 1.20
+  leanAskMult: number            // 0.80
+  strongThreshold: number        // 0.0005 = 0.05%/8h
+  strongBidMult: number          // 1.40
+  strongAskMult: number          // 0.60
+}
+```
+
+**2. Detection (mm_hl.ts, po anti-churn guard):**
+Sprawdza funding rate z `getMarketSnapshotSync()`. Jesli SM jest NEUTRAL i |funding| > threshold → ustaw lean direction.
+
+**3. Application (mm_hl.ts, po FundingFilter, przed grid generation):**
+Mnozy `sizeMultipliers.bid` i `sizeMultipliers.ask` przez odpowiednie lean multipliers. Multiplicative z innymi systemami — MG, S/R, Auto-Skew wszystkie dzialaja normalnie.
+
+### Dlaczego FundingFilter i FundingDirection nie koliduja
+
+To jest eleganckie:
+
+- **FundingFilter** wymaga `smDir` (SM-following mode). Chroni przed wchodzeniem w crowded trades PRZECIWKO SM.
+- **FundingDirection** wymaga `!smDir` (NEUTRAL mode). Daje lean NA PODSTAWIE fundingu.
+
+Nigdy oba nie sa aktywne jednoczesnie. FundingFilter chroni SM trades, FundingDirection daje kierunek gdy SM milczy.
+
+### Ile mozna zarobic na fundingu?
+
+Przyklad kPEPE:
+- Funding +0.03%/8h = ~0.09%/dzien
+- Na pozycji $1000 = ~$0.90/dzien z samego fundingu
+- To nie duzo, ale to **darmowe pieniadze** — bot i tak quotuje, teraz po prostu lekko preferuje strone ktora zarabia
+
+Na silniejszym fundingu (+0.1%/8h = ~0.3%/dzien) to juz $3/dzien na $1000 pozycji. Na calym portfelu sumuje sie.
+
+### Lekcje
+
+1. **Nie ignoruj darmowych sygnalow.** Funding rate to publiczna informacja ktora mowi ci kto placi kogo. Jesli mozesz byc po stronie ktora OTRZYMUJE — bierz.
+
+2. **Soft lean > hard conviction.** ±20% to nie jest "all in SHORT". To jest "lekko wole sprzedawac niz kupowac". Bot nadal jest market makerem obu stron — po prostu z lekka asymetria.
+
+3. **Nie naduzywaj istniejacych systemow.** Ustawienie `smDir` z fundingu bylaby droga na skroty — wlaczylaby systemy zaprojektowane dla SM sygnalow. Nowa zmienna `fundingLeanDirection` to czysta separacja odpowiedzialnosci.
+
+4. **Per-token thresholds sa kluczowe.** kPEPE z fundingiem 0.01% to normalny dzien. BTC z fundingiem 0.01% to juz sygnal. Jeden global threshold nie dziala.
+
+5. **Multiplicative > additive.** Kazdy modul mnozy sizeMultipliers niezaleznie. Gdy funding lean i Momentum Guard sie zgadzaja (oba BEARISH) — efekt sie wzmacnia. Gdy sie nie zgadzaja — neutralizuja. System sam sie balansuje.
+
