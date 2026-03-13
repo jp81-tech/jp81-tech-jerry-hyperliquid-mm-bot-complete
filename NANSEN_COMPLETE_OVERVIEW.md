@@ -123,7 +123,7 @@
 
 ```bash
 # Nansen Smart Money Integration
-NANSEN_API_KEY=REDACTED_NANSEN_KEY
+NANSEN_API_KEY=your_nansen_api_key_here
 NANSEN_ENABLED=true
 NANSEN_WEIGHT=0.35
 
