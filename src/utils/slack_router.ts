@@ -64,10 +64,7 @@ export async function sendSlackText(
   kind: SlackAlertKind = "default",
 ): Promise<void> {
   const webhook = resolveWebhook(kind)
-  if (!webhook) {
-    console.warn(`[slack_router] No webhook configured for kind=${kind}, text="${text.slice(0, 80)}"`)
-    return
-  }
+  if (!webhook) return
   await postJson(webhook, { text })
 }
 
@@ -76,10 +73,7 @@ export async function sendSlackPayload(
   kind: SlackAlertKind = "default",
 ): Promise<void> {
   const webhook = resolveWebhook(kind)
-  if (!webhook) {
-    console.warn("[slack_router] No webhook configured for kind=" + kind)
-    return
-  }
+  if (!webhook) return
   await postJson(webhook, payload)
 }
 

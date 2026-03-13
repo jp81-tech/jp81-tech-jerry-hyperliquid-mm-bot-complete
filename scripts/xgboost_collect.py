@@ -1,0 +1,1111 @@
+#!/usr/bin/env python3
+"""
+XGBoost Data Collector for MM Bot Prediction API
+
+Runs every 15 min via cron. Computes 62 features from:
+  - Hyperliquid API (candles, funding, OI, allMids, L2 orderbook)
+  - SM data files (/tmp/smart_money_data.json, nansen_bias.json, nansen_mm_signal_state.json)
+
+Outputs JSONL to /tmp/xgboost_dataset_{TOKEN}.jsonl
+Backfills labels (1h, 4h, 12h price change) for older rows.
+
+Feature vector (76 features):
+  [0-10]  Technical: RSI/100, tanh(MACD/100), tanh(MACD_signal/100), tanh(MACD_hist/100),
+          tanh(change1h/10), tanh(change4h/20), tanh(change24h/50),
+          volumeRatio/5, volatility/10, bbWidth/20, ATR_%
+  [11-21] Nansen: tanh(log(ratio)), conviction/100, tanh(longUsd/10M), tanh(shortUsd/10M),
+          bias, biasConfidence/100, signal_green, signal_yellow, signal_red,
+          dominant_long, dominant_short
+  [22-29] Extra: funding_rate, oi_change_1h, oi_change_4h,
+          hour_sin, hour_cos, day_sin, day_cos, volatility_24h
+  [30-44] Candle patterns: hammer, shooting_star, engulfing_bull, engulfing_bear,
+          doji, pin_bar_bull, pin_bar_bear, marubozu_bull, marubozu_bear,
+          inside_bar, three_crows, three_soldiers, spinning_top, body_ratio, wick_skew
+  [45-48] Multi-day trend: change_7d, change_10d, distance_from_7d_high, trend_slope_7d
+  [49-52] BTC cross: btc_change_1h, btc_change_4h, btc_rsi, btc_token_corr_24h
+  [53-55] Orderbook: bid_ask_imbalance, spread_bps, book_depth_ratio
+  [56-58] MetaCtx: mark_oracle_spread, oi_normalized, predicted_funding (premium)
+  [59-61] Derived: volume_momentum, price_acceleration, volume_price_divergence
+  [62-64] BTC prediction proxy: btc_pred_direction (-1/0/+1), btc_pred_change (tanh),
+          btc_pred_confidence (0-1)
+  [65-72] 15m candle: rsi_15m, change_15m, change_1h_15m, ema9_ema21_cross_15m,
+          momentum_15m, volatility_15m, body_ratio_15m, consecutive_dir_15m
+  [73-75] Tier-2: gap_detection, range_expansion, rsi_4h
+"""
+
+import json
+import math
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    print("ERROR: requests not installed. Run: pip3 install requests")
+    sys.exit(1)
+
+# --- Configuration ---
+TOKENS = ["BTC", "ETH", "SOL", "HYPE", "ZEC", "XRP", "LIT", "FARTCOIN", "kPEPE"]
+HL_API = "https://api.hyperliquid.xyz/info"
+DATASET_DIR = "/tmp"
+SM_DATA_FILE = "/tmp/smart_money_data.json"
+BIAS_FILE = "/tmp/nansen_bias.json"
+SIGNAL_STATE_FILE = "/tmp/nansen_mm_signal_state.json"
+OI_SNAPSHOT_FILE = "/tmp/xgboost_oi_snapshots.json"
+
+LABEL_BACKFILL_ROWS = 500  # scan last N rows for label backfill (h12 = 12h lookback max)
+CANDLE_COUNT = 100  # 100 hourly candles
+
+
+def hl_post(payload: dict, timeout: int = 15) -> dict | list | None:
+    """POST to Hyperliquid info API."""
+    try:
+        resp = requests.post(HL_API, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"  [ERROR] HL API: {e}")
+        return None
+
+
+# --- Hyperliquid data fetchers ---
+
+def fetch_candles(coin: str, interval: str = "1h", count: int = CANDLE_COUNT) -> list[dict]:
+    """Fetch OHLCV candles from Hyperliquid."""
+    interval_seconds = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(interval, 3600)
+    end_time = int(time.time() * 1000)
+    start_time = end_time - (interval_seconds * count * 1000)
+
+    data = hl_post({
+        "type": "candleSnapshot",
+        "req": {"coin": coin, "interval": interval, "startTime": start_time, "endTime": end_time}
+    })
+    if not data or not isinstance(data, list):
+        return []
+
+    candles = []
+    for c in data:
+        candles.append({
+            "t": int(c["t"]),
+            "o": float(c["o"]),
+            "h": float(c["h"]),
+            "l": float(c["l"]),
+            "c": float(c["c"]),
+            "v": float(c["v"]),
+        })
+    candles.sort(key=lambda x: x["t"])
+    return candles
+
+
+def fetch_all_mids() -> dict[str, float]:
+    """Fetch all mid prices."""
+    data = hl_post({"type": "allMids"})
+    if not data or not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items()}
+
+
+def fetch_meta() -> dict | None:
+    """Fetch exchange meta (for funding rates)."""
+    return hl_post({"type": "meta"})
+
+
+def fetch_clearinghouse_meta_and_ctx() -> list[dict] | None:
+    """Fetch metaAndAssetCtxs for OI and funding."""
+    data = hl_post({"type": "metaAndAssetCtxs"})
+    if not data or not isinstance(data, list) or len(data) < 2:
+        return None
+    return data
+
+
+def fetch_l2_book(coin: str) -> dict | None:
+    """Fetch L2 orderbook for a coin. Returns {"levels": [[bids], [asks]]}."""
+    data = hl_post({"type": "l2Book", "coin": coin})
+    if not data or not isinstance(data, dict):
+        return None
+    return data
+
+
+# --- Technical indicator calculations (replicate TypeScript) ---
+
+def calculate_ema(data: list[float], period: int) -> list[float]:
+    if len(data) < period:
+        return []
+    mult = 2.0 / (period + 1)
+    ema = [sum(data[:period]) / period]
+    for i in range(period, len(data)):
+        ema.append((data[i] - ema[-1]) * mult + ema[-1])
+    return ema
+
+
+def calculate_rsi(closes: list[float], period: int = 14) -> list[float]:
+    if len(closes) < period + 1:
+        return []
+    rsi_vals = []
+    gains = 0.0
+    losses = 0.0
+    for i in range(1, period + 1):
+        change = closes[i] - closes[i - 1]
+        if change > 0:
+            gains += change
+        else:
+            losses -= change
+    avg_gain = gains / period
+    avg_loss = losses / period
+    rsi_vals.append(100 - (100 / (1 + avg_gain / max(avg_loss, 0.0001))))
+
+    for i in range(period + 1, len(closes)):
+        change = closes[i] - closes[i - 1]
+        gain = change if change > 0 else 0
+        loss = -change if change < 0 else 0
+        avg_gain = (avg_gain * (period - 1) + gain) / period
+        avg_loss = (avg_loss * (period - 1) + loss) / period
+        rsi_vals.append(100 - (100 / (1 + avg_gain / max(avg_loss, 0.0001))))
+    return rsi_vals
+
+
+def calculate_macd(closes: list[float]) -> dict:
+    ema12 = calculate_ema(closes, 12)
+    ema26 = calculate_ema(closes, 26)
+    offset = len(ema12) - len(ema26)
+    macd_line = [ema12[i + offset] - ema26[i] for i in range(len(ema26))]
+    signal = calculate_ema(macd_line, 9)
+    sig_offset = len(macd_line) - len(signal)
+    histogram = [macd_line[i + sig_offset] - signal[i] for i in range(len(signal))]
+    return {"line": macd_line, "signal": signal, "histogram": histogram}
+
+
+def calculate_bollinger(closes: list[float], period: int = 20, std_mult: float = 2.0) -> dict:
+    upper, middle, lower = [], [], []
+    for i in range(period - 1, len(closes)):
+        s = closes[i - period + 1: i + 1]
+        sma = sum(s) / period
+        variance = sum((x - sma) ** 2 for x in s) / period
+        std = variance ** 0.5
+        middle.append(sma)
+        upper.append(sma + std_mult * std)
+        lower.append(sma - std_mult * std)
+    return {"upper": upper, "middle": middle, "lower": lower}
+
+
+def calculate_atr(highs: list[float], lows: list[float], closes: list[float], period: int = 14) -> list[float]:
+    tr = []
+    for i in range(1, len(closes)):
+        tr.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    return calculate_ema(tr, period)
+
+
+def calculate_volatility(closes: list[float], period: int = 24) -> list[float]:
+    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes)) if closes[i - 1] != 0]
+    vols = []
+    for i in range(period - 1, len(returns)):
+        s = returns[i - period + 1: i + 1]
+        mean = sum(s) / period
+        variance = sum((x - mean) ** 2 for x in s) / period
+        vols.append((variance ** 0.5) * 100)
+    return vols
+
+
+def compute_technical_features(candles: list[dict]) -> list[float] | None:
+    """Compute 11 normalized technical features from candles (same as TechnicalIndicators.normalize)."""
+    if len(candles) < 60:
+        return None
+
+    closes = [c["c"] for c in candles]
+    highs = [c["h"] for c in candles]
+    lows = [c["l"] for c in candles]
+    volumes = [c["v"] for c in candles]
+
+    rsi = calculate_rsi(closes)
+    macd = calculate_macd(closes)
+    ema21 = calculate_ema(closes, 21)
+    bb = calculate_bollinger(closes)
+    atr = calculate_atr(highs, lows, closes)
+    vol = calculate_volatility(closes)
+
+    if not rsi or not macd["histogram"] or not ema21 or not bb["middle"] or not atr:
+        return None
+
+    # Latest values
+    rsi_val = rsi[-1] if rsi else 50
+    macd_line = macd["line"][-1] if macd["line"] else 0
+    macd_signal = macd["signal"][-1] if macd["signal"] else 0
+    macd_hist = macd["histogram"][-1] if macd["histogram"] else 0
+
+    n = len(closes)
+    change_1h = ((closes[-1] - closes[-2]) / closes[-2] * 100) if n >= 2 and closes[-2] != 0 else 0
+    change_4h = ((closes[-1] - closes[-5]) / closes[-5] * 100) if n >= 5 and closes[-5] != 0 else 0
+    change_24h = ((closes[-1] - closes[-25]) / closes[-25] * 100) if n >= 25 and closes[-25] != 0 else 0
+
+    avg_vol = sum(volumes[-24:]) / min(len(volumes), 24) if volumes else 1
+    vol_ratio = volumes[-1] / avg_vol if avg_vol > 0 else 1
+
+    volatility = vol[-1] if vol else 2
+    bb_width = ((bb["upper"][-1] - bb["lower"][-1]) / bb["middle"][-1] * 100) if bb["middle"] and bb["middle"][-1] != 0 else 4
+    ema21_val = ema21[-1] if ema21 else closes[-1]
+    atr_pct = (atr[-1] / ema21_val * 100) if atr and ema21_val != 0 else 0
+
+    return [
+        rsi_val / 100,                             # [0] RSI [0-1]
+        math.tanh(macd_line / 100),                # [1] MACD line [-1, 1]
+        math.tanh(macd_signal / 100),              # [2] MACD signal [-1, 1]
+        math.tanh(macd_hist / 100),                # [3] MACD histogram [-1, 1]
+        math.tanh(change_1h / 10),                 # [4] 1h change [-1, 1]
+        math.tanh(change_4h / 20),                 # [5] 4h change [-1, 1]
+        math.tanh(change_24h / 50),                # [6] 24h change [-1, 1]
+        min(vol_ratio / 5, 1.0),                   # [7] Volume ratio [0-1]
+        min(volatility / 10, 1.0),                 # [8] Volatility [0-1]
+        min(bb_width / 20, 1.0),                   # [9] BB width [0-1]
+        min(atr_pct, 1.0),                         # [10] ATR % [0-1]
+    ]
+
+
+def compute_nansen_features(token: str) -> list[float]:
+    """Compute 11 normalized Nansen features (same as NansenFeatures.normalize)."""
+    # SM data
+    sm_ratio = 0.0
+    sm_conviction = 0.0
+    sm_long_usd = 0.0
+    sm_short_usd = 0.0
+    dominant_long = 0
+    dominant_short = 0
+
+    try:
+        with open(SM_DATA_FILE) as f:
+            sm = json.load(f)
+        td = sm.get("data", {}).get(token)
+        if td:
+            total_long = td.get("current_longs_usd", 0) or 0
+            total_short = td.get("current_shorts_usd", 0) or 0
+            ratio = total_long / total_short if total_short > 0 else (10 if total_long > 0 else 1)
+            sm_ratio = math.tanh(math.log(max(ratio, 0.001)))
+            sm_conviction = (td.get("trading_mode_confidence", 0) or 0) / 100
+            sm_long_usd = math.tanh(total_long / 10_000_000)
+            sm_short_usd = math.tanh(total_short / 10_000_000)
+            if ratio > 1.5:
+                dominant_long = 1
+            elif ratio < 0.67:
+                dominant_short = 1
+    except Exception:
+        pass
+
+    # Bias
+    bias_value = 0.0
+    bias_confidence = 0.0
+    try:
+        with open(BIAS_FILE) as f:
+            bias_data = json.load(f)
+        tb = bias_data.get(token)
+        if tb:
+            boost = min(tb.get("boost", 0) or 0, 1.0)
+            direction = tb.get("direction", "neutral")
+            if direction == "short":
+                bias_value = -boost
+            elif direction == "long":
+                bias_value = boost
+            bias_confidence = (tb.get("tradingModeConfidence", 0) or 0) / 100
+    except Exception:
+        pass
+
+    # Signal state
+    sig_green = 0
+    sig_yellow = 0
+    sig_red = 0
+    try:
+        with open(SIGNAL_STATE_FILE) as f:
+            sig_data = json.load(f)
+        signal = (sig_data.get(token, {}).get("combinedSignal") or "NONE").upper()
+        if signal == "GREEN":
+            sig_green = 1
+        elif signal == "YELLOW":
+            sig_yellow = 1
+        elif signal == "RED":
+            sig_red = 1
+    except Exception:
+        pass
+
+    return [
+        sm_ratio,          # [11] tanh(log(ratio))
+        sm_conviction,     # [12] conviction/100
+        sm_long_usd,       # [13] tanh(longUsd/10M)
+        sm_short_usd,      # [14] tanh(shortUsd/10M)
+        bias_value,        # [15] bias [-1, 1]
+        bias_confidence,   # [16] bias confidence [0-1]
+        sig_green,         # [17] signal GREEN
+        sig_yellow,        # [18] signal YELLOW
+        sig_red,           # [19] signal RED
+        dominant_long,     # [20] dominant LONG
+        dominant_short,    # [21] dominant SHORT
+    ]
+
+
+def compute_extra_features(token: str, candles: list[dict], meta_ctx: list[dict] | None) -> list[float]:
+    """Compute 8 extra features: funding, OI changes, time cyclical, volatility_24h."""
+    # Funding rate
+    funding_rate = 0.0
+    if meta_ctx and len(meta_ctx) >= 2:
+        universe = meta_ctx[0].get("universe", [])
+        ctx_list = meta_ctx[1]
+        for i, asset in enumerate(universe):
+            if asset.get("name") == token and i < len(ctx_list):
+                funding_rate = float(ctx_list[i].get("funding", 0) or 0)
+                break
+
+    # OI change (from saved snapshots)
+    oi_change_1h = 0.0
+    oi_change_4h = 0.0
+    current_oi = 0.0
+
+    if meta_ctx and len(meta_ctx) >= 2:
+        universe = meta_ctx[0].get("universe", [])
+        ctx_list = meta_ctx[1]
+        for i, asset in enumerate(universe):
+            if asset.get("name") == token and i < len(ctx_list):
+                current_oi = float(ctx_list[i].get("openInterest", 0) or 0)
+                break
+
+    # Load OI snapshots and compute changes
+    oi_snapshots = {}
+    try:
+        with open(OI_SNAPSHOT_FILE) as f:
+            oi_snapshots = json.load(f)
+    except Exception:
+        pass
+
+    now_ts = int(time.time())
+    token_snaps = oi_snapshots.get(token, [])
+
+    # Find closest snapshot to 1h ago and 4h ago
+    for snap in reversed(token_snaps):
+        age = now_ts - snap["ts"]
+        if 2700 < age < 7200 and oi_change_1h == 0.0 and snap["oi"] > 0:  # 45min - 2h
+            oi_change_1h = (current_oi - snap["oi"]) / snap["oi"]
+        if 10800 < age < 21600 and oi_change_4h == 0.0 and snap["oi"] > 0:  # 3h - 6h
+            oi_change_4h = (current_oi - snap["oi"]) / snap["oi"]
+
+    # Save current OI snapshot
+    token_snaps.append({"ts": now_ts, "oi": current_oi})
+    # Keep only last 48 snapshots (12h at 15min intervals)
+    oi_snapshots[token] = token_snaps[-48:]
+
+    try:
+        with open(OI_SNAPSHOT_FILE, "w") as f:
+            json.dump(oi_snapshots, f)
+    except Exception:
+        pass
+
+    # Time cyclical features
+    now = datetime.now(timezone.utc)
+    hour = now.hour + now.minute / 60.0
+    dow = now.weekday()
+    hour_sin = math.sin(2 * math.pi * hour / 24)
+    hour_cos = math.cos(2 * math.pi * hour / 24)
+    day_sin = math.sin(2 * math.pi * dow / 7)
+    day_cos = math.cos(2 * math.pi * dow / 7)
+
+    # Volatility 24h (std dev of 24 hourly returns)
+    volatility_24h = 0.0
+    closes = [c["c"] for c in candles]
+    if len(closes) >= 25:
+        returns = [(closes[i] - closes[i - 1]) / closes[i - 1]
+                   for i in range(len(closes) - 24, len(closes))
+                   if closes[i - 1] != 0]
+        if returns:
+            mean = sum(returns) / len(returns)
+            variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+            volatility_24h = variance ** 0.5
+
+    return [
+        funding_rate,      # [22] funding rate
+        oi_change_1h,      # [23] OI change 1h (ratio)
+        oi_change_4h,      # [24] OI change 4h (ratio)
+        hour_sin,          # [25] hour sin
+        hour_cos,          # [26] hour cos
+        day_sin,           # [27] day sin
+        day_cos,           # [28] day cos
+        volatility_24h,    # [29] volatility 24h (raw std dev)
+    ]
+
+
+def compute_multiday_features(token: str, current_price: float) -> list[float]:
+    """Compute 4 multi-day trend features from daily candles.
+
+    Features [30-33]:
+      [30] change_7d       — 7-day price change, tanh(change/30) [-1, 1]
+      [31] change_10d      — 10-day price change, tanh(change/50) [-1, 1]
+      [32] dist_from_7d_high — distance from 7d high [0, -1] (0=at high, -1=10%+ below)
+      [33] trend_slope_7d  — 7d linear regression slope, tanh(slope×100) [-1, 1]
+    """
+    zeros = [0.0] * 4
+
+    # Fetch 14 daily candles (need 10d lookback + margin)
+    daily_candles = fetch_candles(token, "1d", 14)
+    if len(daily_candles) < 7:
+        return zeros
+
+    daily_closes = [c["c"] for c in daily_candles]
+    daily_highs = [c["h"] for c in daily_candles]
+    n = len(daily_closes)
+
+    # [45] change_7d: price change over 7 days
+    change_7d = 0.0
+    if n >= 7 and daily_closes[-7] > 0:
+        change_7d = (current_price / daily_closes[-7] - 1) * 100  # in %
+    change_7d_norm = math.tanh(change_7d / 30)  # ±30% maps to ±0.76
+
+    # [46] change_10d: price change over 10 days
+    change_10d = 0.0
+    if n >= 10 and daily_closes[-10] > 0:
+        change_10d = (current_price / daily_closes[-10] - 1) * 100
+    elif n >= 7 and daily_closes[-7] > 0:
+        # Fallback to 7d if not enough data for 10d
+        change_10d = change_7d
+    change_10d_norm = math.tanh(change_10d / 50)  # ±50% maps to ±0.76
+
+    # [47] distance from 7d high: how far below the 7-day high
+    high_7d = max(daily_highs[-7:]) if len(daily_highs) >= 7 else max(daily_highs)
+    dist_from_high = 0.0
+    if high_7d > 0:
+        dist_from_high = (current_price / high_7d - 1)  # negative = below high
+    # Clamp to [-1, 0]: 0 = at high, -1 = 10%+ below
+    dist_from_high_norm = max(dist_from_high * 10, -1.0)
+
+    # [48] trend_slope_7d: linear regression slope of last 7 daily closes
+    slope_7d = 0.0
+    lookback = min(n, 7)
+    if lookback >= 3:
+        segment = daily_closes[-lookback:]
+        # Normalize to % change from first point
+        base = segment[0]
+        if base > 0:
+            norm_seg = [(p / base - 1) * 100 for p in segment]
+            # Simple linear regression: y = mx + b
+            x_mean = (lookback - 1) / 2.0
+            y_mean = sum(norm_seg) / lookback
+            num = sum((i - x_mean) * (norm_seg[i] - y_mean) for i in range(lookback))
+            den = sum((i - x_mean) ** 2 for i in range(lookback))
+            if den > 0:
+                slope_7d = num / den  # % per day
+    slope_7d_norm = math.tanh(slope_7d * 100 / 30)  # ±0.3%/day maps to ±0.76
+
+    return [
+        change_7d_norm,       # [45] 7d change
+        change_10d_norm,      # [46] 10d change
+        dist_from_high_norm,  # [47] distance from 7d high
+        slope_7d_norm,        # [48] trend slope 7d
+    ]
+
+
+def compute_btc_cross_features(token: str, btc_candles: list[dict], token_candles: list[dict]) -> list[float]:
+    """Compute 4 BTC cross-market features.
+
+    BTC price action influences all altcoins. These features give the model
+    cross-market context — e.g. "BTC just dumped 3%, altcoins will follow".
+
+    Features [49-52]:
+      [49] btc_change_1h       — BTC 1h price change, tanh(change/10) [-1, 1]
+      [50] btc_change_4h       — BTC 4h price change, tanh(change/20) [-1, 1]
+      [51] btc_rsi             — BTC RSI / 100 [0, 1]
+      [52] btc_token_corr_24h  — 24h Pearson correlation of BTC vs token returns [-1, 1]
+    """
+    zeros = [0.0] * 4
+
+    # For BTC itself, these would be redundant with existing tech features
+    if token == "BTC":
+        return zeros
+
+    if len(btc_candles) < 25:
+        return zeros
+
+    btc_closes = [c["c"] for c in btc_candles]
+    n = len(btc_closes)
+
+    # [49] BTC 1h change
+    btc_change_1h = 0.0
+    if n >= 2 and btc_closes[-2] > 0:
+        btc_change_1h = (btc_closes[-1] - btc_closes[-2]) / btc_closes[-2] * 100
+    btc_change_1h_norm = math.tanh(btc_change_1h / 10)
+
+    # [50] BTC 4h change
+    btc_change_4h = 0.0
+    if n >= 5 and btc_closes[-5] > 0:
+        btc_change_4h = (btc_closes[-1] - btc_closes[-5]) / btc_closes[-5] * 100
+    btc_change_4h_norm = math.tanh(btc_change_4h / 20)
+
+    # [51] BTC RSI
+    btc_rsi_vals = calculate_rsi(btc_closes)
+    btc_rsi_norm = (btc_rsi_vals[-1] / 100) if btc_rsi_vals else 0.5
+
+    # [52] 24h Pearson correlation between BTC and token returns
+    corr = 0.0
+    token_closes = [c["c"] for c in token_candles]
+    if len(btc_closes) >= 25 and len(token_closes) >= 25:
+        # Last 24 hourly returns
+        btc_rets = [(btc_closes[i] - btc_closes[i - 1]) / btc_closes[i - 1]
+                    for i in range(len(btc_closes) - 24, len(btc_closes))
+                    if btc_closes[i - 1] > 0]
+        tok_rets = [(token_closes[i] - token_closes[i - 1]) / token_closes[i - 1]
+                    for i in range(len(token_closes) - 24, len(token_closes))
+                    if token_closes[i - 1] > 0]
+
+        if len(btc_rets) >= 20 and len(tok_rets) >= 20:
+            # Align lengths (use min)
+            min_len = min(len(btc_rets), len(tok_rets))
+            br = btc_rets[-min_len:]
+            tr = tok_rets[-min_len:]
+
+            b_mean = sum(br) / min_len
+            t_mean = sum(tr) / min_len
+
+            cov = sum((br[i] - b_mean) * (tr[i] - t_mean) for i in range(min_len)) / min_len
+            b_std = (sum((x - b_mean) ** 2 for x in br) / min_len) ** 0.5
+            t_std = (sum((x - t_mean) ** 2 for x in tr) / min_len) ** 0.5
+
+            if b_std > 0 and t_std > 0:
+                corr = cov / (b_std * t_std)
+                corr = max(-1.0, min(1.0, corr))  # clamp
+
+    return [
+        btc_change_1h_norm,  # [49] BTC 1h change
+        btc_change_4h_norm,  # [50] BTC 4h change
+        btc_rsi_norm,        # [51] BTC RSI
+        corr,                # [52] BTC-token 24h correlation
+    ]
+
+
+def compute_orderbook_features(token: str, meta_ctx: list[dict] | None) -> list[float]:
+    """Compute 3 orderbook features from L2 book data.
+
+    Features [53-55]:
+      [53] bid_ask_imbalance  — (bid_depth - ask_depth) / total [-1, 1]
+      [54] spread_bps         — bid-ask spread in bps, min(spread/50, 1) [0, 1]
+      [55] book_depth_ratio   — total depth / 24h volume [0, 1]
+    """
+    zeros = [0.0] * 3
+
+    book = fetch_l2_book(token)
+    if not book or "levels" not in book:
+        return zeros
+
+    levels = book["levels"]
+    if not levels or len(levels) < 2:
+        return zeros
+
+    # REST API: levels[0] = bids, levels[1] = asks
+    bids = levels[0] if levels[0] else []
+    asks = levels[1] if levels[1] else []
+
+    if not bids or not asks:
+        return zeros
+
+    # [53] Bid/ask imbalance — top 5 levels USD depth
+    bid_depth = sum(float(l["px"]) * float(l["sz"]) for l in bids[:5])
+    ask_depth = sum(float(l["px"]) * float(l["sz"]) for l in asks[:5])
+    total_depth = bid_depth + ask_depth
+    imbalance = (bid_depth - ask_depth) / total_depth if total_depth > 0 else 0.0
+
+    # [54] Spread in bps
+    best_bid = float(bids[0]["px"])
+    best_ask = float(asks[0]["px"])
+    mid = (best_bid + best_ask) / 2
+    spread_bps = (best_ask - best_bid) / mid * 10000 if mid > 0 else 0
+    spread_norm = min(spread_bps / 50, 1.0)  # 50bps = 1.0
+
+    # [55] Book depth / 24h volume ratio
+    volume_24h = 0.0
+    if meta_ctx and len(meta_ctx) >= 2:
+        universe = meta_ctx[0].get("universe", [])
+        ctx_list = meta_ctx[1]
+        for i, asset in enumerate(universe):
+            if asset.get("name") == token and i < len(ctx_list):
+                volume_24h = float(ctx_list[i].get("dayNtlVlm", 0) or 0)
+                break
+    depth_ratio = total_depth / volume_24h if volume_24h > 0 else 0
+    depth_norm = min(depth_ratio, 1.0)
+
+    return [
+        max(-1.0, min(1.0, imbalance)),  # [53] bid_ask_imbalance
+        spread_norm,                      # [54] spread_bps
+        depth_norm,                       # [55] book_depth_ratio
+    ]
+
+
+def compute_meta_extra_features(token: str, meta_ctx: list[dict] | None) -> list[float]:
+    """Compute 3 extra features from metaAndAssetCtxs (already fetched, zero API calls).
+
+    Features [56-58]:
+      [56] mark_oracle_spread  — (mark - oracle) / oracle, scaled ×100 [-1, 1]
+      [57] oi_normalized       — OI / 24h volume ratio [0, 1]
+      [58] predicted_funding   — premium field (drives next funding) [-1, 1]
+    """
+    zeros = [0.0] * 3
+
+    if not meta_ctx or len(meta_ctx) < 2:
+        return zeros
+
+    universe = meta_ctx[0].get("universe", [])
+    ctx_list = meta_ctx[1]
+
+    for i, asset in enumerate(universe):
+        if asset.get("name") == token and i < len(ctx_list):
+            ctx = ctx_list[i]
+
+            # [56] Mark-Oracle spread
+            mark_px = float(ctx.get("markPx", 0) or 0)
+            oracle_px = float(ctx.get("oraclePx", 0) or 0)
+            if oracle_px > 0 and mark_px > 0:
+                spread = (mark_px - oracle_px) / oracle_px
+                mark_oracle = max(-1.0, min(1.0, spread * 100))  # ×100 to scale up
+            else:
+                mark_oracle = 0.0
+
+            # [57] OI normalized by 24h volume
+            oi = float(ctx.get("openInterest", 0) or 0)
+            vol_24h = float(ctx.get("dayNtlVlm", 0) or 0)
+            oi_norm = min(oi / vol_24h / 10, 1.0) if vol_24h > 0 else 0.0  # ratio/10 → [0,1]
+
+            # [58] Predicted funding (premium as proxy — drives next funding rate)
+            premium = float(ctx.get("premium", 0) or 0)
+            pred_funding = math.tanh(premium * 1000)  # typically ±0.001 → tanh(±1)
+
+            return [mark_oracle, oi_norm, pred_funding]
+
+    return zeros
+
+
+def compute_derived_features(candles: list[dict]) -> list[float]:
+    """Compute 3 derived features from existing candle data (zero API calls).
+
+    Features [59-61]:
+      [59] volume_momentum         — recent 4h volume / previous 4h volume, centered [-1, 1]
+      [60] price_acceleration      — 2nd derivative: change_now - change_prev [-1, 1]
+      [61] volume_price_divergence — volume up + price down (or vice versa) [-1, 1]
+    """
+    zeros = [0.0] * 3
+
+    closes = [c["c"] for c in candles]
+    volumes = [c["v"] for c in candles]
+
+    # [59] Volume momentum: last 4h volume vs previous 4h
+    vol_momentum_norm = 0.0
+    if len(volumes) >= 8:
+        recent_4h = sum(volumes[-4:])
+        previous_4h = sum(volumes[-8:-4])
+        if previous_4h > 0:
+            vol_momentum = recent_4h / previous_4h
+            vol_momentum_norm = math.tanh(vol_momentum - 1.0)  # center around 0
+
+    # [60] Price acceleration (2nd derivative of price)
+    accel_norm = 0.0
+    if len(closes) >= 3 and closes[-2] > 0 and closes[-3] > 0:
+        change_now = (closes[-1] - closes[-2]) / closes[-2] * 100
+        change_prev = (closes[-2] - closes[-3]) / closes[-3] * 100
+        acceleration = change_now - change_prev
+        accel_norm = math.tanh(acceleration / 5)
+
+    # [61] Volume-price divergence
+    div_norm = 0.0
+    if len(closes) >= 5 and len(volumes) >= 8 and closes[-5] > 0:
+        price_change = (closes[-1] - closes[-5]) / closes[-5]
+        vol_avg_recent = sum(volumes[-4:]) / 4
+        vol_avg_prev = sum(volumes[-8:-4]) / 4
+        if vol_avg_prev > 0:
+            vol_change = (vol_avg_recent - vol_avg_prev) / vol_avg_prev
+            # Positive when they diverge (volume up + price down, or vice versa)
+            divergence = -price_change * vol_change
+            div_norm = math.tanh(divergence * 50)
+
+    return [vol_momentum_norm, accel_norm, div_norm]
+
+
+def fetch_btc_prediction() -> dict | None:
+    """Fetch BTC h4 prediction from prediction-api (localhost:8090).
+
+    Returns dict with direction (-1/0/+1), change (%), confidence (0-100), or None on error.
+    """
+    try:
+        resp = requests.get("http://localhost:8090/predict/BTC", timeout=5)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        pred = data.get("prediction", {})
+        preds = pred.get("predictions", {})
+        h4 = preds.get("h4")
+        if not h4:
+            return None
+        direction_str = pred.get("direction", "NEUTRAL")
+        direction = 1 if direction_str == "BULLISH" else (-1 if direction_str == "BEARISH" else 0)
+        return {
+            "direction": direction,
+            "change": h4.get("change", 0),
+            "confidence": h4.get("confidence", 50),
+        }
+    except Exception:
+        return None
+
+
+def compute_btc_pred_features(btc_pred: dict | None, token: str) -> list[float]:
+    """Compute 3 BTC prediction proxy features [62-64].
+
+    For BTC itself: returns [0, 0, 0] (redundant with own technical features).
+    For all other tokens: injects BTC h4 prediction as cross-market intelligence.
+
+    Features:
+      [62] btc_pred_direction  — -1 (SHORT/BEARISH), 0 (NEUTRAL), +1 (LONG/BULLISH)
+      [63] btc_pred_change     — predicted h4 % change, tanh(change/5) normalized to [-1, 1]
+      [64] btc_pred_confidence — confidence / 100, [0, 1]
+    """
+    if token == "BTC" or btc_pred is None:
+        return [0.0, 0.0, 0.0]
+
+    direction = float(btc_pred.get("direction", 0))
+    change = btc_pred.get("change", 0)
+    confidence = btc_pred.get("confidence", 50)
+
+    return [
+        direction,
+        math.tanh(change / 5),
+        confidence / 100.0,
+    ]
+
+
+def compute_15m_features(token: str) -> list[float]:
+    """Compute 8 features from 15m candles [65-72].
+
+    Features:
+      [65] rsi_15m              — 15m RSI (14-period) / 100 → [0, 1]
+      [66] change_15m           — Last 15m candle change %, tanh(change/5) → [-1, 1]
+      [67] change_1h_15m        — 4× 15m candle change (granular 1h), tanh(change/10) → [-1, 1]
+      [68] ema9_ema21_cross_15m — EMA9/EMA21 cross signal, tanh((ema9-ema21)/ema21 × 100) → [-1, 1]
+      [69] momentum_15m         — Rate of change last 4 candles (1h lookback), tanh(roc/10) → [-1, 1]
+      [70] volatility_15m       — Std dev of last 16 15m returns (4h window), min(vol/5, 1.0) → [0, 1]
+      [71] body_ratio_15m       — Average body/range ratio last 4 candles → [0, 1]
+      [72] consecutive_dir_15m  — Consecutive same-direction candles / 8, [-1, 1] neg=bear
+    """
+    try:
+        candles = fetch_candles(token, "15m", 96)  # 96 × 15m = 24h
+    except Exception:
+        return [0.0] * 8
+
+    if len(candles) < 24:
+        return [0.0] * 8
+
+    closes = [c["c"] for c in candles]
+
+    # [65] RSI 15m
+    rsi_vals = calculate_rsi(closes, 14)
+    rsi_15m = rsi_vals[-1] / 100.0 if rsi_vals else 0.5
+
+    # [66] change_15m — last candle change
+    if len(candles) >= 2:
+        last_close = candles[-1]["c"]
+        prev_close = candles[-2]["c"]
+        change_15m = ((last_close - prev_close) / prev_close * 100) if prev_close else 0
+        change_15m = math.tanh(change_15m / 5)
+    else:
+        change_15m = 0.0
+
+    # [67] change_1h_15m — 4-candle (1h) change on 15m data
+    if len(candles) >= 5:
+        c_now = candles[-1]["c"]
+        c_4ago = candles[-5]["c"]
+        change_1h = ((c_now - c_4ago) / c_4ago * 100) if c_4ago else 0
+        change_1h_15m = math.tanh(change_1h / 10)
+    else:
+        change_1h_15m = 0.0
+
+    # [68] EMA9/EMA21 cross signal
+    ema9 = calculate_ema(closes, 9)
+    ema21 = calculate_ema(closes, 21)
+    if ema9 and ema21:
+        ema9_last = ema9[-1]
+        ema21_last = ema21[-1]
+        if ema21_last != 0:
+            cross_signal = math.tanh((ema9_last - ema21_last) / ema21_last * 100)
+        else:
+            cross_signal = 0.0
+    else:
+        cross_signal = 0.0
+
+    # [69] momentum_15m — rate of change last 4 candles
+    if len(candles) >= 5:
+        roc = ((candles[-1]["c"] - candles[-5]["c"]) / candles[-5]["c"] * 100) if candles[-5]["c"] else 0
+        momentum_15m = math.tanh(roc / 10)
+    else:
+        momentum_15m = 0.0
+
+    # [70] volatility_15m — std dev of last 16 15m returns
+    if len(candles) >= 17:
+        returns_15m = []
+        for j in range(len(candles) - 16, len(candles)):
+            if candles[j - 1]["c"] > 0:
+                ret = (candles[j]["c"] - candles[j - 1]["c"]) / candles[j - 1]["c"] * 100
+                returns_15m.append(ret)
+        if returns_15m:
+            mean_r = sum(returns_15m) / len(returns_15m)
+            var_r = sum((r - mean_r) ** 2 for r in returns_15m) / len(returns_15m)
+            vol = var_r ** 0.5
+            volatility_15m = min(vol / 5.0, 1.0)
+        else:
+            volatility_15m = 0.0
+    else:
+        volatility_15m = 0.0
+
+    # [71] body_ratio_15m — avg body/range ratio last 4 candles
+    body_ratios = []
+    for c in candles[-4:]:
+        rng = c["h"] - c["l"]
+        if rng > 0:
+            body = abs(c["c"] - c["o"])
+            body_ratios.append(body / rng)
+        else:
+            body_ratios.append(0.0)
+    body_ratio_15m = sum(body_ratios) / len(body_ratios) if body_ratios else 0.0
+
+    # [72] consecutive_dir_15m — consecutive same-direction candles / 8
+    consecutive = 0
+    if len(candles) >= 2:
+        last_dir = 1 if candles[-1]["c"] >= candles[-1]["o"] else -1
+        for j in range(len(candles) - 1, max(len(candles) - 9, -1), -1):
+            c = candles[j]
+            d = 1 if c["c"] >= c["o"] else -1
+            if d == last_dir:
+                consecutive += 1
+            else:
+                break
+        consecutive_dir_15m = (consecutive / 8.0) * last_dir
+        consecutive_dir_15m = max(-1.0, min(1.0, consecutive_dir_15m))
+    else:
+        consecutive_dir_15m = 0.0
+
+    return [
+        round(rsi_15m, 6),
+        round(change_15m, 6),
+        round(change_1h_15m, 6),
+        round(cross_signal, 6),
+        round(momentum_15m, 6),
+        round(volatility_15m, 6),
+        round(body_ratio_15m, 6),
+        round(consecutive_dir_15m, 6),
+    ]
+
+
+def compute_tier2_features(candles: list[dict]) -> list[float]:
+    """Compute 3 Tier-2 features from existing 1h candles (zero API calls).
+
+    Features [73-75]:
+      [73] gap_detection     — Gap between prev close and current open, tanh(gap%/2) → [-1, 1]
+                               Positive = gap up (bullish overnight), negative = gap down
+      [74] range_expansion   — Current candle range vs avg range of last 10 candles, tanh(ratio-1) → [-1, 1]
+                               Positive = expanding range (volatility breakout)
+      [75] rsi_4h            — RSI calculated on 4h synthetic bars (every 4th close), /100 → [0, 1]
+    """
+    zeros = [0.0] * 3
+
+    if len(candles) < 20:
+        return zeros
+
+    closes = [c["c"] for c in candles]
+
+    # [73] Gap detection — gap between previous candle close and current candle open
+    gap_norm = 0.0
+    last = candles[-1]
+    prev = candles[-2]
+    if prev["c"] > 0:
+        gap_pct = (last["o"] - prev["c"]) / prev["c"] * 100
+        gap_norm = math.tanh(gap_pct / 2.0)
+
+    # [74] Range expansion — current range vs average range of last 10 candles
+    range_exp = 0.0
+    current_range = last["h"] - last["l"]
+    ranges_10 = [c["h"] - c["l"] for c in candles[-11:-1]]
+    avg_range = sum(ranges_10) / len(ranges_10) if ranges_10 else 0
+    if avg_range > 0:
+        ratio = current_range / avg_range
+        range_exp = math.tanh(ratio - 1.0)
+
+    # [75] RSI 4h — RSI on synthetic 4h bars (every 4th hourly close)
+    rsi_4h_norm = 0.5
+    closes_4h = closes[::4]  # every 4th close = ~4h resolution
+    if len(closes_4h) >= 16:
+        rsi_vals_4h = calculate_rsi(closes_4h, 14)
+        if rsi_vals_4h:
+            rsi_4h_norm = rsi_vals_4h[-1] / 100.0
+
+    return [
+        round(gap_norm, 6),
+        round(range_exp, 6),
+        round(rsi_4h_norm, 6),
+    ]
+
+
+def backfill_labels(filepath: str, current_price: float) -> int:
+    """Backfill labels for older rows. Returns number of rows updated."""
+    if not os.path.exists(filepath):
+        return 0
+
+    now_ts = int(time.time())
+    updated = 0
+
+    # Read all lines
+    lines = []
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                lines.append(line)
+
+    # Process recent rows for label backfill (h1/h4/h12 only — w1/m1 removed)
+    start_idx = max(0, len(lines) - LABEL_BACKFILL_ROWS) if LABEL_BACKFILL_ROWS > 0 else 0
+    modified = False
+
+    for i in range(start_idx, len(lines)):
+        try:
+            row = json.loads(lines[i])
+        except json.JSONDecodeError:
+            continue
+
+        row_ts = row.get("ts", 0)
+        row_price = row.get("price", 0)
+        if row_price <= 0:
+            continue
+
+        age = now_ts - row_ts
+        change = (current_price / row_price - 1)
+
+        if age >= 3600 and row.get("label_1h") is None:
+            row["label_1h"] = round(change, 6)
+            lines[i] = json.dumps(row)
+            modified = True
+            updated += 1
+
+        if age >= 14400 and row.get("label_4h") is None:
+            row["label_4h"] = round(change, 6)
+            lines[i] = json.dumps(row)
+            modified = True
+            updated += 1
+
+        if age >= 43200 and row.get("label_12h") is None:
+            row["label_12h"] = round(change, 6)
+            lines[i] = json.dumps(row)
+            modified = True
+            updated += 1
+
+    if modified:
+        with open(filepath, "w") as f:
+            for line in lines:
+                f.write(line + "\n")
+
+    return updated
+
+
+def collect_token(token: str, mids: dict[str, float], meta_ctx: list[dict] | None, btc_candles: list[dict] | None = None, btc_pred: dict | None = None) -> None:
+    """Collect features for a single token and append to dataset."""
+    print(f"\n  [{token}] Collecting features...")
+
+    price = mids.get(token, 0)
+    if price <= 0:
+        print(f"  [{token}] No mid price, skipping")
+        return
+
+    # Fetch candles
+    candles = fetch_candles(token, "1h", CANDLE_COUNT)
+    if len(candles) < 60:
+        print(f"  [{token}] Only {len(candles)} candles (need 60+), skipping")
+        return
+
+    # Compute features
+    tech = compute_technical_features(candles)
+    if tech is None:
+        print(f"  [{token}] Failed to compute technical features, skipping")
+        return
+
+    nansen = compute_nansen_features(token)
+    extra = compute_extra_features(token, candles, meta_ctx)
+
+    multiday = compute_multiday_features(token, price)
+    btc_cross = compute_btc_cross_features(token, btc_candles or [], candles)
+    orderbook = compute_orderbook_features(token, meta_ctx)
+    meta_extra = compute_meta_extra_features(token, meta_ctx)
+    derived = compute_derived_features(candles)
+    btc_pred_feat = compute_btc_pred_features(btc_pred, token)
+    feat_15m = compute_15m_features(token)
+    tier2 = compute_tier2_features(candles)
+
+    features = tech + nansen + extra + multiday + btc_cross + orderbook + meta_extra + derived + btc_pred_feat + feat_15m + tier2
+    assert len(features) == 61, f"Expected 61 features, got {len(features)}"
+
+    # Build row
+    row = {
+        "ts": int(time.time()),
+        "price": round(price, 6),
+        "features": [round(f, 6) for f in features],
+        "label_1h": None,
+        "label_4h": None,
+        "label_12h": None,
+    }
+
+    # Save latest feature vector for prediction-api (real-time inference)
+    latest_path = os.path.join(DATASET_DIR, f"xgboost_latest_{token}.json")
+    with open(latest_path, "w") as f:
+        json.dump({"ts": row["ts"], "price": row["price"], "features": row["features"]}, f)
+
+    # Append to JSONL file
+    filepath = os.path.join(DATASET_DIR, f"xgboost_dataset_{token}.jsonl")
+    with open(filepath, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+    # Count rows
+    with open(filepath) as f:
+        row_count = sum(1 for _ in f)
+
+    print(f"  [{token}] Appended row (price=${price:.4f}, {len(features)} features, total={row_count} rows)")
+
+    # Backfill labels
+    updated = backfill_labels(filepath, price)
+    if updated > 0:
+        print(f"  [{token}] Backfilled {updated} labels")
+
+
+def main():
+    print(f"=== XGBoost Data Collector === {datetime.now(timezone.utc).isoformat()}")
+
+    # Fetch shared data once
+    print("  Fetching allMids...")
+    mids = fetch_all_mids()
+    if not mids:
+        print("  ERROR: Could not fetch allMids, aborting")
+        sys.exit(1)
+
+    print("  Fetching metaAndAssetCtxs...")
+    meta_ctx = fetch_clearinghouse_meta_and_ctx()
+
+    # Fetch BTC candles once for cross-market features (all tokens need BTC context)
+    print("  Fetching BTC candles for cross-features...")
+    btc_candles = fetch_candles("BTC", "1h", CANDLE_COUNT)
+    print(f"  BTC candles: {len(btc_candles)}")
+
+    # Fetch BTC h4 prediction from prediction-api (cross-token proxy)
+    print("  Fetching BTC prediction from prediction-api...")
+    btc_pred = fetch_btc_prediction()
+    if btc_pred:
+        dir_str = {1: "BULLISH", -1: "BEARISH"}.get(btc_pred["direction"], "NEUTRAL")
+        print(f"  BTC prediction: {dir_str} {btc_pred['change']:+.2f}% (conf={btc_pred['confidence']:.0f}%)")
+    else:
+        print("  BTC prediction: unavailable (prediction-api down or no data)")
+
+    # Collect per token
+    for token in TOKENS:
+        try:
+            collect_token(token, mids, meta_ctx, btc_candles, btc_pred)
+        except Exception as e:
+            print(f"  [{token}] ERROR: {e}")
+
+    print(f"\n=== Done === {datetime.now(timezone.utc).isoformat()}")
+
+
+if __name__ == "__main__":
+    main()

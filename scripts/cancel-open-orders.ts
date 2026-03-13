@@ -29,6 +29,11 @@ async function cancelOpenOrders(coin: string) {
   console.log(`🔍 Checking open orders for ${coin} (wallet: ${walletAddress})...`);
 
   try {
+    // Build asset index map from meta
+    const meta = await infoClient.meta() as any;
+    const assetMap = new Map<string, number>();
+    meta.universe.forEach((m: any, i: number) => assetMap.set(m.name, i));
+
     // Fetch open orders
     const orders = await infoClient.openOrders({ user: walletAddress });
 
@@ -55,8 +60,9 @@ async function cancelOpenOrders(coin: string) {
     let successCount = 0;
     for (const order of coinOrders) {
       try {
+        const assetIndex = assetMap.get(order.coin) ?? 0;
         const result = await exchClient.cancel({
-          cancels: [{ a: 0, o: order.oid }],
+          cancels: [{ a: assetIndex, o: order.oid }],
         });
 
         if (result && result.status === 'ok') {
