@@ -275,6 +275,25 @@ export type MarketVisionState = {
   lastUpdate: number;
 };
 
+// S/R Flip Detection — when price breaks through S/R, the old level flips role
+export interface FlipCandidate {
+  level: number           // S/R price that was broken
+  type: 'resistance_to_support' | 'support_to_resistance'
+  breakCandle: number     // timestamp of first candle beyond level
+  confirmationCount: number  // candles closed on "good" side
+  maxExtension: number    // furthest close beyond level (in ATR units)
+}
+
+export interface FlippedLevel {
+  level: number
+  type: 'resistance_to_support' | 'support_to_resistance'
+  confirmedAt: number
+  retestCount: number
+  strength: number        // 1.0 → decays over time
+  lastRetestAt: number
+  lastDecayAt: number     // timestamp for time-proportional decay
+}
+
 export type PairAnalysis = {
   symbol: string;
   trend: 'bull' | 'bear' | 'neutral';
@@ -307,6 +326,8 @@ export type PairAnalysis = {
   nansenPressure: number; // Net Buy/Sell Pressure in USD
   nansenScore: number; // Contribution to bias
   recentVolumes15m: number[]; // Last 9 candle volumes for spike detection (sniper mode)
+  effectiveSupport?: number;     // Flipped R→S level if between raw support and price
+  effectiveResistance?: number;  // Flipped S→R level if between raw resistance and price
 };
 
 export class MarketVisionService {
@@ -324,6 +345,9 @@ export class MarketVisionService {
   };
 
   private pairAnalysis: Map<string, PairAnalysis> = new Map();
+  // S/R Flip Detection state
+  private flipCandidates: Map<string, FlipCandidate> = new Map();
+  private flippedLevels: Map<string, FlippedLevel[]> = new Map();
   private isRunning: boolean = false;
   private updateIntervalMs: number = 2 * 60 * 1000; // Update every 2 minutes (faster for reversal detection)
   // We will dynamically update this list based on what the bot is trading
@@ -807,6 +831,9 @@ export class MarketVisionService {
 
         this.pairAnalysis.set(pair, analysis);
 
+        // S/R Flip Detection — update after raw S/R computed, sets effectiveSupport/effectiveResistance
+        this.updateFlipDetection(pair, analysis);
+
         // THROTTLE REQUESTS: Prevent 429 on Hyperliquid and Nansen
         await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -832,6 +859,152 @@ export class MarketVisionService {
       score += pairScores.reduce((sum, s) => sum + s, 0) / pairScores.length * 0.5; // 50% weight
     }
     return Math.max(-100, Math.min(100, score));
+  }
+
+  /**
+   * S/R Flip Detection — detects when price breaks through S/R and the old level flips role.
+   * After breakout + confirmation, tracks flipped levels and sets effectiveSupport/effectiveResistance.
+   */
+  private updateFlipDetection(pair: string, analysis: PairAnalysis): void {
+    const config = getMomentumGuardConfig(pair);
+    const confirmCandles = config.srFlipConfirmCandles ?? 3;
+    const minExtATR = config.srFlipMinExtensionATR ?? 0.3;
+    const retestZoneATR = config.srFlipRetestZoneATR ?? 0.5;
+    const decayPerHour = config.srFlipDecayPerHour ?? 0.02;
+    const maxAgeHours = config.srFlipMaxAgeHours ?? 48;
+
+    const now = Date.now();
+    const price = analysis.lastCandle15mClose || 0;
+    const atr = analysis.atr || 0;
+    const rawSupport = analysis.supportBody12h || 0;
+    const rawResistance = analysis.resistanceBody12h || 0;
+
+    if (!price || !atr || !rawSupport || !rawResistance) return;
+
+    // --- 1. Check for new breakout candidates ---
+    const candidateKey = pair;
+    let candidate = this.flipCandidates.get(candidateKey);
+
+    // Resistance breakout: candle closed ABOVE resistance + minExtATR
+    if (price > rawResistance + minExtATR * atr) {
+      if (!candidate || candidate.type !== 'resistance_to_support') {
+        candidate = {
+          level: rawResistance,
+          type: 'resistance_to_support',
+          breakCandle: now,
+          confirmationCount: 1,
+          maxExtension: (price - rawResistance) / atr,
+        };
+        this.flipCandidates.set(candidateKey, candidate);
+      } else {
+        candidate.confirmationCount++;
+        candidate.maxExtension = Math.max(candidate.maxExtension, (price - rawResistance) / atr);
+      }
+    }
+    // Support breakdown: candle closed BELOW support - minExtATR
+    else if (price < rawSupport - minExtATR * atr) {
+      if (!candidate || candidate.type !== 'support_to_resistance') {
+        candidate = {
+          level: rawSupport,
+          type: 'support_to_resistance',
+          breakCandle: now,
+          confirmationCount: 1,
+          maxExtension: (rawSupport - price) / atr,
+        };
+        this.flipCandidates.set(candidateKey, candidate);
+      } else {
+        candidate.confirmationCount++;
+        candidate.maxExtension = Math.max(candidate.maxExtension, (rawSupport - price) / atr);
+      }
+    }
+    // Price came back inside S/R range — cancel candidate
+    else if (candidate) {
+      this.flipCandidates.delete(candidateKey);
+      candidate = undefined;
+    }
+
+    // --- 2. Promote confirmed candidates to FlippedLevel ---
+    if (candidate && candidate.confirmationCount >= confirmCandles) {
+      const levels = this.flippedLevels.get(pair) || [];
+      // Max 1 active per type
+      const existingIdx = levels.findIndex(l => l.type === candidate!.type);
+      const flipped: FlippedLevel = {
+        level: candidate.level,
+        type: candidate.type,
+        confirmedAt: now,
+        retestCount: 0,
+        strength: 1.0,
+        lastRetestAt: now,
+        lastDecayAt: now,
+      };
+      if (existingIdx >= 0) {
+        levels[existingIdx] = flipped;
+      } else {
+        levels.push(flipped);
+      }
+      this.flippedLevels.set(pair, levels);
+      this.flipCandidates.delete(candidateKey);
+
+      console.log(`🔄 [SR_FLIP] ${pair}: ${candidate.type} confirmed — level=${candidate.level.toPrecision(5)} ext=${candidate.maxExtension.toFixed(2)}ATR confirms=${candidate.confirmationCount}`);
+    }
+
+    // --- 3. Update flipped levels: retests, decay, expiry ---
+    const levels = this.flippedLevels.get(pair);
+    if (levels) {
+      for (let i = levels.length - 1; i >= 0; i--) {
+        const fl = levels[i];
+
+        // Retest detection: price comes back near flipped level
+        const distToFlipped = Math.abs(price - fl.level) / atr;
+        if (distToFlipped <= retestZoneATR) {
+          fl.retestCount++;
+          fl.strength = Math.min(1.0, fl.strength + 0.1); // refresh on retest
+          fl.lastRetestAt = now;
+        }
+
+        // Time-based decay (proportional to elapsed time since last decay)
+        const ageHours = (now - fl.confirmedAt) / (3600 * 1000);
+        const hoursSinceLastDecay = (now - fl.lastDecayAt) / (3600 * 1000);
+        let decayAmount = decayPerHour * hoursSinceLastDecay;
+
+        // Rolling drift: raw support rose above flipped support → faster decay (3x)
+        if (fl.type === 'resistance_to_support' && rawSupport > fl.level) {
+          decayAmount += decayPerHour * 2 * hoursSinceLastDecay;
+        }
+        if (fl.type === 'support_to_resistance' && rawResistance < fl.level) {
+          decayAmount += decayPerHour * 2 * hoursSinceLastDecay;
+        }
+        fl.strength -= decayAmount;
+        fl.lastDecayAt = now;
+
+        // Expiry
+        if (fl.strength <= 0 || ageHours > maxAgeHours) {
+          levels.splice(i, 1);
+        }
+      }
+      if (levels.length === 0) {
+        this.flippedLevels.delete(pair);
+      }
+    }
+
+    // --- 4. Set effectiveSupport / effectiveResistance ---
+    const activeLevels = this.flippedLevels.get(pair) || [];
+
+    // Flipped R→S: old resistance became support. Must be BETWEEN raw support and price.
+    const flippedSupport = activeLevels.find(l =>
+      l.type === 'resistance_to_support' && l.level > rawSupport && l.level < price
+    );
+    if (flippedSupport) {
+      analysis.effectiveSupport = flippedSupport.level;
+    }
+
+    // Flipped S→R: old support became resistance. Must be BETWEEN raw resistance and price.
+    const flippedResist = activeLevels.find(l =>
+      l.type === 'support_to_resistance' && l.level < rawResistance && l.level > price
+    );
+    if (flippedResist) {
+      analysis.effectiveResistance = flippedResist.level;
+    }
   }
 
   getGlobalState(): MarketVisionState {

@@ -8447,8 +8447,11 @@ class HyperliquidMMBot {
           const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
           const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
           // Fallback to HTF S/R (1h×72 = 3 days) if STF not available
-          const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
-          const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+          const mgResistBodyRaw = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+          const mgSupportBodyRaw = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+          // Effective S/R: use flipped levels when available (resistance→support after breakout)
+          const mgResistBody = mvAnalysis?.effectiveResistance ?? mgResistBodyRaw
+          const mgSupportBody = mvAnalysis?.effectiveSupport ?? mgSupportBodyRaw
           // Dynamic thresholds: ATR-based (adapts to volatility regime)
           // Strong zone = 1×ATR from level, moderate zone = 2×ATR
           const mgStrongZone = mgAtr > 0 && midPrice > 0 ? mgAtr / midPrice : 0.01
@@ -9811,8 +9814,11 @@ class HyperliquidMMBot {
         // 3. Proximity to S/R (1h candle bodies, fallback HTF)
         const mgResistBody12h = mvAnalysis?.resistanceBody12h ?? 0
         const mgSupportBody12h = mvAnalysis?.supportBody12h ?? 0
-        const mgResistBody = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
-        const mgSupportBody = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+        const mgResistBodyRaw = mgResistBody12h > 0 ? mgResistBody12h : (mvAnalysis?.resistanceBody4h ?? 0)
+        const mgSupportBodyRaw = mgSupportBody12h > 0 ? mgSupportBody12h : (mvAnalysis?.supportBody4h ?? 0)
+        // Effective S/R: use flipped levels when available (resistance→support after breakout)
+        const mgResistBody = mvAnalysis?.effectiveResistance ?? mgResistBodyRaw
+        const mgSupportBody = mvAnalysis?.effectiveSupport ?? mgSupportBodyRaw
         const mgStrongZone = mgAtr > 0 && midPrice > 0 ? mgAtr / midPrice : 0.01
         const mgModerateZone = mgStrongZone * 2
 

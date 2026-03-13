@@ -313,6 +313,12 @@ export interface MomentumGuardConfig {
   smaSrTolerance: number                 // S/R tolerance multiplier — price <= support × tol or >= resistance / tol (default 1.05)
   smaCrossoverBidBoost: number           // Bid boost on golden cross near support (default 1.5)
   smaCrossoverAskBoost: number           // Ask boost on death cross near resistance (default 1.5)
+  // S/R Flip Detection: track when broken S/R flips role (resistance→support, support→resistance)
+  srFlipConfirmCandles?: number          // Candles needed to confirm flip (default 3)
+  srFlipMinExtensionATR?: number         // Min extension beyond S/R in ATR units to count as break (default 0.3)
+  srFlipRetestZoneATR?: number           // Distance from flipped level to count as retest (default 0.5)
+  srFlipDecayPerHour?: number            // Strength decay per hour (default 0.02 → 50h to zero)
+  srFlipMaxAgeHours?: number             // Max age of flipped level in hours (default 48)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {
@@ -400,6 +406,9 @@ export const MOMENTUM_GUARD_OVERRIDES: Record<string, Partial<MomentumGuardConfi
     smaSrTolerance: 1.10,               // Wider tolerance — kPEPE volatile, 10% zone around S/R
     smaCrossoverBidBoost: 1.8,          // Aggressive bid boost on golden cross near support
     smaCrossoverAskBoost: 1.8,          // Aggressive ask boost on death cross near resistance
+    // S/R Flip: volatile → faster confirm, shorter lifespan
+    srFlipConfirmCandles: 2,            // 2 candles (kPEPE moves fast, confirm earlier)
+    srFlipMaxAgeHours: 24,              // 24h max (volatile → flipped levels expire faster)
   },
   'VIRTUAL': {
     // Full S/R awareness — same pipeline as kPEPE but tuned for VIRTUAL's characteristics
