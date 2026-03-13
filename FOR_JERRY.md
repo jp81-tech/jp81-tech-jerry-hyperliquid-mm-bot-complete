@@ -11348,3 +11348,91 @@ Na silniejszym fundingu (+0.1%/8h = ~0.3%/dzien) to juz $3/dzien na $1000 pozycj
 
 5. **Multiplicative > additive.** Kazdy modul mnozy sizeMultipliers niezaleznie. Gdy funding lean i Momentum Guard sie zgadzaja (oba BEARISH) — efekt sie wzmacnia. Gdy sie nie zgadzaja — neutralizuja. System sam sie balansuje.
 
+---
+
+## Rozdzial 64: SR_REDUCTION x HOLD_FOR_TP — plynne przejscie w nowy kierunek przy S/R
+
+### Problem: 0 x cokolwiek = 0
+
+Wyobraz sobie sytuacje: bot trzyma LONG (HOLD_FOR_TP, bid=0 ask=0, czeka na Take Profit). Cena dochodzi do RESISTANCE. S/R Reduction mowi: "Hej, jestes przy oporze, zacznij zamykac longa!" i probuje boostowac asking side:
+
+```
+ask *= 1.2   // boost closing side
+```
+
+Ale `ask` bylo 0 (HOLD_FOR_TP wyzerowalo). I `0 * 1.2 = 0`. Bot nadal nie ma zadnych orderow. **Deadlock.**
+
+To byl Problem 1 — naprawiony wczesniej przez SET-if-zero pattern: gdy closing-side === 0, USTAW zamiast MNOZ.
+
+### Problem 2: SET za slaby
+
+Fix dzialal, ale tylko technicznie. Przy niskim progress (cena dopiero wchodzi w strefe S/R):
+
+```
+progress = 20% → boost = 1.0 + 0.20 * (2.0 - 1.0) = 1.2
+SET ask = 1.2
+```
+
+Bot ktory dopiero co HOLDOWNAL (zero orderow przez godziny) i wchodzi w strefe S/R dostaje `ask = 1.2`. To ledwo powyzej normalnego rozmiaru (1.0). Efekt? Bot "niby" zaczyna zamykac, ale tak delikatnie ze prawie nic sie nie dzieje.
+
+### Analogia: Hamulec reczny
+
+To jak prowadzenie samochodu z recznym. HOLD_FOR_TP to reczny zaciagniety do oporu (0 orderow). Gdy zblizasz sie do zakrectu (S/R), potrzebujesz go ZWOLNIC — ale stary fix puszczal go tylko o 20% (z 100% do 80% zaciagniecia). Nadal prawie stoisz.
+
+Nowy fix mowi: "Gdy puszczasz reczny przy S/R, minimum puszczenie to **polowa** (floor 2.0x)". Bot przechodzi z HOLD do agresywnego zamykania jednym ruchem.
+
+### Rozwiazanie: Floor = srClosingBoostMult
+
+Jedna linia roznic w kazdej z 4 lokalizacji:
+
+```typescript
+// BYLO:
+sizeMultipliers.ask = askBoost          // np. 1.2 przy 20% progress
+
+// JEST:
+sizeMultipliers.ask = Math.max(askBoost, momGuardConfig.srClosingBoostMult)  // min 2.0!
+```
+
+`Math.max(1.2, 2.0)` = 2.0. Bot zawsze dostaje minimum 2.0x na closing side gdy wychodzi z HOLD.
+
+### Dlaczego akurat 2.0?
+
+`srClosingBoostMult` to istniejacy parametr w konfiguracji, domyslnie 2.0. Jest juz testowany w produkcji — normalny grid (closing-side != 0) uzywa go przy 100% progress. Wiec wiemy ze 2.0 dziala bezpiecznie.
+
+### Pelny obraz przejscia
+
+**LONG near RESISTANCE (progress=50%):**
+
+| Strona | Stary fix | Nowy fix |
+|--------|-----------|----------|
+| bid (reduce longs) | `bid *= 0.5` = **0.5** | `bid *= 0.5` = **0.5** |
+| ask (close longs) | `ask = 1.5` (za slabo) | `ask = max(1.5, 2.0)` = **2.0** |
+| Ratio ask:bid | 3:1 | **4:1** |
+
+**Mirror — SHORT near SUPPORT (progress=50%):**
+
+| Strona | Stary fix | Nowy fix |
+|--------|-----------|----------|
+| ask (reduce shorts) | `ask *= 0.5` = **0.5** | `ask *= 0.5` = **0.5** |
+| bid (close shorts) | `bid = 1.5` (za slabo) | `bid = max(1.5, 2.0)` = **2.0** |
+| Ratio bid:ask | 3:1 | **4:1** |
+
+Ratio 4:1 znaczy ze bot sklada 4x wiecej orderow na closing side niz na opening side. To juz wystarczajaco agresywne zeby pozycja sie zamknela, a jednoczesnie zaczela budowac w nowym kierunku.
+
+### Co sie NIE zmienia
+
+- **Normalny grid** (closing-side != 0): nadal uzywa `closingSide *= boost` — zero zmian
+- **Progress-scaled boost na opening side**: nadal progress-scaled (bid *= 0.5 przy 50%)
+- **HOLD_FOR_TP grid removal** (linia ~10658): nie odpali bo closing-side > 0 (wlasnie to ustawilismy)
+- **inventorySlPanic** i "near S/R profitable": sa wzajemnie wykluczajace — bez konfliktu
+
+### Lekcje
+
+1. **Zero jest wyjatkowe.** `0 * X = 0` to zasada matematyki, ale w kodzie tradingowym to pulapka. Gdy wartosc moze byc zero (z innego systemu), kazde mnozenie musi miec guard.
+
+2. **Floor > stala wartosc.** Moglismy ustawic `ask = 2.0` na sztywno. Ale `Math.max(boost, floor)` jest lepsze — przy wysokim progress (100%) boost = 2.0 = floor, wiec nie tracimy nic. Przy niskim progress dostajemy floor. Uniwersalne.
+
+3. **Systemy nie znaja siebie nawzajem.** HOLD_FOR_TP nie wie o SR_REDUCTION. SR_REDUCTION nie wie o HOLD_FOR_TP. Kazdy robi swoje. Dlatego interakcje miedzy nimi moga tworzyc edge cases (jak `0 * boost = 0`). Warto patrzec na pipeline holistically — "co sie stanie gdy modul A wyzeruje cos, a modul B sprobuje to pomnoz?"
+
+4. **Testuj przejscia stanow.** Bot w HOLD to inny stan niz bot w normalnym MM. Przejscie miedzy nimi (HOLD → active) to moment gdzie bugi sie chowaja. Warto miec osobne testy dla kazdego przejscia.
+

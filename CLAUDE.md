@@ -53,6 +53,48 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 13 marca 2026
 
+### 130. SR_REDUCTION × HOLD_FOR_TP — minimum floor for SET-if-zero closing side (13.03)
+
+**Problem:** Gdy HOLD_FOR_TP zeruje closing-side (`bid=0` dla SHORT, `ask=0` dla LONG) i cena wchodzi w strefę S/R, SET-if-zero dawał `closingSide = progressBoost` (np. 1.2 przy 20% progress). Bot przechodzący z HOLD dostawał delikatny boost — za mało żeby płynnie przejść w market making z preferencją nowego kierunku.
+
+**Rozwiązanie:** Floor = `srClosingBoostMult` (default 2.0) dla SET-if-zero. Bot wychodzący z HOLD zawsze dostaje minimum 2.0× na closing side, niezależnie od progress.
+
+**Formuła:**
+```typescript
+const boost = 1.0 + (progressPct / 100) * (srClosingBoostMult - 1.0)
+if (closingSide === 0) {
+  closingSide = Math.max(boost, momGuardConfig.srClosingBoostMult)  // floor!
+} else {
+  closingSide *= boost  // normalny progress-scaled boost
+}
+```
+
+**Porównanie wartości (srClosingBoostMult=2.0):**
+
+| progress | boost | SET-if-zero (stary) | SET-if-zero (nowy, z floor) |
+|----------|-------|--------------------|-----------------------------|
+| 20% | 1.2 | 1.2 (za mało) | **2.0** (floor) |
+| 50% | 1.5 | 1.5 | **2.0** (floor) |
+| 80% | 1.8 | 1.8 | **2.0** (floor) |
+| 100% | 2.0 | 2.0 | 2.0 (boost = floor) |
+
+**Efekt na przejście kierunkowe:**
+
+LONG near RESISTANCE (progress=50%):
+- `bid *= 0.5` (reduce new longs)
+- `ask` = was 0 (HOLD_FOR_TP) → SET to `max(1.5, 2.0)` = **2.0**
+- Wynik: `bid=0.5, ask=2.0` → ratio 4:1 na korzyść asków → zamykanie LONGA + otwarcie shortów
+
+**4 lokalizacje zmienione w `src/mm_hl.ts`:**
+1. kPEPE: SHORT near SUPPORT → bid boost (line ~8913)
+2. kPEPE: LONG near RESISTANCE → ask boost (line ~8951)
+3. non-kPEPE: SHORT near SUPPORT → bid boost (line ~10104)
+4. non-kPEPE: LONG near RESISTANCE → ask boost (line ~10137)
+
+**Bezpieczeństwo:** Floor = `srClosingBoostMult` (2.0) — konserwatywna wartość, już testowana. Dotyczy TYLKO `closingSide === 0` (z HOLD_FOR_TP). Normalny grid nie zmieniony.
+
+**Pliki:** `src/mm_hl.ts` (+28/-4)
+
 ### 129. Funding Rate as Directional Lean when SM is NEUTRAL (13.03)
 
 **Problem:** Gdy SM nie daje wyraźnego kierunku (`smDir === null`, tryb PURE_MM/NEUTRAL), bot quotuje symetrycznie — zero preferencji kierunkowej. Ale funding rate zawiera informację o "crowdedness" rynku: funding > 0 = longs pay shorts (rynek crowded LONG), funding < 0 = shorts pay longs (rynek crowded SHORT). Bot mógłby zarabiać na funding payments lean'ując w stronę która **zarabia** na funding.
