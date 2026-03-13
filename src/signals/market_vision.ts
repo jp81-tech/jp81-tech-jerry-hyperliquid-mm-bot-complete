@@ -327,6 +327,7 @@ export type PairAnalysis = {
   nansenScore: number; // Contribution to bias
   recentVolumes15m: number[]; // Last 9 candle volumes for spike detection (sniper mode)
   recentVolumes1h: number[]; // Last 6 candle volumes for S/R flip breakout volume confirmation
+  recentRanges1h: number[]; // Last 6 candle ranges (high-low) for S/R flip breakout range confirmation
   effectiveSupport?: number;     // Flipped R→S level if between raw support and price
   effectiveResistance?: number;  // Flipped S→R level if between raw resistance and price
 };
@@ -485,6 +486,11 @@ export class MarketVisionService {
         // Recent 1h volumes for S/R flip breakout volume confirmation
         const recentVolumes1h = (candles && candles.length >= 6)
           ? candles.slice(-6).map(c => Number(c.v || 0))
+          : [];
+
+        // Recent 1h ranges (high-low) for S/R flip breakout range confirmation
+        const recentRanges1h = (candles && candles.length >= 6)
+          ? candles.slice(-6).map(c => Math.abs(Number(c.h || 0) - Number(c.l || 0)))
           : [];
 
         // C. STF Context: 15m Candles for "Golden Ticket" Entry
@@ -834,6 +840,7 @@ export class MarketVisionService {
           biasScore: Math.max(-100, Math.min(100, score)),
           recentVolumes15m,
           recentVolumes1h,
+          recentRanges1h,
         };
 
         this.pairAnalysis.set(pair, analysis);
@@ -898,12 +905,22 @@ export class MarketVisionService {
     const hasVolume = avgVol > 0 ? (lastVol >= avgVol * minVolMult) : true;
     const volRatioStr = avgVol > 0 && lastVol > 0 ? `${(lastVol / avgVol).toFixed(1)}x` : 'n/a';
 
+    // Range confirmation for breakout (filters stop hunts: high vol but small range)
+    const minRangeMult = config.srFlipMinRangeMult ?? 1.0;
+    const ranges = analysis.recentRanges1h || [];
+    const avgRange = ranges.length >= 3
+      ? ranges.slice(0, -1).reduce((a, b) => a + b, 0) / (ranges.length - 1)
+      : 0;
+    const lastRange = ranges.length > 0 ? ranges[ranges.length - 1] : 0;
+    const hasRange = avgRange > 0 ? (lastRange >= avgRange * minRangeMult) : true;
+    const rangeRatioStr = avgRange > 0 && lastRange > 0 ? `${(lastRange / avgRange).toFixed(1)}x` : 'n/a';
+
     // --- 1. Check for new breakout candidates ---
     const candidateKey = pair;
     let candidate = this.flipCandidates.get(candidateKey);
 
-    // Resistance breakout: candle closed ABOVE resistance + minExtATR + volume confirmed
-    if (price > rawResistance + minExtATR * atr && hasVolume) {
+    // Resistance breakout: candle closed ABOVE resistance + minExtATR + volume + range confirmed
+    if (price > rawResistance + minExtATR * atr && hasVolume && hasRange) {
       if (!candidate || candidate.type !== 'resistance_to_support') {
         candidate = {
           level: rawResistance,
@@ -918,8 +935,8 @@ export class MarketVisionService {
         candidate.maxExtension = Math.max(candidate.maxExtension, (price - rawResistance) / atr);
       }
     }
-    // Support breakdown: candle closed BELOW support - minExtATR + volume confirmed
-    else if (price < rawSupport - minExtATR * atr && hasVolume) {
+    // Support breakdown: candle closed BELOW support - minExtATR + volume + range confirmed
+    else if (price < rawSupport - minExtATR * atr && hasVolume && hasRange) {
       if (!candidate || candidate.type !== 'support_to_resistance') {
         candidate = {
           level: rawSupport,
@@ -962,7 +979,7 @@ export class MarketVisionService {
       this.flippedLevels.set(pair, levels);
       this.flipCandidates.delete(candidateKey);
 
-      console.log(`🔄 [SR_FLIP] ${pair}: ${candidate.type} confirmed — level=${candidate.level.toPrecision(5)} ext=${candidate.maxExtension.toFixed(2)}ATR confirms=${candidate.confirmationCount} vol=${volRatioStr}`);
+      console.log(`🔄 [SR_FLIP] ${pair}: ${candidate.type} confirmed — level=${candidate.level.toPrecision(5)} ext=${candidate.maxExtension.toFixed(2)}ATR confirms=${candidate.confirmationCount} vol=${volRatioStr} rng=${rangeRatioStr}`);
     }
 
     // --- 3. Update flipped levels: retests, decay, expiry ---

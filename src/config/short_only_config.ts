@@ -320,6 +320,7 @@ export interface MomentumGuardConfig {
   srFlipDecayPerHour?: number            // Strength decay per hour (default 0.02 → 50h to zero)
   srFlipMaxAgeHours?: number             // Max age of flipped level in hours (default 48)
   srFlipMinVolumeMult?: number           // Min volume multiplier vs avg for breakout confirmation (default 1.5)
+  srFlipMinRangeMult?: number            // Min range multiplier vs avg for breakout confirmation (default 1.0) — filters stop hunts (high vol, small range)
 }
 
 export const MOMENTUM_GUARD_DEFAULTS: MomentumGuardConfig = {

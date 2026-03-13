@@ -53,6 +53,30 @@ Bot do market-makingu na Hyperliquid z integracją Nansen dla smart money tracki
 
 ## Zmiany 13 marca 2026
 
+### 133. Volume/Range Ratio Filter — distinguish genuine breakouts from stop hunts (13.03)
+
+**Problem:** Volume gate (#132) filtruje breakouty na niskim volume (liquidity vacuum), ale nie łapie drugiego typu fakeoutu: **stop hunt / absorption** (wysoki volume, mały range = dużo volume absorbowane bez ruchu cenowego).
+
+| Typ ruchu | Volume | Range | Interpretacja |
+|-----------|--------|-------|---------------|
+| **Genuine breakout** | Wysoki | Duży | Prawdziwy ruch — dużo kupujących na wielu cenach |
+| **Liquidity vacuum** | Niski | Duży | Cena "przeskoczyła" gap — fakeout (łapany przez #132) |
+| **Stop hunt / absorption** | Wysoki | Mały | Dużo volume, mało ruchu = ktoś absorbuje — fakeout (**NOWY filtr**) |
+
+**Rozwiązanie:** Dodano `hasRange` gate obok istniejącego `hasVolume`. Oba muszą być `true` żeby breakout candidate powstał.
+
+**Zmiany:**
+1. **`recentRanges1h: number[]`** — nowe pole w `PairAnalysis`, ostatnie 6 candle ranges (high-low) z 1h candles. Zero nowych API calls.
+2. **`hasRange` gate** w `updateFlipDetection()` — last candle range >= avg × `srFlipMinRangeMult` (default 1.0). Pattern identyczny z `hasVolume`.
+3. **Breakout conditions** — zmienione z `&& hasVolume` na `&& hasVolume && hasRange` (obie lokalizacje: resistance breakout + support breakdown).
+4. **Enhanced log** — `rng=X.Xx` w confirmation message obok `vol=X.Xx`.
+
+**Config:** `srFlipMinRangeMult?: number` (default 1.0 = range musi być co najmniej równy średniej). Nie wymaga per-token override — 1.0 jest bezpieczny universalnie.
+
+**Backward compat:** `recentRanges1h` undefined → `hasRange = true` → zero zmian w zachowaniu.
+
+**Pliki:** `src/signals/market_vision.ts` (+20 LOC), `src/config/short_only_config.ts` (+1)
+
 ### 132. S/R Flip Detection v2 — volume confirmation + retest candle quality (13.03)
 
 **Problem:** Breakout detection sprawdza TYLKO cenę. Breakout na niskim volume to fakeout. Retest detection nie rozróżnia jakości — retest z rejection candle (pin bar) jest silniejszy niż zwykły dotyk.

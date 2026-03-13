@@ -11601,3 +11601,93 @@ kPEPE jest szybki i chaotyczny — breakouty potwierdza szybciej (2 swiece vs 3)
 
 5. **Gemini jako Code Reviewer.** Plan v2 powstal po porownaniu naszej implementacji z sugestiami Gemini. Z 5 sugestii wzialismy 2 (volume + candle quality), odrzucilismy 3 (level registry, touch-count, state machine). Umiejetnosc OCENY sugestii AI — co dodac, co zignorowac — jest wazniejsza niz sama implementacja. Nie kazda sugestia AI jest dobra. Ale te ktore filtruja false positives (volume) i wykorzystuja istniejace dane (candle patterns) sa prawie zawsze warte dodania.
 
+---
+
+## Chapter 57: Volume/Range Ratio — Dwa Wymiary Prawdziwego Breakoutu (13.03.2026)
+
+### Problem: Volume sam nie wystarczy
+
+W poprzednim rozdziale dodalismy volume gate do S/R Flip Detection. Breakout na niskim volume = fakeout (liquidity vacuum — cena "przeskoczyla" gap, nie ma glebokosci). Ale jest drugi typ fakeoutu, ktorego volume gate NIE lapie:
+
+**Stop hunt / absorption.** Duzo volume, ale cena prawie sie nie ruszyla.
+
+Wyobraz sobie taki scenariusz: cena dotyka resistance $100. Nagle 500 kontraktow zmienia rece w ciagu minuty. Volume OGROMNY. Ale cena? $100.05. Prawie zero ruchu. Co sie stalo?
+
+Ktos z grubym portfelem (albo HLP vault, albo market maker) absorbuje cala presje kupujacych. Kazdy kto probowal przebic resistance zostal "zjedzony" — jego bidy wypelnione, ale cena nie ruszyla bo po drugiej stronie stal ktos wiekszy. To FAKEOUT — cena zaraz wroci w dol.
+
+Nasz volume gate mowil: "volume wysoki? OK, breakout potwierdzony!" Ale to bylo zle — wysoki volume BEZ ruchu cenowego to ABSORPCJA, nie breakout.
+
+### Trzy typy ruchow
+
+To kluczowa tabelka z wideo MMT Labs o stop huntach:
+
+| Typ ruchu | Volume | Range (high-low) | Interpretacja |
+|-----------|--------|-------------------|---------------|
+| Genuine breakout | Wysoki | Duzy | Prawdziwy ruch. Duzo kupujacych NA WIELU CENACH. Cena faktycznie sie przesunela. |
+| Liquidity vacuum | Niski | Duzy | Cena przeskoczyla gap. Maly volume = brak glebokosci. Fakeout. |
+| Stop hunt / absorption | Wysoki | Maly | Duzo volume, zero ruchu. Ktos absorbuje. Fakeout. |
+
+Volume gate (#132) lapie vacuum. Range gate (#133) lapie stop hunt. Razem = dwa wymiary potwierdzenia.
+
+### Implementacja: lustrzany pattern
+
+Najpiekniejsza czesc tej zmiany: kod jest **lustrzanym odbiciem** istniejacego volume gate. Dokladnie ten sam pattern:
+
+```typescript
+// Volume gate (juz istnial):
+const volumes = analysis.recentVolumes1h || [];
+const avgVol = volumes.slice(0, -1).reduce((a, b) => a + b, 0) / (volumes.length - 1);
+const lastVol = volumes[volumes.length - 1];
+const hasVolume = lastVol >= avgVol * minVolMult;   // 1.5x default
+
+// Range gate (nowy, identyczny pattern):
+const ranges = analysis.recentRanges1h || [];
+const avgRange = ranges.slice(0, -1).reduce((a, b) => a + b, 0) / (ranges.length - 1);
+const lastRange = ranges[ranges.length - 1];
+const hasRange = lastRange >= avgRange * minRangeMult;  // 1.0x default
+```
+
+Porownaj linia po linii — to dokladnie to samo, tylko z innymi danymi wejsciowymi. Volume patrzy na "ile handlowano", range patrzy na "jak daleko cena sie ruszyla". Oba porownuja ostatnia swiecke do sredniej z poprzednich.
+
+### Czemu default range mult = 1.0 a nie 1.5?
+
+Volume mult jest 1.5x bo chcemy widziec WYZSZY niz normalnie volume na breakoucie — to potwierdza ze sa prawdziwi kupujacy/sprzedajacy. Range mult jest 1.0x bo chcemy tylko upewnic sie ze cena sie RUSZYLA co najmniej normalnie. Range MNIEJSZY niz normalny = podejrzany (absorpcja). Range NORMALNY lub WIEKSZY = OK.
+
+Gdybysmy dali 1.5x na range, blokowalismy zbyt wiele prawdziwych breakoutow — nie kazdy breakout ma range 50% wiekszy od sredniej. Ale kazdy prawdziwy breakout MA range przynajmniej rowny sredniej.
+
+### Backward compatibility — klucz do bezpiecznych zmian
+
+Oba gate'y maja ten sam guard:
+
+```typescript
+const hasRange = avgRange > 0 ? (lastRange >= avgRange * minRangeMult) : true;
+```
+
+`avgRange > 0` — jesli brak danych (swiezka para, brak candles), gate **przepuszcza** (`true`). Nowa para bez historii zachowuje sie dokladnie jak przed zmiana. Zero ryzyka regresji.
+
+To jest pattern ktory powinienes stosowac ZAWSZE gdy dodajesz nowy filtr do istniejacego systemu: **default = przepusc**. Filtr dziala tylko gdy ma dane. Bez danych = stare zachowanie. Nigdy nie blokuj czegos czego nie rozumiesz.
+
+### Co widzisz w logach
+
+Przed:
+```
+SR_FLIP kPEPE: resistance_to_support confirmed — level=0.003760 ext=0.45ATR confirms=3 vol=2.3x
+```
+
+Po:
+```
+SR_FLIP kPEPE: resistance_to_support confirmed — level=0.003760 ext=0.45ATR confirms=3 vol=2.3x rng=1.4x
+```
+
+Jedno dodatkowe pole: `rng=1.4x`. Range ostatniej swiecze = 1.4x sredniej. Powyej 1.0x = genuine. Ponizej 1.0x = zablokowany (stop hunt).
+
+### Lekcje
+
+1. **Jeden wymiar to za malo.** Volume mowi "ile", range mowi "jak daleko". Potrzebujesz obu zeby zrozumiec co naprawde sie dzieje. To samo dotyczy wielu systemow — RSI bez volume jest slaby, volume bez price action jest slepy. Lacze dwa wymiary daje jakosciowo lepszy sygnal niz kazdy z osobna.
+
+2. **Lustrzane patterny to najszybszy sposob na rozszerzanie systemu.** Zamiast wymyslac nowa architekture, znajdz istniejacy pattern ktory robi cos podobnego i skopiuj go z innymi danymi. Volume gate → Range gate. Ten sam schemat: compute avg, compare last, boolean result, string ratio. Mniej bledow, szybszy review, latwiejsze testowanie.
+
+3. **Multiplicative gates > additive scores.** `hasVolume && hasRange` jest prostsze i bardziej czytelne niz "oblicz vol/range ratio, porownaj z progiem, wazony score..." Dwa osobne filtry, kazdy z jasnym znaczeniem. Debugowanie: "ktory gate zablokowal?" jest trywialne. Score-based: "czemu score wyszedl 0.47 zamiast 0.50?" to krolikowa nora.
+
+4. **Nie rob nic czego nie musisz.** Plan sugerowl tez vol/range RATIO jako osobna metryke, footprint chart data, trapped trader detection, snapback trade (fade fakeouts). Odrzucilismy wszystko. Dwa proste filtry robia 90% roboty. Remaining 10% to edge cases ktore nie sa warte dodatkowej zlozonosci. YAGNI — You Ain't Gonna Need It.
+
